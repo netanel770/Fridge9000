@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+psycopg2-binary
+python-dotenv
+python-multipart
+ultralytics
+opencv-python
+pillow
+pandas

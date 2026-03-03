@@ -1,0 +1,23 @@
+{
+  "min_conf_default": 0.35,
+  "deny_labels": ["book", "chair", "person", "tv", "laptop", "dining table"],
+  "label_to_item": {
+    "bottle": "Milk",
+    "orange": "Orange",
+    "broccoli": "Broccoli",
+    "cup": "Yogurt",
+    "bowl": "Yogurt"
+  },
+  "item_to_category": {
+    "Milk": "Dairy",
+    "Eggs": "Dairy",
+    "Yogurt": "Dairy",
+    "Broccoli": "Vegetables",
+    "Orange": "Fruits"
+  },
+  "min_conf_by_item": {
+    "Milk": 0.45,
+    "Broccoli": 0.30,
+    "Orange": 0.35
+  }
+}
