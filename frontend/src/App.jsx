@@ -189,6 +189,8 @@ export default function App() {
         {/* Database Control Card */}
         <Card title="Database Control">
           <div style={{ marginBottom: 16, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+
+            {/* Reset Inventory Button */}
             <button
               onClick={async () => {
                 if (!window.confirm("Are you sure you want to reset the inventory?")) return;
@@ -209,37 +211,50 @@ export default function App() {
                 borderRadius: 8,
                 cursor: "pointer",
                 fontWeight: "bold",
-                flexGrow: 1,
                 minWidth: 150
               }}
             >
               🗑 Reset Inventory
             </button>
 
-            <input type="text" id="itemName" placeholder="Item Name" style={{ padding: 8, borderRadius: 6, border: "1px solid #ccc", flexGrow: 2, minWidth: 150 }} />
-            <input type="number" id="itemQty" placeholder="Qty" style={{ padding: 8, borderRadius: 6, border: "1px solid #ccc", width: 80 }} />
+            {/* Inputs */}
+            <input 
+              type="text" 
+              id="itemName" 
+              placeholder="Item Name" 
+              style={{ padding: 8, borderRadius: 6, border: "1px solid #ccc", flexGrow: 2, minWidth: 150 }} 
+            />
+            
+            <input 
+              type="number" 
+              id="itemQty" 
+              placeholder="Qty" 
+              min={0} 
+              style={{ padding: 8, borderRadius: 6, border: "1px solid #ccc", width: 80 }} 
+            />
+            
             <select id="itemStatus" style={{ padding: 8, borderRadius: 6, border: "1px solid #ccc", minWidth: 100 }}>
               <option value="OK">OK</option>
               <option value="LOW">LOW</option>
               <option value="MISSING">MISSING</option>
             </select>
 
+            {/* Add Button */}
             <button
               onClick={async () => {
                 const name = document.getElementById("itemName").value.trim();
                 const quantity = parseInt(document.getElementById("itemQty").value);
-                const status = document.getElementById("itemStatus").value;
-                if (!name || isNaN(quantity)) return alert("Name & Qty required");
-                const action = quantity > 0 ? "Added" : "Removed";
+                if (!name || isNaN(quantity) || quantity <= 0) return alert("Name & Qty (>0) required");
+
                 try {
                   const res = await fetch(`${API}/inventory/manual`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ item_name: name, action, quantity }),
+                    body: JSON.stringify({ item_name: name, action: "Added", quantity }),
                   });
                   const data = await res.json();
                   if (!data.ok) throw new Error(data.error);
-                  alert(`${name} updated! New qty: ${data.new_quantity}`);
+                  alert(`${name} added! New qty: ${data.new_quantity}`);
                   load();
                 } catch (e) {
                   alert("Failed: " + e.message);
@@ -253,11 +268,97 @@ export default function App() {
                 borderRadius: 8,
                 cursor: "pointer",
                 fontWeight: "bold",
+                minWidth: 100
+              }}
+            >
+              ➕ Add
+            </button>
+
+            {/* Remove Button */}
+            <button
+              onClick={async () => {
+                const name = document.getElementById("itemName").value.trim();
+                const quantity = parseInt(document.getElementById("itemQty").value);
+                if (!name || isNaN(quantity) || quantity <= 0) return alert("Name & Qty (>0) required");
+
+                try {
+                  const res = await fetch(`${API}/inventory/manual`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ item_name: name, action: "Removed", quantity }),
+                  });
+                  const data = await res.json();
+                  if (!data.ok) throw new Error(data.error);
+                  alert(`${name} removed! New qty: ${data.new_quantity}`);
+                  load();
+                } catch (e) {
+                  alert("Failed: " + e.message);
+                }
+              }}
+              style={{
+                padding: "10px 16px",
+                backgroundColor: "#ef4444",
+                color: "white",
+                border: "none",
+                borderRadius: 8,
+                cursor: "pointer",
+                fontWeight: "bold",
+                minWidth: 100
+              }}
+            >
+              ➖ Remove
+            </button>
+
+            {/* Update Button */}
+            <button
+              onClick={async () => {
+                const name = document.getElementById("itemName").value.trim();
+                const newQty = parseInt(document.getElementById("itemQty").value);
+                const status = document.getElementById("itemStatus").value;
+
+                if (!name || isNaN(newQty)) return alert("Name & Qty required");
+
+                // find the current quantity in inventory
+                const currentItem = inventory.find(i => i.name.toLowerCase() === name.toLowerCase());
+                const currentQty = currentItem ? currentItem.quantity : 0;
+                const diff = newQty - currentQty;
+
+                if (diff === 0) {
+                  alert("Quantity unchanged, nothing to update.");
+                  return;
+                }
+
+                const action = diff > 0 ? "Added" : "Removed";
+                const quantity = Math.abs(diff);
+
+                try {
+                  const res = await fetch(`${API}/inventory/manual`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ item_name: name, action, quantity }),
+                  });
+                  const data = await res.json();
+                  if (!data.ok) throw new Error(data.error);
+                  alert(`${name} updated! New qty: ${data.new_quantity}`);
+                  load(); // refresh inventory table
+                } catch (e) {
+                  alert("Failed: " + e.message);
+                }
+              }}
+              style={{
+                padding: "10px 16px",
+                backgroundColor: "#f59e0b",
+                color: "white",
+                border: "none",
+                borderRadius: 8,
+                cursor: "pointer",
+                fontWeight: "bold",
                 minWidth: 140
               }}
             >
-              ➕ Add / Update Item
+              🔄 Update Item
             </button>
+            
           </div>
         </Card>
 
