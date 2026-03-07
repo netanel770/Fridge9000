@@ -7,3 +7,4 @@ ultralytics
 opencv-python
 pillow
 pandas
+python-multipart

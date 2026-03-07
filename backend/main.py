@@ -31,7 +31,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 DATABASE_URL = os.getenv("DATABASE_URL")
-MODEL = YOLO("yolo11s.pt")
+MODEL = YOLO("best.pt")
 RULES_PATH = os.path.join(os.path.dirname(__file__), "rules.json")
 _RULES_CACHE = None
 def get_conn():
@@ -289,6 +289,105 @@ def create_scan(payload: Dict[str, Any]):
             conn.commit()
 
     return {"ok": True, "scan_id": scan_id, "created_at": created_at, "delta_skipped": delta_skipped}
+
+
+@app.post("/inventory/manual")
+def manual_inventory(payload: Dict[str, Any]):
+    """
+    Manually add or remove items without a scan.
+
+    payload example:
+    {
+        "item_name": "Milk",
+        "action": "Added",   # or "Removed"
+        "quantity": 1        # optional, default 1
+    }
+    """
+    item_name = payload.get("item_name")
+    action = payload.get("action")
+    quantity_change = int(payload.get("quantity", 1))
+
+    if not item_name or action not in ("Added", "Removed"):
+        return {"ok": False, "error": "item_name and action ('Added' or 'Removed') required"}
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Ensure item exists
+            cur.execute("SELECT id, category FROM items WHERE name = %s;", (item_name,))
+            row = cur.fetchone()
+            if row:
+                item_id = row["id"]
+            else:
+                # Insert item if not exists, default category "General"
+                cur.execute(
+                    "INSERT INTO items(name, category) VALUES (%s, %s) RETURNING id;",
+                    (item_name, "General"),
+                )
+                item_id = cur.fetchone()["id"]
+
+            # Update inventory
+            cur.execute("SELECT quantity FROM inventory WHERE item_id = %s;", (item_id,))
+            inv = cur.fetchone()
+            if inv:
+                current_qty = inv["quantity"]
+            else:
+                # Create inventory entry if not exists
+                current_qty = 0
+                cur.execute(
+                    "INSERT INTO inventory(item_id, quantity, status) VALUES (%s, 0, 'MISSING');",
+                    (item_id,),
+                )
+
+            if action == "Added":
+                new_qty = current_qty + quantity_change
+            else:  # Removed
+                new_qty = max(0, current_qty - quantity_change)
+
+            # Determine status
+            if new_qty == 0:
+                status = "MISSING"
+            elif new_qty == 1:
+                status = "LOW"
+            else:
+                status = "OK"
+
+            # Update inventory
+            cur.execute(
+                "UPDATE inventory SET quantity=%s, status=%s, last_updated=NOW() WHERE item_id=%s;",
+                (new_qty, status, item_id),
+            )
+
+            # Log event (optional, scan_id=None)
+            cur.execute(
+                "INSERT INTO events(scan_id, item_id, action, confidence) VALUES (%s,%s,%s,%s) RETURNING id;",
+                (None, item_id, action, 1.0),
+            )
+            event_id = cur.fetchone()["id"]
+
+            conn.commit()
+
+    return {"ok": True, "item_id": item_id, "new_quantity": new_qty, "status": status, "event_id": event_id}
+
+
+
+@app.post("/inventory/reset")
+def reset_inventory():
+    """
+    Completely clears the inventory and related events.
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                # Optionally clear events first to avoid FK issues
+                cur.execute("DELETE FROM events;")
+                # Clear inventory
+                cur.execute("DELETE FROM inventory;")
+                # Optional: clear items table if you want a full reset
+                # cur.execute("DELETE FROM items;")
+                conn.commit()
+        return {"ok": True, "message": "Inventory has been reset."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/events")
