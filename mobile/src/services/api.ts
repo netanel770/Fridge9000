@@ -1,4 +1,7 @@
 import { API_BASE_URL } from "./config";
+import { Platform } from "react-native";
+
+
 import type {
   InventoryItem,
   AlertItem,
@@ -55,19 +58,28 @@ export async function submitReview(scanId: number, items: ReviewItem[]) {
   return handleJsonResponse(res);
 }
 
-export async function uploadScanImage(imageUri: string): Promise<UploadScanResponse> {
+export async function uploadScanImage(imageUri: string) {
   const formData = new FormData();
 
-  formData.append("file", {
-    uri: imageUri,
-    name: "fridge-scan.jpg",
-    type: "image/jpeg",
-  } as any);
+  if (Platform.OS === "web") {
+    // PC / browser case
+    const response = await fetch(imageUri);
+    const blob = await response.blob();
+
+    formData.append("file", blob, "fridge-scan.jpg");
+  } else {
+    // Mobile (Expo)
+    formData.append("file", {
+      uri: imageUri,
+      name: "fridge-scan.jpg",
+      type: "image/jpeg",
+    } as any);
+  }
 
   const res = await fetch(`${API_BASE_URL}/door/closed/upload`, {
     method: "POST",
     body: formData,
   });
 
-  return handleJsonResponse<UploadScanResponse>(res);
+  return handleJsonResponse(res);
 }
