@@ -1,6 +1,8 @@
 -- Core tables
 CREATE EXTENSION IF NOT EXISTS citext;
 
+
+
 -- Items
 CREATE TABLE IF NOT EXISTS items (
   id SERIAL PRIMARY KEY,
@@ -17,8 +19,9 @@ CREATE TABLE IF NOT EXISTS inventory (
 );
 
 -- Scans
-CREATE TABLE IF NOT EXISTS scans (
+CREATE TABLE scans (
   id SERIAL PRIMARY KEY,
+  request_id TEXT NOT NULL UNIQUE,
   created_at TIMESTAMP NOT NULL DEFAULT NOW(),
   image_ref TEXT,
   delta_skipped BOOLEAN NOT NULL DEFAULT FALSE,

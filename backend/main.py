@@ -460,132 +460,134 @@ def create_event(payload: Dict[str, Any]):
 
 @app.post("/door/closed")
 def door_closed(payload: Dict[str, Any]):
-    """
-    מפעיל את המערכת: יצירת סריקה, הרצת מודל, החלת חוקים (Rules Engine),
-    חישוב דלתא (הוספה/הסרה) ועדכון המלאי.
-    """
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(1);")
+
     image_ref = payload.get("image_ref")
     conf = float(payload.get("conf", 0.25))
+
     if not image_ref:
         return {"ok": False, "error": "image_ref required"}
 
-    # 1. מציאת ה-ID של הסריקה הקודמת לצורך השוואה
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT id FROM scans ORDER BY created_at DESC LIMIT 1;")
-            prev = cur.fetchone()
-            prev_scan_id = prev["id"] if prev else None
-
-    # 2. יצירת רשומה חדשה לסריקה הנוכחית
+    # -------------------------------
+    # 1. CREATE SCAN (NO prev_scan_id)
+    # -------------------------------
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO scans(image_ref, delta_skipped, prev_scan_id) VALUES (%s, %s, %s) RETURNING id;",
-                (image_ref, False, prev_scan_id),
+                """
+                INSERT INTO scans(image_ref, delta_skipped)
+                VALUES (%s, %s)
+                RETURNING id;
+                """,
+                (image_ref, False),
             )
             scan_id = cur.fetchone()[0]
             conn.commit()
 
-    # 3. הרצת מודל ה-AI (Inference)
+    # -------------------------------
+    # 2. RUN AI
+    # -------------------------------
     infer_res = infer({"image_ref": image_ref, "conf": conf})
+
     if not infer_res.get("ok"):
         return {"ok": False, "error": infer_res.get("error"), "scan_id": scan_id}
 
     raw_dets = infer_res["detections"]
-
-    # --- שלב ה-RULES ENGINE: כאן הקסם קורה ---
-    # אנחנו מעבירים את הזיהויים הגולמיים דרך פונקציית החוקים
     filtered_dets = apply_rules(raw_dets)
-    
-    # יצירת סט של שמות פריטים מנורמלים (למשל: {"Milk", "Yogurt"})
-    current_items = set([d["item_name"] for d in filtered_dets])
-    # ----------------------------------------
 
+    current_items = set(d["item_name"] for d in filtered_dets)
+    conf_map = {d["item_name"]: d["confidence"] for d in filtered_dets}
+
+    # -------------------------------
+    # 3. DB UPDATE (NO PREV SCAN COMPARISON)
+    # -------------------------------
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # 4. שמירת הזיהויים המנורמלים ב-scan_detections (כדי שה-Review UI יראה אותם נקיים)
+
+            # save detections
             for d in filtered_dets:
                 cur.execute(
-                    "INSERT INTO scan_detections(scan_id, label, confidence) VALUES (%s,%s,%s);",
+                    """
+                    INSERT INTO scan_detections(scan_id, label, confidence)
+                    VALUES (%s,%s,%s);
+                    """,
                     (scan_id, d["item_name"], d["confidence"]),
                 )
 
-            # 5. טעינת הפריטים שהיו בסריקה הקודמת לצורך השוואה
-            prev_items = set()
-            if prev_scan_id:
-                cur.execute(
-                    "SELECT label FROM scan_detections WHERE scan_id=%s;",
-                    (prev_scan_id,),
-                )
-                prev_rows = cur.fetchall()
-                prev_items = set([r["label"] for r in prev_rows])
+            added = list(current_items)
+            removed = []  # ❗ no previous scan => no safe diff
 
-            # 6. חישוב מה נוסף ומה הוסר (Delta)
-            added = list(current_items - prev_items)
-            removed = list(prev_items - current_items)
-
-            # פונקציית עזר להבטחת קיום פריט בטבלת items עם קטגוריה נכונה מהחוקים
             def ensure_item(name: str):
                 rules = load_rules()
                 category = rules["item_to_category"].get(name, "General")
-                
+
                 cur.execute("SELECT id FROM items WHERE name=%s;", (name,))
                 row = cur.fetchone()
+
                 if row:
                     return row["id"]
-                
+
                 cur.execute(
-                    "INSERT INTO items(name, category) VALUES (%s, %s) RETURNING id;",
+                    "INSERT INTO items(name, category) VALUES (%s,%s) RETURNING id;",
                     (name, category),
                 )
                 return cur.fetchone()["id"]
 
-            # פונקציית עזר להחלת אירוע (Added/Removed) ועדכון מלאי
             def apply_event(action: str, name: str, confidence: float):
                 item_id = ensure_item(name)
 
-                # הזרקת האירוע ללוג
                 cur.execute(
-                    "INSERT INTO events(scan_id, item_id, action, confidence) VALUES (%s,%s,%s,%s);",
+                    """
+                    INSERT INTO events(scan_id, item_id, action, confidence)
+                    VALUES (%s,%s,%s,%s);
+                    """,
                     (scan_id, item_id, action, confidence),
                 )
 
-                # חישוב כמות חדשה
-                cur.execute("SELECT quantity FROM inventory WHERE item_id=%s;", (item_id,))
+                cur.execute(
+                    "SELECT quantity FROM inventory WHERE item_id=%s;",
+                    (item_id,),
+                )
                 inv = cur.fetchone()
-                quantity = inv["quantity"] if inv else 0
-                
+                qty = inv["quantity"] if inv else 0
+
                 if not inv:
-                    cur.execute("INSERT INTO inventory(item_id, quantity) VALUES (%s, 0);", (item_id,))
+                    cur.execute(
+                        "INSERT INTO inventory(item_id, quantity) VALUES (%s,0);",
+                        (item_id,),
+                    )
 
                 if action == "Added":
-                    quantity += 1
-                elif action == "Removed":
-                    quantity = max(0, quantity - 1)
+                    qty += 1
+                else:
+                    qty = max(0, qty - 1)
 
-                # קביעת סטטוס לפי כמות
-                status = "MISSING" if quantity == 0 else "LOW" if quantity == 1 else "OK"
+                status = "MISSING" if qty == 0 else "LOW" if qty == 1 else "OK"
 
                 cur.execute(
-                    "UPDATE inventory SET quantity=%s, status=%s, last_updated=NOW() WHERE item_id=%s;",
-                    (quantity, status, item_id),
+                    """
+                    UPDATE inventory
+                    SET quantity=%s, status=%s, last_updated=NOW()
+                    WHERE item_id=%s;
+                    """,
+                    (qty, status, item_id),
                 )
 
-            # 7. יצירת האירועים בפועל
+            # apply events
             conf_map = {d["item_name"]: d["confidence"] for d in filtered_dets}
 
             for item in added:
                 apply_event("Added", item, conf_map.get(item, 0.5))
-            for item in removed:
-                apply_event("Removed", item, 0.5)
 
             conn.commit()
 
     return {
         "ok": True,
         "scan_id": scan_id,
-        "prev_scan_id": prev_scan_id,
         "added": added,
         "removed": removed,
-        "events_created": len(added) + len(removed),
+        "events_created": len(added),
     }
