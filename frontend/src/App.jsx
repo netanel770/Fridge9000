@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import ReceiptUpload from "./components/ReceiptUpload.jsx";
 
 const API = "http://localhost:8000";
 
@@ -184,6 +185,11 @@ export default function App() {
           >
             {loading ? "Processing..." : "📸 Upload & Run CV"}
           </button>
+        </Card>
+
+        {/* Receipt PDF Upload Card */}
+        <Card title="Receipt PDF Upload">
+          <ReceiptUpload onSubmitted={load} />
         </Card>
 
         {/* Database Control Card */}

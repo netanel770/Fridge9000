@@ -19,6 +19,7 @@ export default function RootLayout() {
         <Stack.Screen name="events" options={{ title: "Events" }} />
         <Stack.Screen name="scan" options={{ title: "Scan Fridge" }} />
         <Stack.Screen name="review" options={{ title: "Review Detections" }} />
+        <Stack.Screen name="receipt" options={{ title: "Receipt Upload" }} />
       </Stack>
     </>
   );

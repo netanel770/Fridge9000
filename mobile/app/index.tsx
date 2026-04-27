@@ -70,6 +70,10 @@ export default function HomeScreen() {
             <Text style={styles.primaryButtonText}>Scan Fridge</Text>
           </Pressable>
 
+          <Pressable style={styles.secondaryButton} onPress={() => router.push("/receipt")}>
+            <Text style={styles.secondaryButtonText}>📄 Upload Receipt</Text>
+          </Pressable>
+
           <View style={styles.grid}>
             <Pressable style={styles.navCard} onPress={() => router.push("/inventory")}>
               <Text style={styles.navTitle}>Inventory</Text>
