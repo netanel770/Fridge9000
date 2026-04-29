@@ -55,6 +55,35 @@ export async function submitReview(scanId: number, items: ReviewItem[]) {
   return handleJsonResponse(res);
 }
 
+export type ManualInventoryResponse = {
+  ok: boolean;
+  item_id?: number;
+  new_quantity?: number;
+  error?: string;
+};
+
+export async function addInventoryItem(
+  itemName: string,
+  quantity: number,
+  signal?: AbortSignal,
+): Promise<ManualInventoryResponse> {
+  const res = await fetch(`${API_BASE_URL}/inventory/manual`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      item_name: itemName,
+      action: "Added",
+      quantity,
+    }),
+    signal,
+  });
+  const data = (await res.json()) as ManualInventoryResponse;
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || `Request failed: ${res.status}`);
+  }
+  return data;
+}
+
 export async function uploadScanImage(imageUri: string): Promise<UploadScanResponse> {
   const formData = new FormData();
 
