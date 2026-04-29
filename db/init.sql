@@ -58,19 +58,6 @@ CREATE TABLE IF NOT EXISTS detection_reviews (
 
 CREATE INDEX IF NOT EXISTS idx_detection_reviews_scan_id ON detection_reviews(scan_id);
 
--- Seed (safe / idempotent)
-INSERT INTO items(name, category) VALUES
-('Milk','Dairy'),
-('Eggs','Dairy'),
-('Yogurt','Dairy'),
-('Broccoli','Vegetables')
-ON CONFLICT (name) DO NOTHING;
 
--- Seed inventory
-INSERT INTO inventory(item_id, quantity, status)
-SELECT id, 0, 'MISSING' FROM items WHERE name IN ('Eggs','Milk')
-ON CONFLICT (item_id) DO NOTHING;
 
-INSERT INTO inventory(item_id, quantity, status)
-SELECT id, 1, 'OK' FROM items WHERE name IN ('Yogurt','Broccoli')
-ON CONFLICT (item_id) DO NOTHING;
+

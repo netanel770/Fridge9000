@@ -17,8 +17,8 @@ export default function RootLayout() {
         <Stack.Screen name="inventory" options={{ title: "Inventory" }} />
         <Stack.Screen name="alerts" options={{ title: "Alerts" }} />
         <Stack.Screen name="events" options={{ title: "Events" }} />
-        <Stack.Screen name="scan" options={{ title: "Scan Fridge" }} />
-        <Stack.Screen name="review" options={{ title: "Review Detections" }} />
+        <Stack.Screen name="review" />
+        <Stack.Screen name="update-inventory" options={{ title: "Update Inventory" }} />
       </Stack>
     </>
   );

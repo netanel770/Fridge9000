@@ -458,6 +458,7 @@ def create_event(payload: Dict[str, Any]):
 
 @app.post("/door/closed")
 def door_closed(payload: Dict[str, Any]):
+
     """
     מפעיל את המערכת: יצירת סריקה, הרצת מודל, החלת חוקים (Rules Engine),
     חישוב דלתא (הוספה/הסרה) ועדכון המלאי.
@@ -587,3 +588,137 @@ def door_closed(payload: Dict[str, Any]):
         "removed": removed,
         "events_created": len(added) + len(removed),
     }
+
+@app.post("/inventory/image/update")
+async def update_inventory_by_image(
+    action: str,
+    file: UploadFile = File(...)
+):
+    if action not in ("Added", "Removed"):
+        raise HTTPException(status_code=400, detail="action must be Added or Removed")
+
+    try:
+        ext = file.filename.split(".")[-1]
+        filename = f"{uuid.uuid4()}.{ext}"
+        file_path = os.path.join(UPLOAD_DIR, filename)
+
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+
+        infer_res = infer({"image_ref": file_path, "conf": 0.25})
+
+        if not infer_res.get("ok"):
+            raise HTTPException(status_code=500, detail=infer_res.get("error"))
+
+        filtered_dets = apply_rules(infer_res["detections"])
+
+        if not filtered_dets:
+            raise HTTPException(status_code=400, detail="No valid items detected in image")
+
+        items_to_update = {}
+        for d in filtered_dets:
+            name = d["item_name"]
+            if name not in items_to_update:
+                items_to_update[name] = {
+                    "category": d["category"],
+                    "confidence": d["confidence"],
+                    "count": 1,
+                }
+            else:
+                items_to_update[name]["count"] += 1
+                items_to_update[name]["confidence"] = max(
+                    items_to_update[name]["confidence"],
+                    d["confidence"]
+                )
+
+        updated_items = []
+
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                for name, data in items_to_update.items():
+                    cur.execute("SELECT id FROM items WHERE name = %s;", (name,))
+                    item = cur.fetchone()
+
+                    if not item:
+                        if action == "Removed":
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"{name} is not in inventory"
+                            )
+
+                        cur.execute(
+                            "INSERT INTO items(name, category) VALUES (%s, %s) RETURNING id;",
+                            (name, data["category"]),
+                        )
+                        item_id = cur.fetchone()["id"]
+                    else:
+                        item_id = item["id"]
+
+                    cur.execute(
+                        "SELECT quantity FROM inventory WHERE item_id = %s;",
+                        (item_id,),
+                    )
+                    inv = cur.fetchone()
+                    current_qty = inv["quantity"] if inv else 0
+
+                    if action == "Removed" and current_qty <= 0:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"{name} is not in inventory"
+                        )
+
+                    if action == "Removed" and current_qty < data["count"]:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Not enough {name} in inventory"
+                        )
+
+                    if not inv:
+                        cur.execute(
+                            "INSERT INTO inventory(item_id, quantity, status) VALUES (%s, 0, 'MISSING');",
+                            (item_id,),
+                        )
+
+                    if action == "Added":
+                        new_qty = current_qty + data["count"]
+                    else:
+                        new_qty = current_qty - data["count"]
+
+                    status = "MISSING" if new_qty == 0 else "LOW" if new_qty == 1 else "OK"
+
+                    cur.execute(
+                        """
+                        UPDATE inventory
+                        SET quantity = %s, status = %s, last_updated = NOW()
+                        WHERE item_id = %s;
+                        """,
+                        (new_qty, status, item_id),
+                    )
+
+                    cur.execute(
+                        """
+                        INSERT INTO events(scan_id, item_id, action, confidence)
+                        VALUES (%s, %s, %s, %s);
+                        """,
+                        (None, item_id, action, data["confidence"]),
+                    )
+
+                    updated_items.append({
+                        "name": name,
+                        "action": action,
+                        "quantity_changed": data["count"],
+                        "new_quantity": new_qty,
+                    })
+
+                conn.commit()
+
+        return {
+            "ok": True,
+            "action": action,
+            "updated_items": updated_items,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

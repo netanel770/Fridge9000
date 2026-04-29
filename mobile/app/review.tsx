@@ -118,9 +118,8 @@ export default function ReviewScreen() {
             <Text style={styles.label}>Final label</Text>
             <TextInput
               value={item.final_label}
-              onChangeText={(text) => updateItem(index, "final_label", text)}
-              style={styles.input}
-              placeholder="Edit label"
+              style={[styles.input, styles.disabledInput]}
+              editable={false}
             />
 
             <View style={styles.switchRow}>
@@ -232,6 +231,10 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontWeight: "700",
   },
+  disabledInput: {
+  backgroundColor: "#f3f4f6",
+  color: "#6b7280",
+},
   empty: {
     textAlign: "center",
     marginTop: 30,

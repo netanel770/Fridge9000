@@ -71,3 +71,29 @@ export async function uploadScanImage(imageUri: string): Promise<UploadScanRespo
 
   return handleJsonResponse<UploadScanResponse>(res);
 }
+
+export async function updateInventoryByImage(
+  imageUri: string,
+  action: "Added" | "Removed"
+) {
+  const formData = new FormData();
+
+  formData.append("file", {
+    uri: imageUri,
+    name: "inventory-image.jpg",
+    type: "image/jpeg",
+  } as any);
+
+  const res = await fetch(`${API_BASE_URL}/inventory/image/update?action=${action}`, {
+    method: "POST",
+    body: formData,
+  });
+
+  const data = await res.json();
+
+  if (!res.ok) {
+    throw new Error(data.detail || data.error || "Image update failed");
+  }
+
+  return data;
+}

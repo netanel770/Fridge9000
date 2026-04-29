@@ -66,8 +66,8 @@ export default function HomeScreen() {
             </Text>
           </View>
 
-          <Pressable style={styles.primaryButton} onPress={() => router.push("/scan")}>
-            <Text style={styles.primaryButtonText}>Scan Fridge</Text>
+          <Pressable style={styles.primaryButton} onPress={() => router.push("/update-inventory")}>
+            <Text style={styles.primaryButtonText}>Update Inventory</Text>
           </Pressable>
 
           <View style={styles.grid}>
