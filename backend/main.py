@@ -98,23 +98,33 @@ def apply_rules(detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 # ------------------ AI ------------------
 
-def infer(image_ref: str, conf: float = 0.25):
+def infer(image_ref: str, conf: float = 0.5):
     img = cv2.imread(image_ref)
     if img is None:
         return {"ok": False, "error": "image not found"}
 
-    results = MODEL.predict(img, conf=conf, verbose=False)[0]
+    # Strong Non-Max Suppression handled by YOLO itself
+    results = MODEL.predict(
+        img,
+        conf=conf,
+        iou=0.45,           # tighter suppression removes duplicates
+        agnostic_nms=True,  # prevents class-level duplicate stacking issues
+        verbose=False
+    )[0]
 
     detections = []
 
-    if results.boxes is not None:
-        for b in results.boxes:
-            cls = int(b.cls[0].item())
-            label = MODEL.names.get(cls, str(cls))
-            detections.append({
-                "label": label,
-                "confidence": float(b.conf[0].item())
-            })
+    if results.boxes is None:
+        return {"ok": True, "detections": []}
+
+    for b in results.boxes:
+        cls = int(b.cls[0].item())
+        label = MODEL.names.get(cls, str(cls))
+
+        detections.append({
+            "label": label,
+            "confidence": float(b.conf[0].item())
+        })
 
     return {"ok": True, "detections": detections}
 
@@ -174,10 +184,11 @@ async def upload(file: UploadFile = File(...)):
 @app.post("/door/closed")
 def process_scan(payload: Dict[str, Any]):
     image_ref = payload.get("image_ref")
-    conf = float(payload.get("conf", 0.25))
+    conf = float(payload.get("conf", 0.5))
 
     if not image_ref:
         return {"ok": False, "error": "image_ref required"}
+
 
     # ATOMIC TRANSACTION
     with get_conn() as conn:
@@ -197,47 +208,41 @@ def process_scan(payload: Dict[str, Any]):
                 return res
 
             filtered = apply_rules(res["detections"])
-            counts = Counter(d["item_name"] for d in filtered)
+
+            label_conf = {}
+            counts = Counter()
+
+            for d in filtered:
+                name = d["item_name"]
+                conf = float(d["confidence"])
+
+                counts[name] += 1
+                label_conf[name] = max(label_conf.get(name, 0), conf)
 
             # 3. PROCESS DETECTIONS
             for name, qty in counts.items():
-
                 item_id = ensure_item(cur, name)
 
-                # log raw detection per scan
+                confidence = float(label_conf.get(name, 1.0))
+
+                # log raw detection per scan (ONLY ONCE PER ITEM)
                 cur.execute(
                     """
                     INSERT INTO scan_detections(scan_id, label, confidence)
                     VALUES (%s,%s,%s);
                     """,
-                    (scan_id, name, 1.0),
+                    (scan_id, name, confidence),
                 )
 
-                # ATOMIC ACCUMULATION
-                cur.execute("""
-                    INSERT INTO inventory(item_id, quantity, status)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (item_id)
-                    DO UPDATE SET
-                        quantity = inventory.quantity + EXCLUDED.quantity,
-                        status = CASE
-                            WHEN inventory.quantity + EXCLUDED.quantity <= 0 THEN 'MISSING'
-                            WHEN inventory.quantity + EXCLUDED.quantity = 1 THEN 'LOW'
-                            ELSE 'OK'
-                        END,
-                        last_updated = NOW()
-                    RETURNING quantity;
-                """, (item_id, qty, compute_status(qty)))
-
-                new_qty = cur.fetchone()["quantity"]
-
-                # EVENT LOG
+                # EVENT LOG (correct confidence)
                 cur.execute("""
                     INSERT INTO events(scan_id, item_id, action, confidence)
                     VALUES (%s,%s,%s,%s);
-                """, (scan_id, item_id, "DETECTED", 1.0))
+                """, (scan_id, item_id, "DETECTED", confidence))
 
             conn.commit()
+
+    print("PROCESS SCAN HIT:", scan_id)
 
     return {
         "ok": True,
@@ -253,14 +258,15 @@ def get_scan_detections(scan_id: int):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                SELECT label, COUNT(*) as count
+                SELECT 
+                    label, 
+                    COUNT(*)::int AS count
                 FROM scan_detections
                 WHERE scan_id = %s
                 GROUP BY label
                 ORDER BY count DESC;
             """, (scan_id,))
             return cur.fetchall()
-
 
 
 @app.get("/scans/latest")
@@ -278,8 +284,6 @@ def latest_scan():
 
 
 
-
-
 @app.post("/scans/{scan_id}/review")
 def review_scan(scan_id: int, payload: Dict[str, Any]):
     items = payload.get("items", [])
@@ -290,8 +294,7 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
-            included_labels = []
-
+            # 1. log reviews (unchanged structure)
             for it in items:
                 orig = it.get("original_label")
                 final = it.get("final_label", orig)
@@ -302,17 +305,22 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
 
                 final = final.strip().capitalize()
 
-                # log review decision (using EVENTS table)
                 cur.execute("""
-                    INSERT INTO events(scan_id, item_id, action, confidence)
-                    VALUES (%s, NULL, %s, %s);
-                """, (scan_id, f"REVIEW_{'INCLUDED' if included else 'EXCLUDED'}", 1.0))
+                    INSERT INTO detection_reviews(scan_id, original_label, final_label, included)
+                    VALUES (%s,%s,%s,%s);
+                """, (scan_id, orig, final, included))
 
-                if included:
-                    included_labels.append(final)
+            # 2. rebuild included labels (NO set, no dedup)
+            included_labels = []
 
-            # rebuild inventory snapshot (LIKE OLD SYSTEM)
-            for name in set(included_labels):
+            for it in items:
+                if it.get("included", True):
+                    label = it.get("final_label", it.get("original_label"))
+                    if label:
+                        included_labels.append(label.strip().capitalize())
+
+            # 3. update inventory (ACCUMULATION system now)
+            for name in included_labels:
 
                 cur.execute("SELECT id FROM items WHERE name=%s;", (name,))
                 row = cur.fetchone()
@@ -326,14 +334,17 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
                     )
                     item_id = cur.fetchone()["id"]
 
-                # SNAPSHOT behavior (overwrite, not increment)
                 cur.execute("""
                     INSERT INTO inventory(item_id, quantity, status)
                     VALUES (%s, %s, %s)
                     ON CONFLICT (item_id)
                     DO UPDATE SET
                         quantity = inventory.quantity + EXCLUDED.quantity,
-                        status = EXCLUDED.status,
+                        status = CASE
+                            WHEN inventory.quantity + EXCLUDED.quantity <= 0 THEN 'MISSING'
+                            WHEN inventory.quantity + EXCLUDED.quantity = 1 THEN 'LOW'
+                            ELSE 'OK'
+                        END,
                         last_updated = NOW();
                 """, (item_id, 1, "OK"))
 

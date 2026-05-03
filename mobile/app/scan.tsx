@@ -47,15 +47,11 @@ export default function ScanScreen() {
         throw new Error("Backend did not return scan_id");
       }
 
-      console.log("📦 backend response:", res);
-      console.log("➡️ navigating with scan_id:", res.scan_id);
+      console.log(" backend response:", res);
+      console.log(" navigating with scan_id:", res.scan_id);
 
-      router.push({
-        pathname: "/review",
-        params: {
-          scan_id: String(res.scan_id),
-        },
-      });
+      setImageUri(null);
+      router.replace(`/review?scan_id=${res.scan_id}`);
 
       // optional cleanup so next scan is always fresh
       setImageUri(null);
