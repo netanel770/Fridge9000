@@ -62,13 +62,11 @@ export async function uploadScanImage(imageUri: string) {
   const formData = new FormData();
 
   if (Platform.OS === "web") {
-    // PC / browser case
     const response = await fetch(imageUri);
     const blob = await response.blob();
 
     formData.append("file", blob, "fridge-scan.jpg");
   } else {
-    // Mobile (Expo)
     formData.append("file", {
       uri: imageUri,
       name: "fridge-scan.jpg",
@@ -76,10 +74,31 @@ export async function uploadScanImage(imageUri: string) {
     } as any);
   }
 
-  const res = await fetch(`${API_BASE_URL}/door/closed/upload`, {
+  // STEP 1: upload image
+  const uploadRes = await fetch(`${API_BASE_URL}/door/closed/upload`, {
     method: "POST",
     body: formData,
   });
 
-  return handleJsonResponse(res);
+  const upload = (await handleJsonResponse(uploadRes)) as {
+  ok: boolean;
+  image_ref: string;
+  };
+
+  if (!upload?.image_ref) {
+    throw new Error("Upload failed: missing image_ref");
+  }
+
+  // STEP 2: process scan (THIS CREATES scan_id)
+  const scanRes = await fetch(`${API_BASE_URL}/door/closed`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      image_ref: upload.image_ref,
+    }),
+  });
+
+  return await handleJsonResponse(scanRes);
 }

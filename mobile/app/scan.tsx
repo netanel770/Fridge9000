@@ -17,7 +17,7 @@ export default function ScanScreen() {
 
   async function pickImage() {
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ["images"],
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
       allowsEditing: false,
       quality: 0.8,
     });
@@ -36,13 +36,29 @@ export default function ScanScreen() {
     setLoading(true);
 
     try {
+      // ✅ IMPORTANT: send raw URI (backend expects real file path)
       const res = await uploadScanImage(imageUri);
 
       if (!res.ok) {
         throw new Error(res.error || "Upload failed");
       }
 
-      router.push("/review");
+      if (!res.scan_id) {
+        throw new Error("Backend did not return scan_id");
+      }
+
+      console.log("📦 backend response:", res);
+      console.log("➡️ navigating with scan_id:", res.scan_id);
+
+      router.push({
+        pathname: "/review",
+        params: {
+          scan_id: String(res.scan_id),
+        },
+      });
+
+      // optional cleanup so next scan is always fresh
+      setImageUri(null);
     } catch (e: any) {
       Alert.alert("Upload failed", e.message || "Unknown error");
     } finally {

@@ -34,16 +34,17 @@ export type LatestScan = {
 };
 
 export type DetectionItem = {
-  id?: number;
   label: string;
-  confidence: number;
-  created_at?: string;
+  count: number;
 };
+
 
 export type ReviewItem = {
   original_label: string;
   final_label: string;
   included: boolean;
+  count: number;
+  confidence?: number; 
 };
 
 export type UploadScanResponse = {

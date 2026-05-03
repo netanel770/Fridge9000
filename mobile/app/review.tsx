@@ -10,11 +10,14 @@ import {
   Pressable,
   Alert,
 } from "react-native";
-import { router } from "expo-router";
-import { getLatestScan, getScanDetections, submitReview } from "../src/services/api";
+import { useRouter, useLocalSearchParams } from "expo-router";
+import { getScanDetections, submitReview } from "../src/services/api";
 import type { ReviewItem } from "../src/types/api";
 
 export default function ReviewScreen() {
+  const router = useRouter();
+  const { scan_id } = useLocalSearchParams<{ scan_id: string }>();
+
   const [scanId, setScanId] = useState<number | null>(null);
   const [items, setItems] = useState<ReviewItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -22,29 +25,40 @@ export default function ReviewScreen() {
   const [error, setError] = useState("");
 
   async function loadData() {
+    console.log("📦 loadData called with scan_id:", scan_id);
+
     setLoading(true);
     setError("");
 
     try {
-      const latestScan = await getLatestScan();
-
-      if (!latestScan?.id) {
-        setError("No scan found");
-        return;
+      if (!scan_id || Array.isArray(scan_id)) {
+        throw new Error("Missing or invalid scan id");
       }
 
-      setScanId(latestScan.id);
+      const id = Number(scan_id);
 
-      const detections = await getScanDetections(latestScan.id);
+      if (isNaN(id)) {
+        throw new Error("scan_id is not a valid number");
+      }
+
+      console.log("🔎 fetching detections for:", id);
+
+      setScanId(id);
+
+      const detections = await getScanDetections(id);
+
+      console.log("📥 detections:", detections);
 
       const reviewItems: ReviewItem[] = detections.map((d) => ({
         original_label: d.label,
         final_label: d.label,
         included: true,
+        count: d.count ?? 1,
       }));
 
       setItems(reviewItems);
     } catch (e: any) {
+      console.log("❌ loadData error:", e);
       setError(e.message || "Failed to load detections");
     } finally {
       setLoading(false);
@@ -53,7 +67,7 @@ export default function ReviewScreen() {
 
   useEffect(() => {
     loadData();
-  }, []);
+  }, [scan_id]);
 
   function updateItem(index: number, field: keyof ReviewItem, value: string | boolean) {
     setItems((prev) => {
@@ -67,6 +81,8 @@ export default function ReviewScreen() {
   }
 
   async function handleSubmit() {
+    console.log("🚀 submit pressed");
+
     if (!scanId) {
       Alert.alert("Missing scan", "No valid scan found.");
       return;
@@ -76,9 +92,11 @@ export default function ReviewScreen() {
 
     try {
       await submitReview(scanId, items);
+
       Alert.alert("Success", "Inventory updated successfully.");
       router.replace("/");
     } catch (e: any) {
+      console.log("❌ submit error:", e);
       Alert.alert("Submit failed", e.message || "Unknown error");
     } finally {
       setSubmitting(false);
@@ -113,7 +131,9 @@ export default function ReviewScreen() {
         renderItem={({ item, index }) => (
           <View style={styles.card}>
             <Text style={styles.label}>Original label</Text>
-            <Text style={styles.originalValue}>{item.original_label}</Text>
+            <Text style={styles.originalValue}>
+              {item.original_label} x{item.count ?? 1}
+            </Text>
 
             <Text style={styles.label}>Final label</Text>
             <TextInput
@@ -149,6 +169,7 @@ export default function ReviewScreen() {
     </View>
   );
 }
+
 
 const styles = StyleSheet.create({
   container: {
