@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { getAlerts, getEvents, getInventory, getLatestScan } from "../src/services/api";
+import { formatIsraelTime } from "../src/utils/date";
 
 export default function HomeScreen() {
   const [inventoryCount, setInventoryCount] = useState(0);
@@ -62,16 +63,12 @@ export default function HomeScreen() {
             <Text style={styles.cardText}>Active alerts: {alertsCount}</Text>
             <Text style={styles.cardText}>Recent events loaded: {eventsCount}</Text>
             <Text style={styles.cardText}>
-              Latest scan: {latestScanTime ? new Date(latestScanTime).toLocaleString() : "No scans yet"}
+              Latest scan: {latestScanTime ? formatIsraelTime(latestScanTime) : "No scans yet"}
             </Text>
           </View>
 
           <Pressable style={styles.primaryButton} onPress={() => router.push("/update-inventory")}>
             <Text style={styles.primaryButtonText}>Update Inventory</Text>
-          </Pressable>
-
-          <Pressable style={styles.secondaryButton} onPress={() => router.push("/receipt")}>
-            <Text style={styles.secondaryButtonText}>📄 Upload Receipt</Text>
           </Pressable>
 
           <View style={styles.grid}>

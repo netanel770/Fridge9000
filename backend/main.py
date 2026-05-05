@@ -18,7 +18,9 @@ UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 origins = [
     "http://localhost:5173",
+    "http://localhost:8081",
     "http://127.0.0.1:5173",
+    "http://127.0.0.1:8081",
 ]
 load_dotenv()
 
@@ -91,10 +93,48 @@ async def door_closed_upload(file: UploadFile = File(...)):
         with open(file_path, "wb") as f:
             f.write(await file.read())
 
-        return door_closed({"image_ref": file_path, "conf": 0.25})
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO scans(image_ref, delta_skipped, prev_scan_id)
+                    VALUES (%s, %s, %s)
+                    RETURNING id;
+                    """,
+                    (file_path, True, None),
+                )
+                scan_id = cur.fetchone()[0]
+                conn.commit()
 
+        infer_res = infer({"image_ref": file_path, "conf": 0.25})
+
+        if not infer_res.get("ok"):
+            raise HTTPException(status_code=500, detail=infer_res.get("error"))
+
+        filtered_dets = apply_rules(infer_res["detections"])
+
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                for d in filtered_dets:
+                    cur.execute(
+                        """
+                        INSERT INTO scan_detections(scan_id, label, confidence)
+                        VALUES (%s, %s, %s);
+                        """,
+                        (scan_id, d["item_name"], d["confidence"]),
+                    )
+
+                conn.commit()
+
+        return {
+            "ok": True,
+            "scan_id": scan_id,
+            "detections_count": len(filtered_dets),
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
-        # תראה את זה גם בלוגים וגם בפרונט
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/inventory")
@@ -112,57 +152,116 @@ def inventory() -> List[Dict[str, Any]]:
             return cur.fetchall()
 
 
+
 @app.post("/scans/{scan_id}/review")
 def review_scan(scan_id: int, payload: Dict[str, Any]):
     items = payload.get("items", [])
+    mode = payload.get("mode", "Added")
+
+    if mode not in ("Added", "Removed"):
+        raise HTTPException(status_code=400, detail="mode must be Added or Removed")
+
     if not isinstance(items, list):
-        return {"ok": False, "error": "items must be a list"}
+        raise HTTPException(status_code=400, detail="items must be a list")
+
+    included_labels = []
+
+    for it in items:
+        included = bool(it.get("included", True))
+        if not included:
+            continue
+
+        label = it.get("final_label") or it.get("original_label")
+        if label:
+            included_labels.append(label.strip().capitalize())
+
+    if not included_labels:
+        raise HTTPException(status_code=400, detail="No included items selected")
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             for it in items:
                 orig = it.get("original_label")
-                # שינוי: ניקוי רווחים והפיכה לאות גדולה בתחילת מילה (נרמול)
-                final = it.get("final_label", orig).strip().capitalize()
+                final = (it.get("final_label") or orig or "").strip().capitalize()
                 included = bool(it.get("included", True))
-                
-                if not orig or not final:
-                    continue
+
+                if orig and final:
+                    cur.execute(
+                        """
+                        INSERT INTO detection_reviews(scan_id, original_label, final_label, included)
+                        VALUES (%s, %s, %s, %s);
+                        """,
+                        (scan_id, orig, final, included),
+                    )
+
+            for name in included_labels:
+                cur.execute("SELECT id, category FROM items WHERE name = %s;", (name,))
+                item = cur.fetchone()
+
+                if not item:
+                    if mode == "Removed":
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"{name} is not in inventory"
+                        )
+
+                    cur.execute(
+                        "INSERT INTO items(name, category) VALUES (%s, %s) RETURNING id;",
+                        (name, "Unknown"),
+                    )
+                    item_id = cur.fetchone()["id"]
+                else:
+                    item_id = item["id"]
+
+                cur.execute(
+                    "SELECT quantity FROM inventory WHERE item_id = %s;",
+                    (item_id,),
+                )
+                inv = cur.fetchone()
+                current_qty = inv["quantity"] if inv else 0
+
+                if mode == "Removed" and current_qty <= 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{name} is not in inventory"
+                    )
+
+                if not inv:
+                    cur.execute(
+                        """
+                        INSERT INTO inventory(item_id, quantity, status)
+                        VALUES (%s, 0, 'MISSING');
+                        """,
+                        (item_id,),
+                    )
+
+                if mode == "Added":
+                    new_qty = current_qty + 1
+                else:
+                    new_qty = current_qty - 1
+
+                status = "MISSING" if new_qty == 0 else "LOW" if new_qty == 1 else "OK"
 
                 cur.execute(
                     """
-                    INSERT INTO detection_reviews(scan_id, original_label, final_label, included)
-                    VALUES (%s,%s,%s,%s);
+                    UPDATE inventory
+                    SET quantity = %s, status = %s, last_updated = NOW()
+                    WHERE item_id = %s;
                     """,
-                    (scan_id, orig, final, included),
+                    (new_qty, status, item_id),
                 )
 
-            # נרמול רשימת ה-labels
-            included_labels = [it.get("final_label", it.get("original_label")).strip().capitalize() 
-                               for it in items if it.get("included", True)]
-
-            for name in set(included_labels):
-                if not name: continue
-                
-                # בזכות ה-CITEXT ב-DB, החיפוש הזה ימצא גם 'milk' וגם 'Milk'
-                cur.execute("SELECT id FROM items WHERE name = %s;", (name,))
-                row = cur.fetchone()
-                
-                if row:
-                    item_id = row["id"]
-                else:
-                    cur.execute("INSERT INTO items(name, category) VALUES (%s,%s) RETURNING id;", (name, "Unknown"))
-                    item_id = cur.fetchone()["id"]
-
-                cur.execute("""
-                    INSERT INTO inventory(item_id, quantity, status)
-                    VALUES (%s, 1, 'OK')
-                    ON CONFLICT (item_id)
-                    DO UPDATE SET quantity=1, status='OK', last_updated=NOW();
-                """, (item_id,))
+                cur.execute(
+                    """
+                    INSERT INTO events(scan_id, item_id, action, confidence)
+                    VALUES (%s, %s, %s, %s);
+                    """,
+                    (scan_id, item_id, mode, 1.0),
+                )
 
             conn.commit()
-    return {"ok": True}
+
+    return {"ok": True, "mode": mode, "updated_items": included_labels}
 
 @app.get("/scans/{scan_id}/detections")
 def get_scan_detections(scan_id: int):
@@ -722,3 +821,136 @@ async def update_inventory_by_image(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/inventory/manual")
+def manual_inventory(payload: Dict[str, Any]):
+    """
+    Manually add or remove items.
+
+    payload example:
+    {
+        "item_name": "Milk",
+        "action": "Added",   # or "Removed"
+        "quantity": 2        # optional, default 1
+    }
+    """
+
+    item_name = payload.get("item_name")
+    action = payload.get("action")
+    quantity_change = int(payload.get("quantity", 1))
+
+    if not item_name or action not in ("Added", "Removed"):
+        raise HTTPException(
+            status_code=400,
+            detail="item_name and action ('Added' or 'Removed') required"
+        )
+
+    if quantity_change <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="quantity must be greater than 0"
+        )
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+
+            # --- Ensure item exists ---
+            cur.execute("SELECT id, category FROM items WHERE name = %s;", (item_name,))
+            row = cur.fetchone()
+
+            if row:
+                item_id = row["id"]
+            else:
+                # אם מנסים להסיר פריט שלא קיים
+                if action == "Removed":
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{item_name} is not in inventory"
+                    )
+
+                # יצירת פריט חדש
+                cur.execute(
+                    "INSERT INTO items(name, category) VALUES (%s, %s) RETURNING id;",
+                    (item_name, "General"),
+                )
+                item_id = cur.fetchone()["id"]
+
+            # --- Get current inventory ---
+            cur.execute(
+                "SELECT quantity FROM inventory WHERE item_id = %s;",
+                (item_id,),
+            )
+            inv = cur.fetchone()
+
+            current_qty = inv["quantity"] if inv else 0
+
+            # --- Validation for removal ---
+            if action == "Removed":
+                if current_qty <= 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{item_name} is not in inventory"
+                    )
+
+                if current_qty < quantity_change:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot remove {quantity_change}. Only {current_qty} available."
+                    )
+
+            # --- Create inventory row if not exists ---
+            if not inv:
+                cur.execute(
+                    """
+                    INSERT INTO inventory(item_id, quantity, status)
+                    VALUES (%s, 0, 'MISSING');
+                    """,
+                    (item_id,),
+                )
+
+            # --- Calculate new quantity ---
+            if action == "Added":
+                new_qty = current_qty + quantity_change
+            else:
+                new_qty = current_qty - quantity_change
+
+            # --- Determine status ---
+            if new_qty == 0:
+                status = "MISSING"
+            elif new_qty == 1:
+                status = "LOW"
+            else:
+                status = "OK"
+
+            # --- Update inventory ---
+            cur.execute(
+                """
+                UPDATE inventory
+                SET quantity=%s, status=%s, last_updated=NOW()
+                WHERE item_id=%s;
+                """,
+                (new_qty, status, item_id),
+            )
+
+            # --- Create event ---
+            cur.execute(
+                """
+                INSERT INTO events(scan_id, item_id, action, confidence)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id;
+                """,
+                (None, item_id, action, 1.0),
+            )
+            event_id = cur.fetchone()["id"]
+
+            conn.commit()
+
+    return {
+        "ok": True,
+        "item_name": item_name,
+        "action": action,
+        "quantity_changed": quantity_change,
+        "new_quantity": new_qty,
+        "status": status,
+        "event_id": event_id,
+    }

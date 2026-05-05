@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   View,
   Text,
@@ -6,12 +6,15 @@ import {
   FlatList,
   ActivityIndicator,
   RefreshControl,
+  Pressable,
 } from "react-native";
 import { getEvents } from "../src/services/api";
 import type { EventItem } from "../src/types/api";
+import { formatIsraelTime } from "../src/utils/date";
 
 export default function EventsScreen() {
   const [items, setItems] = useState<EventItem[]>([]);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
@@ -23,7 +26,7 @@ export default function EventsScreen() {
     setError("");
 
     try {
-      const data = await getEvents(20);
+      const data = await getEvents(50);
       setItems(data);
     } catch (e: any) {
       setError(e.message || "Failed to load events");
@@ -36,6 +39,34 @@ export default function EventsScreen() {
   useEffect(() => {
     loadData();
   }, []);
+
+  const groupedScans = useMemo(() => {
+    const groups: Record<string, EventItem[]> = {};
+
+    items.forEach((event) => {
+      const key = event.scan_id ? `scan-${event.scan_id}` : `manual-${event.id}`;
+
+      if (!groups[key]) {
+        groups[key] = [];
+      }
+
+      groups[key].push(event);
+    });
+
+    return Object.entries(groups).map(([key, events]) => ({
+      key,
+      scanId: events[0].scan_id,
+      createdAt: events[0].created_at,
+      events,
+    }));
+  }, [items]);
+
+  function toggleGroup(key: string) {
+    setExpanded((prev) => ({
+      ...prev,
+      [key]: !prev[key],
+    }));
+  }
 
   if (loading) {
     return (
@@ -55,32 +86,60 @@ export default function EventsScreen() {
 
   return (
     <FlatList
-      data={items}
-      keyExtractor={(item) => String(item.id)}
+      data={groupedScans}
+      keyExtractor={(group) => group.key}
       contentContainerStyle={styles.container}
       refreshControl={
         <RefreshControl refreshing={refreshing} onRefresh={() => loadData(true)} />
       }
-      renderItem={({ item }) => (
-        <View style={styles.card}>
-          <View style={styles.rowBetween}>
-            <Text style={styles.itemName}>{item.item_name}</Text>
-            <Text
-              style={[
-                styles.actionBadge,
-                item.action === "Added" ? styles.added : styles.removed,
-              ]}
-            >
-              {item.action}
-            </Text>
-          </View>
+      renderItem={({ item }) => {
+        const isOpen = expanded[item.key];
 
-          <Text style={styles.meta}>Confidence: {item.confidence}</Text>
-          <Text style={styles.meta}>
-            Time: {new Date(item.created_at).toLocaleString()}
-          </Text>
-        </View>
-      )}
+        return (
+          <View style={styles.scanCard}>
+            <Pressable style={styles.scanHeader} onPress={() => toggleGroup(item.key)}>
+              <View>
+                <Text style={styles.scanTitle}>
+                  {item.scanId ? `Scan #${item.scanId}` : "Manual Update"}
+                </Text>
+
+                <Text style={styles.scanMeta}>
+                  {formatIsraelTime(item.createdAt)}
+                </Text>
+
+                <Text style={styles.scanMeta}>
+                  {item.events.length} item events
+                </Text>
+              </View>
+
+              <Text style={styles.arrow}>{isOpen ? "▲" : "▼"}</Text>
+            </Pressable>
+
+            {isOpen &&
+              item.events.map((event) => (
+                <View key={String(event.id)} style={styles.eventRow}>
+                  <View style={styles.rowBetween}>
+                    <Text style={styles.itemName}>{event.item_name}</Text>
+
+                    <Text
+                      style={[
+                        styles.actionBadge,
+                        event.action === "Added" ? styles.added : styles.removed,
+                      ]}
+                    >
+                      {event.action}
+                    </Text>
+                  </View>
+
+                  <Text style={styles.meta}>Confidence: {event.confidence}</Text>
+                  <Text style={styles.meta}>
+                    Time: {formatIsraelTime(event.created_at)}
+                  </Text>
+                </View>
+              ))}
+          </View>
+        );
+      }}
       ListEmptyComponent={<Text style={styles.empty}>No events found</Text>}
     />
   );
@@ -91,12 +150,39 @@ const styles = StyleSheet.create({
     padding: 16,
     gap: 12,
   },
-  card: {
+  scanCard: {
     backgroundColor: "#fff",
     borderRadius: 14,
-    padding: 16,
     borderWidth: 1,
     borderColor: "#e5e7eb",
+    overflow: "hidden",
+  },
+  scanHeader: {
+    padding: 16,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  scanTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: "#111827",
+  },
+  scanMeta: {
+    fontSize: 14,
+    color: "#6b7280",
+    marginTop: 4,
+  },
+  arrow: {
+    fontSize: 20,
+    fontWeight: "700",
+    color: "#374151",
+  },
+  eventRow: {
+    padding: 16,
+    borderTopWidth: 1,
+    borderTopColor: "#e5e7eb",
+    backgroundColor: "#f9fafb",
   },
   rowBetween: {
     flexDirection: "row",
@@ -104,7 +190,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   itemName: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: "700",
     color: "#111827",
   },

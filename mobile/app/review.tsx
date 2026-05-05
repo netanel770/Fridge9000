@@ -10,11 +10,12 @@ import {
   Pressable,
   Alert,
 } from "react-native";
-import { router } from "expo-router";
+import { router,useLocalSearchParams } from "expo-router";
 import { getLatestScan, getScanDetections, submitReview } from "../src/services/api";
 import type { ReviewItem } from "../src/types/api";
 
 export default function ReviewScreen() {
+  const { mode } = useLocalSearchParams<{ mode?: "Added" | "Removed" }>();
   const [scanId, setScanId] = useState<number | null>(null);
   const [items, setItems] = useState<ReviewItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -75,7 +76,7 @@ export default function ReviewScreen() {
     setSubmitting(true);
 
     try {
-      await submitReview(scanId, items);
+      await submitReview(scanId, items, mode || "Added");
       Alert.alert("Success", "Inventory updated successfully.");
       router.replace("/");
     } catch (e: any) {

@@ -19,6 +19,10 @@ export default function RootLayout() {
         <Stack.Screen name="events" options={{ title: "Events" }} />
         <Stack.Screen name="review" />
         <Stack.Screen name="update-inventory" options={{ title: "Update Inventory" }} />
+        <Stack.Screen name="upload-receipt" options={{ title: "Upload Receipt" }} />
+        <Stack.Screen name="manual-inventory" options={{ title: "Manual Update" }} />
+        <Stack.Screen name="image-inventory" options={{ title: "Update by Image" }} />
+        <Stack.Screen name="manual-confirm" options={{ title: "Confirm Update" }} />
       </Stack>
     </>
   );

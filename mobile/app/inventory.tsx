@@ -9,6 +9,7 @@ import {
 } from "react-native";
 import { getInventory } from "../src/services/api";
 import type { InventoryItem } from "../src/types/api";
+import { formatIsraelTime } from "../src/utils/date";
 
 export default function InventoryScreen() {
   const [items, setItems] = useState<InventoryItem[]>([]);
@@ -71,7 +72,7 @@ export default function InventoryScreen() {
           <Text style={styles.meta}>Category: {item.category}</Text>
           <Text style={styles.meta}>Status: {item.status}</Text>
           <Text style={styles.meta}>
-            Updated: {new Date(item.last_updated).toLocaleString()}
+            Updated: {formatIsraelTime(item.last_updated)}
           </Text>
         </View>
       )}

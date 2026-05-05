@@ -22,6 +22,39 @@ export async function getInventory(): Promise<InventoryItem[]> {
   return handleJsonResponse<InventoryItem[]>(res);
 }
 
+export async function searchInventoryItems(query: string) {
+  const inventory = await getInventory();
+
+  return inventory.filter((item) =>
+    item.name.toLowerCase().includes(query.toLowerCase())
+  );
+}
+
+export async function manualInventoryUpdate(
+  itemName: string,
+  action: "Added" | "Removed",
+  quantity = 1
+) {
+  const res = await fetch(`${API_BASE_URL}/inventory/manual`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      item_name: itemName,
+      action,
+      quantity,
+    }),
+  });
+
+  const data = await res.json();
+
+  if (!res.ok || data.ok === false) {
+    throw new Error(data.detail || data.error || "Manual inventory update failed");
+  }
+
+  return data;
+}
 export async function getAlerts(): Promise<AlertItem[]> {
   const res = await fetch(`${API_BASE_URL}/alerts`);
   return handleJsonResponse<AlertItem[]>(res);
@@ -45,14 +78,29 @@ export async function getScanDetections(scanId: number): Promise<DetectionItem[]
   return handleJsonResponse<DetectionItem[]>(res);
 }
 
-export async function submitReview(scanId: number, items: ReviewItem[]) {
+export async function submitReview(
+  scanId: number,
+  items: ReviewItem[],
+  mode: "Added" | "Removed"
+) {
   const res = await fetch(`${API_BASE_URL}/scans/${scanId}/review`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ items }),
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      mode,
+      items,
+    }),
   });
 
-  return handleJsonResponse(res);
+  const data = await res.json();
+
+  if (!res.ok || data.ok === false) {
+    throw new Error(data.detail || data.error || "Review submit failed");
+  }
+
+  return data;
 }
 
 export type ManualInventoryResponse = {
