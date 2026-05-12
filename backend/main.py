@@ -12,6 +12,8 @@ from fastapi import UploadFile, File
 import uuid
 import json
 from fastapi import HTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 
 UPLOAD_DIR = "uploads"
@@ -25,6 +27,7 @@ origins = [
 load_dotenv()
 
 app = FastAPI(title="Fridge 9000 API")
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -74,7 +77,15 @@ def apply_rules(raw_detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         # 4) category
         category = item_to_category.get(item_name, "General")
-        normalized.append({"item_name": item_name, "category": category, "confidence": conf})
+        normalized.append({
+            "item_name": item_name,
+            "category": category,
+            "confidence": conf,
+            "x1": det.get("x1"),
+            "y1": det.get("y1"),
+            "x2": det.get("x2"),
+            "y2": det.get("y2"),
+        })
     return normalized
 
 
@@ -132,8 +143,6 @@ def inventory_all() -> List[Dict[str, Any]]:
             cur.execute(sql)
             return cur.fetchall()
         
-        
-
 @app.post("/scans/{scan_id}/review")
 def review_scan(scan_id: int, payload: Dict[str, Any]):
     items = payload.get("items", [])
@@ -145,7 +154,7 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
     if not isinstance(items, list):
         raise HTTPException(status_code=400, detail="items must be a list")
 
-    included_items = []
+    included_items_map = {}
 
     for it in items:
         included = bool(it.get("included", True))
@@ -155,11 +164,25 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
         label = it.get("final_label") or it.get("original_label")
         confidence = float(it.get("confidence", 1.0))
 
-        if label:
-            included_items.append({
-                "name": label.strip().capitalize(),
+        if not label:
+            continue
+
+        name = label.strip().capitalize()
+
+        if name not in included_items_map:
+            included_items_map[name] = {
+                "name": name,
                 "confidence": confidence,
-            })
+                "quantity": 1,
+            }
+        else:
+            included_items_map[name]["quantity"] += 1
+            included_items_map[name]["confidence"] = max(
+                included_items_map[name]["confidence"],
+                confidence,
+            )
+
+    included_items = list(included_items_map.values())
 
     if not included_items:
         raise HTTPException(status_code=400, detail="No included items selected")
@@ -183,19 +206,27 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
             for item_data in included_items:
                 name = item_data["name"]
                 confidence = item_data["confidence"]
+                quantity_change = item_data["quantity"]
 
-                cur.execute("SELECT id, category FROM items WHERE name = %s;", (name,))
+                cur.execute(
+                    "SELECT id, category FROM items WHERE name = %s;",
+                    (name,),
+                )
                 item = cur.fetchone()
 
                 if not item:
                     if mode == "Removed":
                         raise HTTPException(
                             status_code=400,
-                            detail=f"{name} is not in inventory"
+                            detail=f"{name} is not in inventory",
                         )
 
                     cur.execute(
-                        "INSERT INTO items(name, category) VALUES (%s, %s) RETURNING id;",
+                        """
+                        INSERT INTO items(name, category)
+                        VALUES (%s, %s)
+                        RETURNING id;
+                        """,
                         (name, "Unknown"),
                     )
                     item_id = cur.fetchone()["id"]
@@ -212,7 +243,13 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
                 if mode == "Removed" and current_qty <= 0:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"{name} is not in inventory"
+                        detail=f"{name} is not in inventory",
+                    )
+
+                if mode == "Removed" and current_qty < quantity_change:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot remove {quantity_change}. Only {current_qty} available.",
                     )
 
                 if not inv:
@@ -225,9 +262,9 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
                     )
 
                 if mode == "Added":
-                    new_qty = current_qty + 1
+                    new_qty = current_qty + quantity_change
                 else:
-                    new_qty = current_qty - 1
+                    new_qty = current_qty - quantity_change
 
                 status = "MISSING" if new_qty == 0 else "LOW" if new_qty == 1 else "OK"
 
@@ -245,17 +282,22 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
                     INSERT INTO events(scan_id, item_id, action, confidence, quantity_change)
                     VALUES (%s, %s, %s, %s, %s);
                     """,
-                    (scan_id, item_id, mode, confidence, 1),
+                    (scan_id, item_id, mode, confidence, quantity_change),
                 )
 
             conn.commit()
 
-    return {"ok": True, "mode": mode, "updated_items": included_items}
+    return {
+        "ok": True,
+        "mode": mode,
+        "updated_items": included_items,
+    }        
+
 
 @app.get("/scans/{scan_id}/detections")
 def get_scan_detections(scan_id: int):
     sql = """
-    SELECT id, label, confidence, created_at
+    SELECT id, label, confidence, x1, y1, x2, y2, created_at
     FROM scan_detections
     WHERE scan_id = %s
     ORDER BY confidence DESC;
@@ -332,7 +374,15 @@ def infer(payload: Dict[str, Any]):
             cls_id = int(b.cls[0].item())
             label = MODEL.names.get(cls_id, str(cls_id))
             confidence = float(b.conf[0].item())
-            detections.append({"label": label, "confidence": confidence})
+            xyxy = b.xyxy[0].tolist()
+            detections.append({
+                "label": label,
+                "confidence": confidence,
+                "x1": float(xyxy[0]),
+                "y1": float(xyxy[1]),
+                "x2": float(xyxy[2]),
+                "y2": float(xyxy[3]),
+            })
 
     # מיון לפי confidence
     detections.sort(key=lambda x: x["confidence"], reverse=True)
@@ -488,11 +538,19 @@ def door_closed(payload: Dict[str, Any]):
             for d in filtered_dets:
                 cur.execute(
                     """
-                    INSERT INTO scan_detections(scan_id, label, confidence)
-                    VALUES (%s, %s, %s);
+                    INSERT INTO scan_detections(scan_id, label, confidence, x1, y1, x2, y2)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s);
                     """,
-                    (scan_id, d["item_name"], d["confidence"]),
-                )
+                    (
+                        scan_id,
+                        d["item_name"],
+                        d["confidence"],
+                        d.get("x1"),
+                        d.get("y1"),
+                        d.get("x2"),
+                        d.get("y2"),
+                    ),
+                                    )
 
             conn.commit()
 
@@ -769,3 +827,42 @@ def manual_inventory(payload: Dict[str, Any]):
         "status": status,
         "event_id": event_id,
     }
+@app.get("/scans/{scan_id}/detections/{detection_id}/boxed")
+def get_detection_boxed_image(scan_id: int, detection_id: int):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT s.image_ref, d.x1, d.y1, d.x2, d.y2
+                FROM scan_detections d
+                JOIN scans s ON s.id = d.scan_id
+                WHERE d.scan_id = %s AND d.id = %s;
+                """,
+                (scan_id, detection_id),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Detection not found")
+
+    img = cv2.imread(row["image_ref"])
+
+    if img is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    h, w = img.shape[:2]
+
+    x1 = max(0, int(row["x1"]))
+    y1 = max(0, int(row["y1"]))
+    x2 = min(w, int(row["x2"]))
+    y2 = min(h, int(row["y2"]))
+
+    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 8)
+
+    boxed_filename = f"boxed_{scan_id}_{detection_id}.jpg"
+    boxed_path = os.path.join(UPLOAD_DIR, boxed_filename)
+
+    cv2.imwrite(boxed_path, img)
+
+    return FileResponse(boxed_path, media_type="image/jpeg")
+

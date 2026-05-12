@@ -35,17 +35,26 @@ export type LatestScan = {
 };
 
 export type DetectionItem = {
-  id?: number;
+  id: number;
   label: string;
   confidence: number;
+  x1?: number | null;
+  y1?: number | null;
+  x2?: number | null;
+  y2?: number | null;
   created_at?: string;
 };
 
 export type ReviewItem = {
+  id: number;
   original_label: string;
   final_label: string;
   included: boolean;
   confidence?: number;
+  x1?: number | null;
+  y1?: number | null;
+  x2?: number | null;
+  y2?: number | null;
 };
 
 export type UploadScanResponse = {

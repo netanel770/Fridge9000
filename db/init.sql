@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS events (
   item_id INT REFERENCES items(id),
   action TEXT NOT NULL, -- Added | Removed | DoorOpened | DoorClosed
   confidence REAL,
+  quantity_change INT NOT NULL DEFAULT 1,
   created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
@@ -39,8 +40,14 @@ CREATE TABLE IF NOT EXISTS scan_detections (
   scan_id INT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
   label TEXT NOT NULL,
   confidence REAL NOT NULL,
+  x1 REAL,
+  y1 REAL,
+  x2 REAL,
+  y2 REAL,
   created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+
 
 CREATE INDEX IF NOT EXISTS idx_scan_detections_scan_id ON scan_detections(scan_id);
 
