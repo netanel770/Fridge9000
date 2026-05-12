@@ -42,6 +42,7 @@ export default function ReviewScreen() {
         original_label: d.label,
         final_label: d.label,
         included: true,
+        confidence: d.confidence,
       }));
 
       setItems(reviewItems);

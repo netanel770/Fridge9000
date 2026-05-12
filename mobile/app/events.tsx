@@ -132,6 +132,7 @@ export default function EventsScreen() {
                   </View>
 
                   <Text style={styles.meta}>Confidence: {event.confidence}</Text>
+                  <Text style={styles.meta}>Quantity: {event.quantity_change}</Text>
                   <Text style={styles.meta}>
                     Time: {formatIsraelTime(event.created_at)}
                   </Text>

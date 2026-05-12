@@ -24,6 +24,7 @@ export type EventItem = {
   item_name: string;
   item_category: string;
   scan_id: number | null;
+  quantity_change: number;
 };
 
 export type LatestScan = {
@@ -44,6 +45,7 @@ export type ReviewItem = {
   original_label: string;
   final_label: string;
   included: boolean;
+  confidence?: number;
 };
 
 export type UploadScanResponse = {

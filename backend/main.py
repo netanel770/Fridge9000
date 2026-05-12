@@ -93,49 +93,12 @@ async def door_closed_upload(file: UploadFile = File(...)):
         with open(file_path, "wb") as f:
             f.write(await file.read())
 
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO scans(image_ref, delta_skipped, prev_scan_id)
-                    VALUES (%s, %s, %s)
-                    RETURNING id;
-                    """,
-                    (file_path, True, None),
-                )
-                scan_id = cur.fetchone()[0]
-                conn.commit()
+        return door_closed({"image_ref": file_path, "conf": 0.25})
 
-        infer_res = infer({"image_ref": file_path, "conf": 0.25})
-
-        if not infer_res.get("ok"):
-            raise HTTPException(status_code=500, detail=infer_res.get("error"))
-
-        filtered_dets = apply_rules(infer_res["detections"])
-
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                for d in filtered_dets:
-                    cur.execute(
-                        """
-                        INSERT INTO scan_detections(scan_id, label, confidence)
-                        VALUES (%s, %s, %s);
-                        """,
-                        (scan_id, d["item_name"], d["confidence"]),
-                    )
-
-                conn.commit()
-
-        return {
-            "ok": True,
-            "scan_id": scan_id,
-            "detections_count": len(filtered_dets),
-        }
-
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
 
 @app.get("/inventory")
 def inventory() -> List[Dict[str, Any]]:
@@ -144,6 +107,7 @@ def inventory() -> List[Dict[str, Any]]:
            inv.quantity, inv.status, inv.last_updated
     FROM inventory inv
     JOIN items i ON i.id = inv.item_id
+    WHERE inv.quantity > 0
     ORDER BY i.category, i.name;
     """
     with get_conn() as conn:
@@ -152,6 +116,23 @@ def inventory() -> List[Dict[str, Any]]:
             return cur.fetchall()
 
 
+@app.get("/inventory/all")
+def inventory_all() -> List[Dict[str, Any]]:
+    sql = """
+    SELECT i.id, i.name, i.category,
+           COALESCE(inv.quantity, 0) AS quantity,
+           COALESCE(inv.status, 'MISSING') AS status,
+           inv.last_updated
+    FROM items i
+    LEFT JOIN inventory inv ON i.id = inv.item_id
+    ORDER BY i.category, i.name;
+    """
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql)
+            return cur.fetchall()
+        
+        
 
 @app.post("/scans/{scan_id}/review")
 def review_scan(scan_id: int, payload: Dict[str, Any]):
@@ -164,7 +145,7 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
     if not isinstance(items, list):
         raise HTTPException(status_code=400, detail="items must be a list")
 
-    included_labels = []
+    included_items = []
 
     for it in items:
         included = bool(it.get("included", True))
@@ -172,10 +153,15 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
             continue
 
         label = it.get("final_label") or it.get("original_label")
-        if label:
-            included_labels.append(label.strip().capitalize())
+        confidence = float(it.get("confidence", 1.0))
 
-    if not included_labels:
+        if label:
+            included_items.append({
+                "name": label.strip().capitalize(),
+                "confidence": confidence,
+            })
+
+    if not included_items:
         raise HTTPException(status_code=400, detail="No included items selected")
 
     with get_conn() as conn:
@@ -194,7 +180,10 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
                         (scan_id, orig, final, included),
                     )
 
-            for name in included_labels:
+            for item_data in included_items:
+                name = item_data["name"]
+                confidence = item_data["confidence"]
+
                 cur.execute("SELECT id, category FROM items WHERE name = %s;", (name,))
                 item = cur.fetchone()
 
@@ -253,15 +242,15 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
 
                 cur.execute(
                     """
-                    INSERT INTO events(scan_id, item_id, action, confidence)
-                    VALUES (%s, %s, %s, %s);
+                    INSERT INTO events(scan_id, item_id, action, confidence, quantity_change)
+                    VALUES (%s, %s, %s, %s, %s);
                     """,
-                    (scan_id, item_id, mode, 1.0),
+                    (scan_id, item_id, mode, confidence, 1),
                 )
 
             conn.commit()
 
-    return {"ok": True, "mode": mode, "updated_items": included_labels}
+    return {"ok": True, "mode": mode, "updated_items": included_items}
 
 @app.get("/scans/{scan_id}/detections")
 def get_scan_detections(scan_id: int):
@@ -295,7 +284,7 @@ def alerts() -> List[Dict[str, Any]]:
 def events(limit: int = 50) -> List[Dict[str, Any]]:
     sql = """
     SELECT e.id, e.action, e.confidence, e.created_at,
-           i.name AS item_name, i.category AS item_category,
+           i.name AS item_name, i.category AS item_category,e.quantity_change,
            e.scan_id
     FROM events e
     LEFT JOIN items i ON i.id = e.item_id
@@ -353,7 +342,7 @@ def infer(payload: Dict[str, Any]):
 @app.get("/scans/latest")
 def latest_scan():
     sql = """
-    SELECT id, created_at, image_ref, delta_skipped
+    SELECT id, created_at, image_ref
     FROM scans
     ORDER BY created_at DESC
     LIMIT 1;
@@ -366,106 +355,19 @@ def latest_scan():
 
 @app.post("/scans")
 def create_scan(payload: Dict[str, Any]):
-    """
-    payload example:
-    {
-      "image_ref": "local://scan_x.jpg",
-      "prev_scan_id": 12,
-      "delta_skipped": false
-    }
-    """
+    
     image_ref = payload.get("image_ref")
-    prev_scan_id = payload.get("prev_scan_id")  # optional
-    delta_skipped = bool(payload.get("delta_skipped", False))
 
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO scans(image_ref, delta_skipped, prev_scan_id) VALUES (%s, %s, %s) RETURNING id, created_at;",
-                (image_ref, delta_skipped, prev_scan_id),
+                "INSERT INTO scans(image_ref) VALUES (%s) RETURNING id, created_at;",
+                (image_ref,),
             )
             scan_id, created_at = cur.fetchone()
             conn.commit()
 
-    return {"ok": True, "scan_id": scan_id, "created_at": created_at, "delta_skipped": delta_skipped}
-
-
-@app.post("/inventory/manual")
-def manual_inventory(payload: Dict[str, Any]):
-    """
-    Manually add or remove items without a scan.
-
-    payload example:
-    {
-        "item_name": "Milk",
-        "action": "Added",   # or "Removed"
-        "quantity": 1        # optional, default 1
-    }
-    """
-    item_name = payload.get("item_name")
-    action = payload.get("action")
-    quantity_change = int(payload.get("quantity", 1))
-
-    if not item_name or action not in ("Added", "Removed"):
-        return {"ok": False, "error": "item_name and action ('Added' or 'Removed') required"}
-
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # Ensure item exists
-            cur.execute("SELECT id, category FROM items WHERE name = %s;", (item_name,))
-            row = cur.fetchone()
-            if row:
-                item_id = row["id"]
-            else:
-                # Insert item if not exists, default category "General"
-                cur.execute(
-                    "INSERT INTO items(name, category) VALUES (%s, %s) RETURNING id;",
-                    (item_name, "General"),
-                )
-                item_id = cur.fetchone()["id"]
-
-            # Update inventory
-            cur.execute("SELECT quantity FROM inventory WHERE item_id = %s;", (item_id,))
-            inv = cur.fetchone()
-            if inv:
-                current_qty = inv["quantity"]
-            else:
-                # Create inventory entry if not exists
-                current_qty = 0
-                cur.execute(
-                    "INSERT INTO inventory(item_id, quantity, status) VALUES (%s, 0, 'MISSING');",
-                    (item_id,),
-                )
-
-            if action == "Added":
-                new_qty = current_qty + quantity_change
-            else:  # Removed
-                new_qty = max(0, current_qty - quantity_change)
-
-            # Determine status
-            if new_qty == 0:
-                status = "MISSING"
-            elif new_qty == 1:
-                status = "LOW"
-            else:
-                status = "OK"
-
-            # Update inventory
-            cur.execute(
-                "UPDATE inventory SET quantity=%s, status=%s, last_updated=NOW() WHERE item_id=%s;",
-                (new_qty, status, item_id),
-            )
-
-            # Log event (optional, scan_id=None)
-            cur.execute(
-                "INSERT INTO events(scan_id, item_id, action, confidence) VALUES (%s,%s,%s,%s) RETURNING id;",
-                (None, item_id, action, 1.0),
-            )
-            event_id = cur.fetchone()["id"]
-
-            conn.commit()
-
-    return {"ok": True, "item_id": item_id, "new_quantity": new_qty, "status": status, "event_id": event_id}
+    return {"ok": True, "scan_id": scan_id, "created_at": created_at}
 
 
 
@@ -557,135 +459,48 @@ def create_event(payload: Dict[str, Any]):
 
 @app.post("/door/closed")
 def door_closed(payload: Dict[str, Any]):
-
-    """
-    מפעיל את המערכת: יצירת סריקה, הרצת מודל, החלת חוקים (Rules Engine),
-    חישוב דלתא (הוספה/הסרה) ועדכון המלאי.
-    """
     image_ref = payload.get("image_ref")
     conf = float(payload.get("conf", 0.25))
+
     if not image_ref:
         return {"ok": False, "error": "image_ref required"}
 
-    # 1. מציאת ה-ID של הסריקה הקודמת לצורך השוואה
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT id FROM scans ORDER BY created_at DESC LIMIT 1;")
-            prev = cur.fetchone()
-            prev_scan_id = prev["id"] if prev else None
+    infer_res = infer({"image_ref": image_ref, "conf": conf})
 
-    # 2. יצירת רשומה חדשה לסריקה הנוכחית
+    if not infer_res.get("ok"):
+        return {"ok": False, "error": infer_res.get("error")}
+
+    raw_dets = infer_res["detections"]
+    filtered_dets = apply_rules(raw_dets)
+
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO scans(image_ref, delta_skipped, prev_scan_id) VALUES (%s, %s, %s) RETURNING id;",
-                (image_ref, False, prev_scan_id),
+                """
+                INSERT INTO scans(image_ref)
+                VALUES (%s)
+                RETURNING id;
+                """,
+                (image_ref,),
             )
             scan_id = cur.fetchone()[0]
-            conn.commit()
 
-    # 3. הרצת מודל ה-AI (Inference)
-    infer_res = infer({"image_ref": image_ref, "conf": conf})
-    if not infer_res.get("ok"):
-        return {"ok": False, "error": infer_res.get("error"), "scan_id": scan_id}
-
-    raw_dets = infer_res["detections"]
-
-    # --- שלב ה-RULES ENGINE: כאן הקסם קורה ---
-    # אנחנו מעבירים את הזיהויים הגולמיים דרך פונקציית החוקים
-    filtered_dets = apply_rules(raw_dets)
-    
-    # יצירת סט של שמות פריטים מנורמלים (למשל: {"Milk", "Yogurt"})
-    current_items = set([d["item_name"] for d in filtered_dets])
-    # ----------------------------------------
-
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # 4. שמירת הזיהויים המנורמלים ב-scan_detections (כדי שה-Review UI יראה אותם נקיים)
             for d in filtered_dets:
                 cur.execute(
-                    "INSERT INTO scan_detections(scan_id, label, confidence) VALUES (%s,%s,%s);",
+                    """
+                    INSERT INTO scan_detections(scan_id, label, confidence)
+                    VALUES (%s, %s, %s);
+                    """,
                     (scan_id, d["item_name"], d["confidence"]),
                 )
-
-            # 5. טעינת הפריטים שהיו בסריקה הקודמת לצורך השוואה
-            prev_items = set()
-            if prev_scan_id:
-                cur.execute(
-                    "SELECT label FROM scan_detections WHERE scan_id=%s;",
-                    (prev_scan_id,),
-                )
-                prev_rows = cur.fetchall()
-                prev_items = set([r["label"] for r in prev_rows])
-
-            # 6. חישוב מה נוסף ומה הוסר (Delta)
-            added = list(current_items - prev_items)
-            removed = list(prev_items - current_items)
-
-            # פונקציית עזר להבטחת קיום פריט בטבלת items עם קטגוריה נכונה מהחוקים
-            def ensure_item(name: str):
-                rules = load_rules()
-                category = rules["item_to_category"].get(name, "General")
-                
-                cur.execute("SELECT id FROM items WHERE name=%s;", (name,))
-                row = cur.fetchone()
-                if row:
-                    return row["id"]
-                
-                cur.execute(
-                    "INSERT INTO items(name, category) VALUES (%s, %s) RETURNING id;",
-                    (name, category),
-                )
-                return cur.fetchone()["id"]
-
-            # פונקציית עזר להחלת אירוע (Added/Removed) ועדכון מלאי
-            def apply_event(action: str, name: str, confidence: float):
-                item_id = ensure_item(name)
-
-                # הזרקת האירוע ללוג
-                cur.execute(
-                    "INSERT INTO events(scan_id, item_id, action, confidence) VALUES (%s,%s,%s,%s);",
-                    (scan_id, item_id, action, confidence),
-                )
-
-                # חישוב כמות חדשה
-                cur.execute("SELECT quantity FROM inventory WHERE item_id=%s;", (item_id,))
-                inv = cur.fetchone()
-                quantity = inv["quantity"] if inv else 0
-                
-                if not inv:
-                    cur.execute("INSERT INTO inventory(item_id, quantity) VALUES (%s, 0);", (item_id,))
-
-                if action == "Added":
-                    quantity += 1
-                elif action == "Removed":
-                    quantity = max(0, quantity - 1)
-
-                # קביעת סטטוס לפי כמות
-                status = "MISSING" if quantity == 0 else "LOW" if quantity == 1 else "OK"
-
-                cur.execute(
-                    "UPDATE inventory SET quantity=%s, status=%s, last_updated=NOW() WHERE item_id=%s;",
-                    (quantity, status, item_id),
-                )
-
-            # 7. יצירת האירועים בפועל
-            conf_map = {d["item_name"]: d["confidence"] for d in filtered_dets}
-
-            for item in added:
-                apply_event("Added", item, conf_map.get(item, 0.5))
-            for item in removed:
-                apply_event("Removed", item, 0.5)
 
             conn.commit()
 
     return {
         "ok": True,
         "scan_id": scan_id,
-        "prev_scan_id": prev_scan_id,
-        "added": added,
-        "removed": removed,
-        "events_created": len(added) + len(removed),
+        "detections_count": len(filtered_dets),
+        "detections": filtered_dets,
     }
 
 @app.post("/inventory/image/update")
@@ -935,11 +750,11 @@ def manual_inventory(payload: Dict[str, Any]):
             # --- Create event ---
             cur.execute(
                 """
-                INSERT INTO events(scan_id, item_id, action, confidence)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO events(scan_id, item_id, action, confidence, quantity_change)
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING id;
                 """,
-                (None, item_id, action, 1.0),
+                (None, item_id, action, 1.0, quantity_change),
             )
             event_id = cur.fetchone()["id"]
 

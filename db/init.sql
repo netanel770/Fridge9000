@@ -20,9 +20,7 @@ CREATE TABLE IF NOT EXISTS inventory (
 CREATE TABLE IF NOT EXISTS scans (
   id SERIAL PRIMARY KEY,
   created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-  image_ref TEXT,
-  delta_skipped BOOLEAN NOT NULL DEFAULT FALSE,
-  prev_scan_id INT REFERENCES scans(id)
+  image_ref TEXT
 );
 
 -- Events

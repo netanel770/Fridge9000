@@ -22,6 +22,17 @@ export async function getInventory(): Promise<InventoryItem[]> {
   return handleJsonResponse<InventoryItem[]>(res);
 }
 
+export async function getAllInventory() {
+  const res = await fetch(`${API_BASE_URL}/inventory/all`);
+  const data = await res.json();
+
+  if (!res.ok) {
+    throw new Error(data.detail || data.error || "Failed to load all inventory");
+  }
+
+  return data;
+}
+
 export async function searchInventoryItems(query: string) {
   const inventory = await getInventory();
 

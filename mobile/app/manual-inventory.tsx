@@ -9,7 +9,7 @@ import {
   FlatList,
   Alert,
 } from "react-native";
-import { getInventory, searchInventoryItems } from "../src/services/api";
+import { getAllInventory } from "../src/services/api";
 import type { InventoryItem } from "../src/types/api";
 
 type Mode = "Added" | "Removed";
@@ -25,7 +25,7 @@ export default function ManualInventoryScreen() {
 
   async function loadInventory() {
     try {
-      const data = await getInventory();
+      const data = await getAllInventory();
       setInventoryItems(data);
     } catch (e: any) {
       Alert.alert("Error", e.message || "Failed to load inventory");
