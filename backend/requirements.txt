@@ -5,6 +5,8 @@ python-dotenv
 python-multipart
 ultralytics
 opencv-python
-pillow
 pandas
-python-multipart
+pymupdf
+pytesseract
+pdf2image
+Pillow

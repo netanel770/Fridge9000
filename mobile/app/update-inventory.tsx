@@ -14,7 +14,7 @@ export default function UpdateInventoryMenuScreen() {
         <Text style={styles.cardTitle}>Manual Update</Text>
         <Text style={styles.cardText}>Add or remove products manually</Text>
       </Pressable>
-
+      
       <Pressable
         style={styles.card}
         onPress={() => router.push("/image-inventory")}
@@ -25,10 +25,10 @@ export default function UpdateInventoryMenuScreen() {
 
       <Pressable
         style={styles.card}
-        onPress={() => router.push("/upload-receipt")}
+        onPress={() => router.push("/receipt-upload")}
       >
         <Text style={styles.cardTitle}>Upload Receipt</Text>
-        <Text style={styles.cardText}>Add products from a shopping receipt</Text>
+        <Text style={styles.cardText}>Add items from a supermarket PDF receipt</Text>
       </Pressable>
     </View>
   );

@@ -185,3 +185,27 @@ export async function updateInventoryByImage(
 
   return data;
 }
+
+
+export async function uploadReceiptPdf(fileUri: string) {
+  const formData = new FormData();
+
+  formData.append("file", {
+    uri: fileUri,
+    name: "receipt.pdf",
+    type: "application/pdf",
+  } as any);
+
+  const res = await fetch(`${API_BASE_URL}/receipts/upload`, {
+    method: "POST",
+    body: formData,
+  });
+
+  const data = await res.json();
+
+  if (!res.ok || data.ok === false) {
+    throw new Error(data.detail || data.error || "Receipt upload failed");
+  }
+
+  return data;
+}

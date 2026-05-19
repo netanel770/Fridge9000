@@ -151,7 +151,7 @@ export default function ReviewScreen() {
         renderItem={({ item, index }) => (
           <View style={styles.card}>
 
-            {scanId && item.id && (
+            {scanId && item.id && item.x1 != null && (
               <View style={styles.imageBox}>
                 <Image
                   source={{

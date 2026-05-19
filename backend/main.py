@@ -14,6 +14,10 @@ import json
 from fastapi import HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+import pytesseract
+from pdf2image import convert_from_path
+import re
+
 
 
 UPLOAD_DIR = "uploads"
@@ -866,3 +870,158 @@ def get_detection_boxed_image(scan_id: int, detection_id: int):
 
     return FileResponse(boxed_path, media_type="image/jpeg")
 
+@app.post("/receipts/upload")
+async def upload_receipt(file: UploadFile = File(...)):
+    try:
+        import re
+
+        ext = file.filename.split(".")[-1].lower()
+
+        if ext != "pdf":
+            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+        filename = f"{uuid.uuid4()}.pdf"
+        file_path = os.path.join(UPLOAD_DIR, filename)
+
+        with open(file_path, "wb") as f:
+            f.write(await file.read())
+
+        pages = convert_from_path(file_path, dpi=300)
+
+        full_text = ""
+
+        for i, page in enumerate(pages):
+            text = pytesseract.image_to_string(page, lang="eng")
+
+            print(f"----- PAGE {i + 1} OCR -----")
+            print(text)
+
+            full_text += text + "\n"
+
+        lines = [
+            line.strip()
+            for line in full_text.splitlines()
+            if line.strip()
+        ]
+
+        noise_words = [
+            "receipt", "invoice", "tax", "vat",
+            "cash", "credit", "visa", "mastercard", "change",
+            "store", "branch", "date", "time", "cashier",
+            "card", "customer", "thank", "thanks",
+            "phone", "address", "qty", "quantity", "price",
+            "item", "code", "barcode", "description",
+        ]
+
+        stop_words = [
+            "subtotal",
+            "total",
+            "payment",
+            "you saved",
+            "saved today",
+            "amount due",
+            "balance",
+            "debit",
+            "credit",
+            "change",
+            "thank you",
+            "thanks",
+        ]
+
+        detected_items = []
+        pending_item = None
+        for raw_line in lines:
+            line = raw_line.strip()
+            if len(line) < 2:
+                continue
+
+            lowered = line.lower()
+
+            if any(word in lowered for word in stop_words):
+                break
+
+            if any(word in lowered for word in noise_words):
+                continue
+
+            has_letters = re.search(r"[A-Za-z]", line)
+
+            # מזהה מחירים רגילים וגם מחיר שבור כמו $9 ,99
+            has_price = re.search(r"\$?\s*\d+\s*[.,]\s*\d{2}", line)
+
+            # אם זו שורת מחיר בלבד, נחבר אותה למוצר הקודם
+            if has_price and not has_letters:
+                if pending_item:
+                    detected_items.append(pending_item.title())
+                    pending_item = None
+                continue
+
+            if not has_letters:
+                continue
+
+            cleaned_line = line
+
+            cleaned_line = re.sub(r"\$?\s*\d+\s*[.,]\s*\d{2}", " ", cleaned_line)
+            cleaned_line = re.sub(r"\b\d{5,}\b", " ", cleaned_line)
+            cleaned_line = re.sub(r"\b\d+\b", " ", cleaned_line)
+            cleaned_line = re.sub(r"\([^)]*\)", " ", cleaned_line)
+            cleaned_line = re.sub(r"[^A-Za-z\s\-']", " ", cleaned_line)
+
+            item_name = " ".join(cleaned_line.split()).strip()
+
+            if len(item_name) < 2:
+                continue
+
+            if has_price:
+                detected_items.append(item_name.title())
+                pending_item = None
+            else:
+                pending_item = item_name
+        unique_items = []
+        seen = set()
+
+        for item in detected_items:
+            key = item.lower()
+
+            if key not in seen:
+                seen.add(key)
+                unique_items.append(item)
+
+        if not unique_items:
+            raise HTTPException(status_code=400, detail="No items found in receipt")
+
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO scans(image_ref)
+                    VALUES (%s)
+                    RETURNING id;
+                    """,
+                    (file_path,),
+                )
+                scan_id = cur.fetchone()[0]
+
+                for item in unique_items:
+                    cur.execute(
+                        """
+                        INSERT INTO scan_detections(scan_id, label, confidence)
+                        VALUES (%s, %s, %s);
+                        """,
+                        (scan_id, item, 1.0),
+                    )
+
+                conn.commit()
+
+        return {
+            "ok": True,
+            "scan_id": scan_id,
+            "items_count": len(unique_items),
+            "items": unique_items,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
