@@ -48,7 +48,7 @@ export default function HomeScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.title}>Fridge 9000</Text>
+      <Text style={styles.title}>Home 9000</Text>
       <Text style={styles.subtitle}>Mobile Dashboard</Text>
 
       {loading ? (

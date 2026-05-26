@@ -185,11 +185,16 @@ export default function ReviewScreen() {
 
             <TextInput
               value={item.final_label}
+              onChangeText={(text) =>
+                updateItem(index, "final_label", text)
+              }
               style={[
                 styles.input,
-                styles.disabledInput,
+                item.included
+                  ? styles.disabledInput
+                  : styles.enabledInput,
               ]}
-              editable={false}
+              editable={!item.included}
             />
 
             <View style={styles.switchRow}>
@@ -341,6 +346,10 @@ const styles = StyleSheet.create({
     fontSize: 15,
     marginBottom: 12,
     textAlign: "center",
+  },
+    enabledInput: {
+    backgroundColor: "#ffffff",
+    color: "#111827",
   },
 
   retryButton: {

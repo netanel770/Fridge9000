@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { router } from "expo-router";
+import { useCallback,useEffect, useState } from "react";
+import { router,useFocusEffect } from "expo-router";
 import {
   View,
   Text,
@@ -32,9 +32,11 @@ export default function ManualInventoryScreen() {
     }
   }
 
-  useEffect(() => {
+  useFocusEffect(
+  useCallback(() => {
     loadInventory();
-  }, []);
+  }, [])
+  );
 
   function changeMode(nextMode: Mode) {
     setMode(nextMode);

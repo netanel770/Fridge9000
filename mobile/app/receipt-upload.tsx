@@ -14,32 +14,36 @@ import { router } from "expo-router";
 import { uploadReceiptPdf } from "../src/services/api";
 
 export default function ReceiptUploadScreen() {
-  const [fileUri, setFileUri] = useState<string | null>(null);
-  const [fileName, setFileName] = useState<string>("");
+  const [selectedFile, setSelectedFile] = useState<any>(null);
   const [loading, setLoading] = useState(false);
 
-  async function pickPdf() {
+  async function pickReceipt() {
     const result = await DocumentPicker.getDocumentAsync({
-      type: "application/pdf",
+      type: [
+        "application/pdf",
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/*",
+      ],
       copyToCacheDirectory: true,
     });
 
     if (!result.canceled) {
-      setFileUri(result.assets[0].uri);
-      setFileName(result.assets[0].name);
+      setSelectedFile(result.assets[0]);
     }
   }
 
   async function uploadReceipt() {
-    if (!fileUri) {
-      Alert.alert("No PDF selected");
+    if (!selectedFile) {
+      Alert.alert("No file selected");
       return;
     }
 
     setLoading(true);
 
     try {
-      await uploadReceiptPdf(fileUri);
+      await uploadReceiptPdf(selectedFile);
 
       router.push({
         pathname: "/review",
@@ -63,31 +67,33 @@ export default function ReceiptUploadScreen() {
       </Text>
 
       <Text style={styles.subtitle}>
-        Upload a supermarket receipt PDF
+        Upload a supermarket receipt PDF or image
       </Text>
 
       <Pressable
         style={styles.secondaryButton}
-        onPress={pickPdf}
+        onPress={pickReceipt}
       >
         <Text style={styles.secondaryButtonText}>
-          {fileUri ? "Choose Another PDF" : "Pick PDF"}
+          {selectedFile
+            ? "Choose Another File"
+            : "Pick Receipt"}
         </Text>
       </Pressable>
 
       <Text style={styles.fileText}>
-        {fileUri
-          ? `Selected: ${fileName}`
-          : "No PDF selected yet"}
+        {selectedFile
+          ? `Selected: ${selectedFile.name}`
+          : "No receipt selected yet"}
       </Text>
 
       <Pressable
         style={[
           styles.primaryButton,
-          (!fileUri || loading) && styles.disabledButton,
+          (!selectedFile || loading) && styles.disabledButton,
         ]}
         onPress={uploadReceipt}
-        disabled={!fileUri || loading}
+        disabled={!selectedFile || loading}
       >
         {loading ? (
           <ActivityIndicator color="#fff" />
