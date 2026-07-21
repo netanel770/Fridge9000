@@ -8,13 +8,27 @@ CREATE TABLE IF NOT EXISTS items (
   category TEXT NOT NULL
 );
 
--- Inventory
+-- Inventory summary
 CREATE TABLE IF NOT EXISTS inventory (
   item_id INT PRIMARY KEY REFERENCES items(id),
   quantity INT NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'OK',
   last_updated TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+-- Inventory batches with expiry tracking
+CREATE TABLE IF NOT EXISTS inventory_batches (
+  id SERIAL PRIMARY KEY,
+  item_id INT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  quantity INT NOT NULL DEFAULT 0,
+  expiry_date DATE,
+  expiry_estimate_date DATE,
+  expiry_source TEXT NOT NULL DEFAULT 'estimated',
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  last_updated TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_inventory_batches_item_id ON inventory_batches(item_id);
 
 -- Scans
 CREATE TABLE IF NOT EXISTS scans (

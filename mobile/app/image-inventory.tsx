@@ -30,31 +30,48 @@ export default function UpdateInventoryScreen() {
     }
   }
 
-  async function uploadImage() {
-  if (!imageUri) {
-    Alert.alert("No image selected", "Please choose an image first.");
-    return;
-  }
-
-  setLoading(true);
-
-  try {
-    const res = await uploadScanImage(imageUri);
-
-    if (!res.ok) {
-      throw new Error(res.error || "Upload failed");
+  async function takePhoto() {
+    const permission = await ImagePicker.requestCameraPermissionsAsync();
+    if (permission.status !== "granted") {
+      Alert.alert("Permission required", "Camera access is required to take a photo.");
+      return;
     }
 
-    router.push({
-      pathname: "/review",
-      params: { mode },
+    const result = await ImagePicker.launchCameraAsync({
+      allowsEditing: false,
+      quality: 0.8,
     });
-  } catch (e: any) {
-    Alert.alert("Upload failed", e.message || "Unknown error");
-  } finally {
-    setLoading(false);
+
+    if (!result.canceled) {
+      setImageUri(result.assets[0].uri);
+    }
   }
-}
+
+  async function uploadImage() {
+    if (!imageUri) {
+      Alert.alert("No image selected", "Please choose an image first.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const res = await uploadScanImage(imageUri);
+
+      if (!res.ok) {
+        throw new Error(res.error || "Upload failed");
+      }
+
+      router.push({
+        pathname: "/review",
+        params: { mode },
+      });
+    } catch (e: any) {
+      Alert.alert("Upload failed", e.message || "Unknown error");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   return (
     <View style={styles.container}>
@@ -65,19 +82,19 @@ export default function UpdateInventoryScreen() {
 
       <View style={styles.radioContainer}>
         <Pressable style={styles.radioRow} onPress={() => setMode("Added")}>
-          <View style={styles.radioOuter}>
-            {mode === "Added" && <View style={styles.radioInner} />}
-          </View>
+          <View style={styles.radioOuter}>{mode === "Added" && <View style={styles.radioInner} />}</View>
           <Text style={styles.radioText}>Add Mode</Text>
         </Pressable>
 
         <Pressable style={styles.radioRow} onPress={() => setMode("Removed")}>
-          <View style={styles.radioOuter}>
-            {mode === "Removed" && <View style={styles.radioInner} />}
-          </View>
+          <View style={styles.radioOuter}>{mode === "Removed" && <View style={styles.radioInner} />}</View>
           <Text style={styles.radioText}>Remove Mode</Text>
         </Pressable>
       </View>
+
+      <Pressable style={styles.secondaryButton} onPress={takePhoto}>
+        <Text style={styles.secondaryButtonText}>Take Photo</Text>
+      </Pressable>
 
       <Pressable style={styles.secondaryButton} onPress={pickImage}>
         <Text style={styles.secondaryButtonText}>
@@ -122,7 +139,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: "#6b7280",
   },
-  
   fileText: {
     fontSize: 14,
     color: "#374151",
@@ -148,38 +164,38 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   radioContainer: {
-  backgroundColor: "#ffffff",
-  borderRadius: 14,
-  padding: 14,
-  gap: 14,
-  borderWidth: 1,
-  borderColor: "#e5e7eb",
-},
-radioRow: {
-  flexDirection: "row",
-  alignItems: "center",
-  gap: 10,
-},
-radioOuter: {
-  width: 22,
-  height: 22,
-  borderRadius: 11,
-  borderWidth: 2,
-  borderColor: "#2563eb",
-  alignItems: "center",
-  justifyContent: "center",
-},
-radioInner: {
-  width: 10,
-  height: 10,
-  borderRadius: 5,
-  backgroundColor: "#2563eb",
-},
-radioText: {
-  fontSize: 16,
-  fontWeight: "600",
-  color: "#111827",
-},
+    backgroundColor: "#ffffff",
+    borderRadius: 14,
+    padding: 14,
+    gap: 14,
+    borderWidth: 1,
+    borderColor: "#e5e7eb",
+  },
+  radioRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  radioOuter: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 2,
+    borderColor: "#2563eb",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  radioInner: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: "#2563eb",
+  },
+  radioText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#111827",
+  },
   secondaryButtonText: {
     color: "#111827",
     fontSize: 16,

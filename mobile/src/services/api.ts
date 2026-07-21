@@ -1,6 +1,7 @@
 import { API_BASE_URL } from "./config";
 import type {
   InventoryItem,
+  InventoryBatchItem,
   AlertItem,
   EventItem,
   LatestScan,
@@ -12,7 +13,15 @@ import type {
 async function handleJsonResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || "Request failed");
+    try {
+      const data = JSON.parse(text);
+      throw new Error(data.detail || data.error || "Request failed");
+    } catch (error) {
+      if (error instanceof Error && error.name === "Error") {
+        throw error;
+      }
+      throw new Error(text || "Request failed");
+    }
   }
   return response.json();
 }
@@ -22,7 +31,12 @@ export async function getInventory(): Promise<InventoryItem[]> {
   return handleJsonResponse<InventoryItem[]>(res);
 }
 
-export async function getAllInventory() {
+export async function getInventoryBatches(): Promise<InventoryBatchItem[]> {
+  const res = await fetch(`${API_BASE_URL}/inventory/batches`);
+  return handleJsonResponse<InventoryBatchItem[]>(res);
+}
+
+export async function getAllInventory(): Promise<InventoryItem[]> {
   const res = await fetch(`${API_BASE_URL}/inventory/all`);
   const data = await res.json();
 
@@ -44,7 +58,9 @@ export async function searchInventoryItems(query: string) {
 export async function manualInventoryUpdate(
   itemName: string,
   action: "Added" | "Removed",
-  quantity = 1
+  quantity: number,
+  expiryDate: string,
+  expirySource: "manual" | "estimated" = "manual",
 ) {
   const res = await fetch(`${API_BASE_URL}/inventory/manual`, {
     method: "POST",
@@ -55,6 +71,8 @@ export async function manualInventoryUpdate(
       item_name: itemName,
       action,
       quantity,
+      expiry_date: expiryDate,
+      expiry_source: expirySource,
     }),
   });
 
@@ -209,4 +227,20 @@ export async function uploadReceiptPdf(file: any) {
   }
 
   return data;
+}
+
+export async function updateInventoryBatchExpiry(batchId: number, expiryDate: string) {
+  const res = await fetch(`${API_BASE_URL}/inventory/batches/${batchId}/expiry`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expiry_date: expiryDate }),
+  });
+  return handleJsonResponse<{ ok: boolean }>(res);
+}
+
+export async function removeInventoryBatch(batchId: number) {
+  const res = await fetch(`${API_BASE_URL}/inventory/batches/${batchId}/remove`, {
+    method: "POST",
+  });
+  return handleJsonResponse<{ ok: boolean; removed_quantity: number }>(res);
 }

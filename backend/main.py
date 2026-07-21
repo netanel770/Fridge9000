@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from typing import List, Optional, Dict, Any
 from fastapi.middleware.cors import CORSMiddleware
 import psycopg2
@@ -55,6 +55,111 @@ def load_rules():
             _RULES_CACHE = json.load(f)
     return _RULES_CACHE
 
+
+def parse_expiry_date(value: Optional[Any]) -> Optional[date]:
+    if not value:
+        return None
+    if isinstance(value, date):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        text = value.strip()
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(text, fmt).date()
+            except ValueError:
+                continue
+    return None
+
+
+def estimate_expiry_date(item_name: str) -> Optional[date]:
+    name = (item_name or "").lower()
+    if any(token in name for token in ["milk", "yogurt", "cream", "cheese", "butter"]):
+        return datetime.utcnow().date() + timedelta(days=7)
+    if any(token in name for token in ["meat", "chicken", "fish", "salami", "ham"]):
+        return datetime.utcnow().date() + timedelta(days=3)
+    if any(token in name for token in ["tomato", "cucumber", "lettuce", "avocado", "apple", "banana", "orange", "carrot", "eggplant"]):
+        return datetime.utcnow().date() + timedelta(days=5)
+    if any(token in name for token in ["bread", "pita", "bun", "bagel"]):
+        return datetime.utcnow().date() + timedelta(days=3)
+    return datetime.utcnow().date() + timedelta(days=14)
+
+
+def ensure_schema():
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS inventory_batches (
+                    id SERIAL PRIMARY KEY,
+                    item_id INT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                    quantity INT NOT NULL DEFAULT 0,
+                    expiry_date DATE,
+                    expiry_estimate_date DATE,
+                    expiry_source TEXT NOT NULL DEFAULT 'estimated',
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    last_updated TIMESTAMP NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO inventory_batches(item_id, quantity, expiry_date, expiry_estimate_date, expiry_source, created_at, last_updated)
+                SELECT inv.item_id, inv.quantity, NULL, NULL, 'manual', inv.last_updated, inv.last_updated
+                FROM inventory inv
+                LEFT JOIN inventory_batches b
+                    ON b.item_id = inv.item_id
+                   AND b.expiry_date IS NULL
+                   AND b.expiry_estimate_date IS NULL
+                   AND b.expiry_source = 'manual'
+                WHERE inv.quantity > 0
+                  AND b.id IS NULL;
+                """
+            )
+            cur.execute("SELECT id FROM items;")
+            items = cur.fetchall()
+            for item in items:
+                cur.execute(
+                    "SELECT COALESCE(SUM(quantity), 0) AS quantity FROM inventory_batches WHERE item_id = %s;",
+                    (item[0],),
+                )
+                quantity = cur.fetchone()[0]
+                status = "MISSING" if quantity == 0 else "LOW" if quantity == 1 else "OK"
+                cur.execute(
+                    """
+                    INSERT INTO inventory(item_id, quantity, status, last_updated)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (item_id)
+                    DO UPDATE SET quantity = EXCLUDED.quantity, status = EXCLUDED.status, last_updated = NOW();
+                    """,
+                    (item[0], quantity, status),
+                )
+            conn.commit()
+
+
+def sync_inventory_summary(conn):
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM items;")
+        items = cur.fetchall()
+        for item in items:
+            cur.execute(
+                "SELECT COALESCE(SUM(quantity), 0) AS quantity FROM inventory_batches WHERE item_id = %s;",
+                (item[0],),
+            )
+            quantity = cur.fetchone()[0]
+            status = "MISSING" if quantity == 0 else "LOW" if quantity == 1 else "OK"
+            cur.execute(
+                """
+                INSERT INTO inventory(item_id, quantity, status, last_updated)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (item_id)
+                DO UPDATE SET quantity = EXCLUDED.quantity, status = EXCLUDED.status, last_updated = NOW();
+                """,
+                (item[0], quantity, status),
+            )
+
+
 def apply_rules(raw_detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     rules = load_rules()
     deny = set([x.lower() for x in rules.get("deny_labels", [])])
@@ -94,6 +199,8 @@ def apply_rules(raw_detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 
+ensure_schema()
+
 @app.get("/health")
 def health():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
@@ -119,10 +226,19 @@ async def door_closed_upload(file: UploadFile = File(...)):
 def inventory() -> List[Dict[str, Any]]:
     sql = """
     SELECT i.id, i.name, i.category,
-           inv.quantity, inv.status, inv.last_updated
-    FROM inventory inv
-    JOIN items i ON i.id = inv.item_id
-    WHERE inv.quantity > 0
+           SUM(b.quantity) AS quantity,
+           CASE
+               WHEN SUM(b.quantity) = 0 THEN 'MISSING'
+               WHEN SUM(b.quantity) <= 1 THEN 'LOW'
+               ELSE 'OK'
+           END AS status,
+           MAX(b.last_updated) AS last_updated,
+           MIN(COALESCE(b.expiry_date, b.expiry_estimate_date)) AS expiry_date,
+           MIN(COALESCE(b.expiry_estimate_date, b.expiry_date)) AS expiry_estimate_date
+    FROM items i
+    LEFT JOIN inventory_batches b ON b.item_id = i.id
+    GROUP BY i.id, i.name, i.category
+    HAVING SUM(b.quantity) > 0
     ORDER BY i.category, i.name;
     """
     with get_conn() as conn:
@@ -131,15 +247,106 @@ def inventory() -> List[Dict[str, Any]]:
             return cur.fetchall()
 
 
+@app.get("/inventory/batches")
+def inventory_batches() -> List[Dict[str, Any]]:
+    sql = """
+    SELECT b.id, b.item_id, i.name, i.category,
+           b.quantity, b.expiry_date, b.expiry_estimate_date, b.expiry_source,
+           b.created_at, b.last_updated
+    FROM inventory_batches b
+    JOIN items i ON i.id = b.item_id
+    WHERE b.quantity > 0
+    ORDER BY i.category, i.name, b.expiry_date, b.created_at;
+    """
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql)
+            return cur.fetchall()
+
+
+@app.patch("/inventory/batches/{batch_id}/expiry")
+def update_inventory_batch_expiry(batch_id: int, payload: Dict[str, Any]):
+    raw_expiry_date = payload.get("expiry_date")
+    expiry_date = parse_expiry_date(raw_expiry_date)
+    if not expiry_date:
+        raise HTTPException(status_code=400, detail="A valid expiry date is required (YYYY-MM-DD)")
+    if expiry_date <= date.today():
+        raise HTTPException(status_code=400, detail="The new expiry date must be in the future")
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE inventory_batches
+                SET expiry_date = %s,
+                    expiry_estimate_date = NULL,
+                    expiry_source = 'manual',
+                    last_updated = NOW()
+                WHERE id = %s AND quantity > 0
+                RETURNING id, item_id, quantity, expiry_date;
+                """,
+                (expiry_date, batch_id),
+            )
+            updated_batch = cur.fetchone()
+            if not updated_batch:
+                raise HTTPException(status_code=404, detail="Inventory batch not found")
+            conn.commit()
+            return {"ok": True, "batch": updated_batch}
+
+
+@app.post("/inventory/batches/{batch_id}/remove")
+def remove_inventory_batch(batch_id: int):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, item_id, quantity
+                FROM inventory_batches
+                WHERE id = %s AND quantity > 0
+                FOR UPDATE;
+                """,
+                (batch_id,),
+            )
+            batch = cur.fetchone()
+            if not batch:
+                raise HTTPException(status_code=404, detail="Inventory batch not found")
+
+            cur.execute(
+                """
+                UPDATE inventory_batches
+                SET quantity = 0, last_updated = NOW()
+                WHERE id = %s;
+                """,
+                (batch_id,),
+            )
+            cur.execute(
+                """
+                INSERT INTO events(scan_id, item_id, action, confidence, quantity_change)
+                VALUES (NULL, %s, 'Removed', 1.0, %s);
+                """,
+                (batch["item_id"], batch["quantity"]),
+            )
+            sync_inventory_summary(conn)
+            conn.commit()
+            return {"ok": True, "removed_quantity": batch["quantity"]}
+
+
 @app.get("/inventory/all")
 def inventory_all() -> List[Dict[str, Any]]:
     sql = """
     SELECT i.id, i.name, i.category,
-           COALESCE(inv.quantity, 0) AS quantity,
-           COALESCE(inv.status, 'MISSING') AS status,
-           inv.last_updated
+           COALESCE(SUM(b.quantity), 0) AS quantity,
+           CASE
+               WHEN COALESCE(SUM(b.quantity), 0) = 0 THEN 'MISSING'
+               WHEN COALESCE(SUM(b.quantity), 0) <= 1 THEN 'LOW'
+               ELSE 'OK'
+           END AS status,
+           MAX(b.last_updated) AS last_updated,
+           MIN(COALESCE(b.expiry_date, b.expiry_estimate_date)) AS expiry_date,
+           MIN(COALESCE(b.expiry_estimate_date, b.expiry_date)) AS expiry_estimate_date
     FROM items i
-    LEFT JOIN inventory inv ON i.id = inv.item_id
+    LEFT JOIN inventory_batches b ON b.item_id = i.id
+    GROUP BY i.id, i.name, i.category
     ORDER BY i.category, i.name;
     """
     with get_conn() as conn:
@@ -172,17 +379,42 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
             continue
 
         name = label.strip().capitalize()
+        expiry_date = parse_expiry_date(it.get("expiry_date"))
+        expiry_estimate_date = parse_expiry_date(it.get("expiry_estimate_date"))
+        expiry_source = it.get("expiry_source") or ("manual" if expiry_date else "estimated")
 
-        if name not in included_items_map:
-            included_items_map[name] = {
+        if mode == "Removed":
+            selected_expiry_date = expiry_date or expiry_estimate_date
+            if not selected_expiry_date:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Expiry date is required when removing {name}",
+                )
+            expiry_date = selected_expiry_date
+            expiry_estimate_date = None
+            expiry_source = "inventory"
+        elif not expiry_date and not expiry_estimate_date:
+            expiry_estimate_date = estimate_expiry_date(name)
+            expiry_source = "estimated"
+
+        key = (
+            (name, expiry_date)
+            if mode == "Removed"
+            else (name, expiry_date, expiry_estimate_date, expiry_source)
+        )
+        if key not in included_items_map:
+            included_items_map[key] = {
                 "name": name,
                 "confidence": confidence,
                 "quantity": 1,
+                "expiry_date": expiry_date,
+                "expiry_estimate_date": expiry_estimate_date,
+                "expiry_source": expiry_source,
             }
         else:
-            included_items_map[name]["quantity"] += 1
-            included_items_map[name]["confidence"] = max(
-                included_items_map[name]["confidence"],
+            included_items_map[key]["quantity"] += 1
+            included_items_map[key]["confidence"] = max(
+                included_items_map[key]["confidence"],
                 confidence,
             )
 
@@ -211,6 +443,9 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
                 name = item_data["name"]
                 confidence = item_data["confidence"]
                 quantity_change = item_data["quantity"]
+                expiry_date = item_data.get("expiry_date")
+                expiry_estimate_date = item_data.get("expiry_estimate_date")
+                expiry_source = item_data.get("expiry_source") or "estimated"
 
                 cur.execute(
                     "SELECT id, category FROM items WHERE name = %s;",
@@ -237,49 +472,86 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
                 else:
                     item_id = item["id"]
 
-                cur.execute(
-                    "SELECT quantity FROM inventory WHERE item_id = %s;",
-                    (item_id,),
-                )
-                inv = cur.fetchone()
-                current_qty = inv["quantity"] if inv else 0
-
-                if mode == "Removed" and current_qty <= 0:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"{name} is not in inventory",
-                    )
-
-                if mode == "Removed" and current_qty < quantity_change:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Cannot remove {quantity_change}. Only {current_qty} available.",
-                    )
-
-                if not inv:
+                if mode == "Removed":
                     cur.execute(
                         """
-                        INSERT INTO inventory(item_id, quantity, status)
-                        VALUES (%s, 0, 'MISSING');
+                        SELECT id, quantity FROM inventory_batches
+                        WHERE item_id = %s
+                          AND quantity > 0
+                          AND COALESCE(expiry_date, expiry_estimate_date) = %s
+                        ORDER BY created_at
+                        FOR UPDATE
                         """,
-                        (item_id,),
+                        (item_id, expiry_date),
                     )
+                    batches = cur.fetchall()
 
-                if mode == "Added":
-                    new_qty = current_qty + quantity_change
+                    remaining = quantity_change
+                    for batch in batches:
+                        if remaining <= 0:
+                            break
+                        take = min(batch["quantity"], remaining)
+                        remaining -= take
+                        new_quantity = batch["quantity"] - take
+                        cur.execute(
+                            """
+                            UPDATE inventory_batches
+                            SET quantity = %s, last_updated = NOW()
+                            WHERE id = %s;
+                            """,
+                            (new_quantity, batch["id"]),
+                        )
+
+                    if remaining > 0:
+                        available = quantity_change - remaining
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Cannot remove {quantity_change} {name} item(s) with expiry date "
+                                f"{expiry_date}. Only {available} available."
+                            ),
+                        )
                 else:
-                    new_qty = current_qty - quantity_change
+                    cur.execute(
+                        """
+                        SELECT id, quantity FROM inventory_batches
+                        WHERE item_id = %s
+                          AND COALESCE(expiry_date, expiry_estimate_date)::text = COALESCE(%s, %s)::text
+                          AND COALESCE(expiry_source, 'estimated') = %s;
+                        """,
+                        (
+                            item_id,
+                            expiry_date,
+                            expiry_estimate_date,
+                            expiry_source,
+                        ),
+                    )
+                    existing_batch = cur.fetchone()
 
-                status = "MISSING" if new_qty == 0 else "LOW" if new_qty == 1 else "OK"
-
-                cur.execute(
-                    """
-                    UPDATE inventory
-                    SET quantity = %s, status = %s, last_updated = NOW()
-                    WHERE item_id = %s;
-                    """,
-                    (new_qty, status, item_id),
-                )
+                    if existing_batch:
+                        new_quantity = existing_batch["quantity"] + quantity_change
+                        cur.execute(
+                            """
+                            UPDATE inventory_batches
+                            SET quantity = %s, last_updated = NOW()
+                            WHERE id = %s;
+                            """,
+                            (new_quantity, existing_batch["id"]),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            INSERT INTO inventory_batches(item_id, quantity, expiry_date, expiry_estimate_date, expiry_source)
+                            VALUES (%s, %s, %s, %s, %s);
+                            """,
+                            (
+                                item_id,
+                                quantity_change,
+                                expiry_date,
+                                expiry_estimate_date,
+                                expiry_source,
+                            ),
+                        )
 
                 cur.execute(
                     """
@@ -289,13 +561,14 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
                     (scan_id, item_id, mode, confidence, quantity_change),
                 )
 
+            sync_inventory_summary(conn)
             conn.commit()
 
     return {
         "ok": True,
         "mode": mode,
         "updated_items": included_items,
-    }        
+    }
 
 
 @app.get("/scans/{scan_id}/detections")
@@ -314,11 +587,41 @@ def get_scan_detections(scan_id: int):
 @app.get("/alerts")
 def alerts() -> List[Dict[str, Any]]:
     sql = """
-    SELECT i.id, i.name, i.category, inv.quantity, inv.status, inv.last_updated
-    FROM inventory inv
-    JOIN items i ON i.id = inv.item_id
-    WHERE inv.status IN ('LOW', 'MISSING')
-    ORDER BY inv.status, i.name;
+    WITH inventory_totals AS (
+        SELECT i.id AS item_id, i.name, i.category,
+               COALESCE(SUM(b.quantity) FILTER (WHERE b.quantity > 0), 0) AS quantity,
+               MAX(b.last_updated) AS last_updated
+        FROM items i
+        LEFT JOIN inventory_batches b ON b.item_id = i.id
+        GROUP BY i.id, i.name, i.category
+    ), active_alerts AS (
+        SELECT t.item_id AS id, t.item_id, NULL::integer AS batch_id,
+               t.name, t.category, t.quantity,
+               CASE WHEN t.quantity = 0 THEN 'MISSING' ELSE 'LOW' END AS status,
+               'stock'::text AS alert_type,
+               NULL::date AS expiry_date,
+               t.last_updated
+        FROM inventory_totals t
+        WHERE t.quantity <= 1
+
+        UNION ALL
+
+        SELECT b.id, i.id AS item_id, b.id AS batch_id,
+               i.name, i.category, b.quantity,
+               CASE
+                   WHEN COALESCE(b.expiry_date, b.expiry_estimate_date) <= CURRENT_DATE THEN 'EXPIRED'
+                   ELSE 'EXPIRING'
+               END AS status,
+               'expiry'::text AS alert_type,
+               COALESCE(b.expiry_date, b.expiry_estimate_date) AS expiry_date,
+               b.last_updated
+        FROM inventory_batches b
+        JOIN items i ON i.id = b.item_id
+        WHERE b.quantity > 0
+          AND COALESCE(b.expiry_date, b.expiry_estimate_date) <= CURRENT_DATE + INTERVAL '3 days'
+    )
+    SELECT * FROM active_alerts
+    ORDER BY name, alert_type, expiry_date;
     """
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -708,13 +1011,17 @@ def manual_inventory(payload: Dict[str, Any]):
     {
         "item_name": "Milk",
         "action": "Added",   # or "Removed"
-        "quantity": 2        # optional, default 1
+        "quantity": 2,
+        "expiry_date": "2026-08-01",
+        "expiry_source": "manual"  # or "estimated"
     }
     """
 
     item_name = payload.get("item_name")
     action = payload.get("action")
     quantity_change = int(payload.get("quantity", 1))
+    selected_expiry_date = parse_expiry_date(payload.get("expiry_date"))
+    expiry_source = payload.get("expiry_source") or "manual"
 
     if not item_name or action not in ("Added", "Removed"):
         raise HTTPException(
@@ -728,11 +1035,30 @@ def manual_inventory(payload: Dict[str, Any]):
             detail="quantity must be greater than 0"
         )
 
+    if action == "Added" and not selected_expiry_date:
+        selected_expiry_date = estimate_expiry_date(item_name)
+        expiry_source = "estimated"
+
+    if action == "Removed" and not selected_expiry_date:
+        raise HTTPException(
+            status_code=400,
+            detail="An expiry date must be selected when removing inventory"
+        )
+
+    if action == "Added" and selected_expiry_date < date.today():
+        raise HTTPException(
+            status_code=400,
+            detail="The expiry date cannot be in the past"
+        )
+
+    if expiry_source not in ("manual", "estimated"):
+        expiry_source = "manual"
+
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
 
             # --- Ensure item exists ---
-            cur.execute("SELECT id, category FROM items WHERE name = %s;", (item_name,))
+            cur.execute("SELECT id, category FROM items WHERE LOWER(name) = LOWER(%s);", (item_name,))
             row = cur.fetchone()
 
             if row:
@@ -752,62 +1078,91 @@ def manual_inventory(payload: Dict[str, Any]):
                 )
                 item_id = cur.fetchone()["id"]
 
-            # --- Get current inventory ---
-            cur.execute(
-                "SELECT quantity FROM inventory WHERE item_id = %s;",
-                (item_id,),
-            )
-            inv = cur.fetchone()
-
-            current_qty = inv["quantity"] if inv else 0
-
-            # --- Validation for removal ---
             if action == "Removed":
-                if current_qty <= 0:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"{item_name} is not in inventory"
-                    )
-
-                if current_qty < quantity_change:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Cannot remove {quantity_change}. Only {current_qty} available."
-                    )
-
-            # --- Create inventory row if not exists ---
-            if not inv:
                 cur.execute(
                     """
-                    INSERT INTO inventory(item_id, quantity, status)
-                    VALUES (%s, 0, 'MISSING');
+                    SELECT id, quantity FROM inventory_batches
+                    WHERE item_id = %s
+                      AND quantity > 0
+                      AND COALESCE(expiry_date, expiry_estimate_date) = %s
+                    ORDER BY created_at
+                    FOR UPDATE
                     """,
-                    (item_id,),
+                    (item_id, selected_expiry_date),
                 )
+                batches = cur.fetchall()
+                remaining = quantity_change
+                for batch in batches:
+                    if remaining <= 0:
+                        break
+                    take = min(batch["quantity"], remaining)
+                    remaining -= take
+                    cur.execute(
+                        """
+                        UPDATE inventory_batches
+                        SET quantity = %s, last_updated = NOW()
+                        WHERE id = %s;
+                        """,
+                        (batch["quantity"] - take, batch["id"]),
+                    )
 
-            # --- Calculate new quantity ---
-            if action == "Added":
-                new_qty = current_qty + quantity_change
+                if remaining > 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Cannot remove {quantity_change} {item_name} item(s) with expiry date "
+                            f"{selected_expiry_date}. Only {quantity_change - remaining} available."
+                        )
+                    )
             else:
-                new_qty = current_qty - quantity_change
+                expiry_date = selected_expiry_date if expiry_source == "manual" else None
+                expiry_estimate_date = selected_expiry_date if expiry_source == "estimated" else None
+                cur.execute(
+                    """
+                    SELECT id, quantity
+                    FROM inventory_batches
+                    WHERE item_id = %s
+                      AND COALESCE(expiry_date, expiry_estimate_date) = %s
+                      AND expiry_source = %s
+                    FOR UPDATE;
+                    """,
+                    (item_id, selected_expiry_date, expiry_source),
+                )
+                existing_batch = cur.fetchone()
+                if existing_batch:
+                    cur.execute(
+                        """
+                        UPDATE inventory_batches
+                        SET quantity = %s, last_updated = NOW()
+                        WHERE id = %s;
+                        """,
+                        (existing_batch["quantity"] + quantity_change, existing_batch["id"]),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO inventory_batches(
+                            item_id, quantity, expiry_date, expiry_estimate_date, expiry_source
+                        )
+                        VALUES (%s, %s, %s, %s, %s);
+                        """,
+                        (
+                            item_id,
+                            quantity_change,
+                            expiry_date,
+                            expiry_estimate_date,
+                            expiry_source,
+                        ),
+                    )
 
-            # --- Determine status ---
-            if new_qty == 0:
-                status = "MISSING"
-            elif new_qty == 1:
-                status = "LOW"
-            else:
-                status = "OK"
+            sync_inventory_summary(conn)
 
-            # --- Update inventory ---
             cur.execute(
-                """
-                UPDATE inventory
-                SET quantity=%s, status=%s, last_updated=NOW()
-                WHERE item_id=%s;
-                """,
-                (new_qty, status, item_id),
+                "SELECT COALESCE(SUM(quantity), 0) AS quantity FROM inventory_batches WHERE item_id = %s;",
+                (item_id,),
             )
+            new_qty = cur.fetchone()["quantity"]
+            status = "MISSING" if new_qty == 0 else "LOW" if new_qty == 1 else "OK"
 
             # --- Create event ---
             cur.execute(

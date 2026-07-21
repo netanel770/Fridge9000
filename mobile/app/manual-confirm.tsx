@@ -17,6 +17,8 @@ export default function ManualConfirmScreen() {
     quantityChange?: string;
     beforeQty?: string;
     afterQty?: string;
+    expiryDate?: string;
+    expirySource?: "manual" | "estimated";
   }>();
 
   const [loading, setLoading] = useState(false);
@@ -26,12 +28,14 @@ export default function ManualConfirmScreen() {
   const quantityChange = Number(params.quantityChange || 1);
   const beforeQty = Number(params.beforeQty || 0);
   const afterQty = Number(params.afterQty || 0);
+  const expiryDate = params.expiryDate || "";
+  const expirySource = params.expirySource || "manual";
 
   async function confirmAction() {
     setLoading(true);
 
     try {
-      await manualInventoryUpdate(itemName, mode, quantityChange);
+      await manualInventoryUpdate(itemName, mode, quantityChange, expiryDate, expirySource);
 
       Alert.alert("Success", "Inventory updated successfully.", [
         {
@@ -61,13 +65,21 @@ export default function ManualConfirmScreen() {
         <Text style={styles.label}>Quantity change</Text>
         <Text style={styles.value}>{quantityChange}</Text>
 
+        <Text style={styles.label}>Expiry date</Text>
+        <Text style={styles.value}>{expiryDate}</Text>
+        {mode === "Added" && (
+          <Text style={styles.dateSource}>
+            {expirySource === "estimated" ? "Suggested date" : "Manually selected date"}
+          </Text>
+        )}
+
         <View style={styles.qtyCompare}>
           <View style={styles.qtyBox}>
             <Text style={styles.qtyLabel}>Before</Text>
             <Text style={styles.qtyNumber}>{beforeQty}</Text>
           </View>
 
-          <Text style={styles.arrow}>→</Text>
+          <Text style={styles.arrow}>{"->"}</Text>
 
           <View style={styles.qtyBox}>
             <Text style={styles.qtyLabel}>After</Text>
@@ -129,6 +141,10 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: "700",
     color: "#111827",
+  },
+  dateSource: {
+    color: "#6b7280",
+    fontSize: 13,
   },
   qtyCompare: {
     marginTop: 18,

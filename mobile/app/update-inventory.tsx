@@ -1,9 +1,9 @@
 import { router } from "expo-router";
-import { View, Text, StyleSheet, Pressable } from "react-native";
+import { Text, StyleSheet, Pressable, ScrollView } from "react-native";
 
 export default function UpdateInventoryMenuScreen() {
   return (
-    <View style={styles.container}>
+    <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>Update Inventory</Text>
       <Text style={styles.subtitle}>Choose how you want to update your inventory</Text>
 
@@ -30,7 +30,15 @@ export default function UpdateInventoryMenuScreen() {
         <Text style={styles.cardTitle}>Upload Receipt</Text>
         <Text style={styles.cardText}>Add items from a supermarket PDF receipt</Text>
       </Pressable>
-    </View>
+
+      <Pressable
+        style={[styles.card, styles.expiredCard]}
+        onPress={() => router.push("/expired-items")}
+      >
+        <Text style={[styles.cardTitle, styles.expiredTitle]}>Review Expired Products</Text>
+        <Text style={styles.cardText}>Remove expired batches or extend their expiry date</Text>
+      </Pressable>
+    </ScrollView>
   );
 }
 
@@ -67,5 +75,12 @@ const styles = StyleSheet.create({
   cardText: {
     fontSize: 14,
     color: "#6b7280",
+  },
+  expiredCard: {
+    borderColor: "#fecaca",
+    backgroundColor: "#fff7f7",
+  },
+  expiredTitle: {
+    color: "#b91c1c",
   },
 });

@@ -5,15 +5,34 @@ export type InventoryItem = {
   quantity: number;
   status: "OK" | "LOW" | "MISSING";
   last_updated: string;
+  expiry_date?: string | null;
+  expiry_estimate_date?: string | null;
+};
+
+export type InventoryBatchItem = {
+  id: number;
+  item_id: number;
+  name: string;
+  category: string;
+  quantity: number;
+  expiry_date?: string | null;
+  expiry_estimate_date?: string | null;
+  expiry_source?: string | null;
+  created_at: string;
+  last_updated: string;
 };
 
 export type AlertItem = {
   id: number;
+  item_id: number;
+  batch_id?: number | null;
   name: string;
   category: string;
   quantity: number;
-  status: "LOW" | "MISSING";
+  status: "LOW" | "MISSING" | "EXPIRING" | "EXPIRED";
+  alert_type: "stock" | "expiry";
   last_updated: string;
+  expiry_date?: string | null;
 };
 
 export type EventItem = {
@@ -55,6 +74,9 @@ export type ReviewItem = {
   y1?: number | null;
   x2?: number | null;
   y2?: number | null;
+  expiry_date?: string | null;
+  expiry_estimate_date?: string | null;
+  expiry_source?: string | null;
 };
 
 export type UploadScanResponse = {
