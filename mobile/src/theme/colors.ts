@@ -1,5 +1,7 @@
 export const colors = {
-  primary: "#3b82f6",
+  primary: "#2563eb",
+  primaryDark: "#1d4ed8",
+  primarySoft: "#eff6ff",
   primaryText: "#ffffff",
   success: "#10b981",
   successBg: "#dcfce7",
@@ -20,6 +22,9 @@ export const colors = {
   textMuted: "#6b7280",
   textHint: "#64748b",
   ghost: "#e2e8f0",
+  navy: "#0f172a",
+  amber: "#d97706",
+  purple: "#7c3aed",
 } as const;
 
 export type ColorToken = keyof typeof colors;

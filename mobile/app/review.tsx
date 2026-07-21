@@ -88,8 +88,27 @@ export default function ReviewScreen() {
 
       setInventoryBatches(batches);
 
+      const removalAvailability = new Map<string, { date: string; remaining: number }[]>();
+      if (mode === "Removed") {
+        batches.forEach((batch) => {
+          const date = getBatchExpiryDate(batch);
+          if (!date || batch.quantity <= 0) return;
+          const name = normalizeItemName(batch.name);
+          const options = removalAvailability.get(name) || [];
+          const existing = options.find((option) => option.date === date);
+          if (existing) existing.remaining += batch.quantity;
+          else options.push({ date, remaining: batch.quantity });
+          options.sort((a, b) => a.date.localeCompare(b.date));
+          removalAvailability.set(name, options);
+        });
+      }
+
       const reviewItems: ReviewItem[] = detections.map((d) => {
         const suggestedExpiry = mode === "Removed" ? null : getSuggestedExpiryDate(d.label);
+        const removalOption = mode === "Removed"
+          ? removalAvailability.get(normalizeItemName(d.label))?.find((option) => option.remaining > 0)
+          : undefined;
+        if (removalOption) removalOption.remaining -= 1;
         return {
           id: d.id,
           original_label: d.label,
@@ -100,9 +119,9 @@ export default function ReviewScreen() {
           y1: d.y1,
           x2: d.x2,
           y2: d.y2,
-          expiry_date: suggestedExpiry,
-          expiry_estimate_date: suggestedExpiry,
-          expiry_source: mode === "Removed" ? null : "estimated",
+          expiry_date: removalOption?.date || suggestedExpiry,
+          expiry_estimate_date: mode === "Removed" ? null : suggestedExpiry,
+          expiry_source: mode === "Removed" ? (removalOption ? "inventory" : null) : "estimated",
         };
       });
 

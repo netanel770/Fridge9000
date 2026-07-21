@@ -2,8 +2,10 @@ import { useCallback, useMemo, useState } from "react";
 import { router, useFocusEffect } from "expo-router";
 import {
   Alert,
+  ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -11,7 +13,13 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { getAllInventory, getInventoryBatches } from "../src/services/api";
+import {
+  getAllInventory,
+  getInventoryBatches,
+  getOutlinePreparationJob,
+  startOutlinePreparation,
+} from "../src/services/api";
+import type { OutlinePreparationJob } from "../src/services/api";
 import type { InventoryBatchItem, InventoryItem } from "../src/types/api";
 
 type Mode = "Added" | "Removed";
@@ -68,6 +76,8 @@ export default function ManualInventoryScreen() {
   const [expiryDate, setExpiryDate] = useState(suggestedExpiryDate(""));
   const [expiryManuallyEdited, setExpiryManuallyEdited] = useState(false);
   const [selectedRemovalExpiry, setSelectedRemovalExpiry] = useState<string | null>(null);
+  const [preparingOutlines, setPreparingOutlines] = useState(false);
+  const [outlineJob, setOutlineJob] = useState<OutlinePreparationJob | null>(null);
 
   async function loadInventory() {
     try {
@@ -188,6 +198,35 @@ export default function ManualInventoryScreen() {
     });
   }
 
+  async function openAdjustOpenProducts() {
+    setPreparingOutlines(true);
+    try {
+      let job = await startOutlinePreparation();
+      setOutlineJob(job);
+      while (job.status === "queued" || job.status === "running") {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        job = await getOutlinePreparationJob(job.job_id);
+        setOutlineJob(job);
+      }
+
+      if (job.status === "error") {
+        throw new Error(job.message || "Outline preparation failed.");
+      }
+
+      setPreparingOutlines(false);
+      Alert.alert(
+        "Product outlines ready",
+        `${job.ready} ready, ${job.skipped} without a scan, ${job.failed} could not be isolated. `
+          + "Every product can still be adjusted.",
+        [{ text: "Continue", onPress: () => router.push("/adjust-open-products") }],
+        { cancelable: false },
+      );
+    } catch (e: any) {
+      setPreparingOutlines(false);
+      Alert.alert("Preparation failed", e.message || "Could not prepare product outlines.");
+    }
+  }
+
   return (
     <KeyboardAvoidingView
       style={styles.screen}
@@ -201,6 +240,19 @@ export default function ManualInventoryScreen() {
       >
         <Text style={styles.title}>Manual Update</Text>
         <Text style={styles.subtitle}>Add or remove products by expiry date</Text>
+
+        <Pressable
+          style={styles.adjustOpenCard}
+          onPress={openAdjustOpenProducts}
+        >
+          <View style={styles.adjustOpenText}>
+            <Text style={styles.adjustOpenTitle}>Adjust Open Products</Text>
+            <Text style={styles.adjustOpenSubtitle}>
+              Creates clear outlines from your scans, then lets you track how much remains. Preparation may take a moment.
+            </Text>
+          </View>
+          <Text style={styles.adjustOpenArrow}>{">"}</Text>
+        </Pressable>
 
         <View style={styles.modeBox}>
           {(["Added", "Removed"] as Mode[]).map((value) => (
@@ -302,6 +354,41 @@ export default function ManualInventoryScreen() {
           <Text style={styles.primaryButtonText}>Continue</Text>
         </Pressable>
       </ScrollView>
+
+      <Modal
+        visible={preparingOutlines}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => {}}
+      >
+        <View style={styles.preparationBackdrop}>
+          <View style={styles.preparationCard}>
+            <ActivityIndicator size="large" color="#2563eb" />
+            <Text style={styles.preparationTitle}>Preparing Product Outlines</Text>
+            <Text style={styles.preparationMessage}>
+              {outlineJob?.message || "Starting the outline model."}
+            </Text>
+            {outlineJob?.current_product && (
+              <Text style={styles.currentProduct}>Current product: {outlineJob.current_product}</Text>
+            )}
+            <View style={styles.progressTrack}>
+              <View style={[styles.progressFill, { width: `${outlineJob?.progress || 0}%` }]} />
+            </View>
+            <Text style={styles.progressText}>
+              {outlineJob?.processed || 0} of {outlineJob?.total || 0} complete - {outlineJob?.progress || 0}%
+            </Text>
+            <View style={styles.progressStats}>
+              <Text style={styles.statText}>Ready: {outlineJob?.ready || 0}</Text>
+              <Text style={styles.statText}>No scan: {outlineJob?.skipped || 0}</Text>
+              <Text style={styles.statText}>Needs image: {outlineJob?.failed || 0}</Text>
+            </View>
+            <Text style={styles.preparationHint}>
+              Existing high-quality outlines are reused. Products without an outline can still be adjusted.
+            </Text>
+          </View>
+        </View>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -311,6 +398,22 @@ const styles = StyleSheet.create({
   container: { flexGrow: 1, padding: 20, gap: 12, paddingBottom: 36 },
   title: { fontSize: 28, fontWeight: "700", color: "#111827" },
   subtitle: { fontSize: 15, color: "#6b7280", marginBottom: 2 },
+  adjustOpenCard: { backgroundColor: "#ecfdf5", borderWidth: 1, borderColor: "#6ee7b7", borderRadius: 14, padding: 14, flexDirection: "row", alignItems: "center", gap: 10 },
+  adjustOpenText: { flex: 1 },
+  adjustOpenTitle: { color: "#047857", fontSize: 17, fontWeight: "700" },
+  adjustOpenSubtitle: { color: "#4b5563", marginTop: 4, fontSize: 13 },
+  adjustOpenArrow: { color: "#047857", fontSize: 22, fontWeight: "700" },
+  preparationBackdrop: { flex: 1, backgroundColor: "rgba(15, 23, 42, 0.72)", alignItems: "center", justifyContent: "center", padding: 24 },
+  preparationCard: { width: "100%", maxWidth: 430, backgroundColor: "#fff", borderRadius: 18, padding: 20, alignItems: "center" },
+  preparationTitle: { color: "#111827", fontSize: 20, fontWeight: "700", marginTop: 14 },
+  preparationMessage: { color: "#4b5563", textAlign: "center", lineHeight: 20, marginTop: 8 },
+  currentProduct: { color: "#1d4ed8", fontWeight: "700", marginTop: 10 },
+  progressTrack: { width: "100%", height: 12, borderRadius: 6, backgroundColor: "#e5e7eb", overflow: "hidden", marginTop: 16 },
+  progressFill: { height: 12, backgroundColor: "#2563eb" },
+  progressText: { color: "#374151", fontWeight: "700", marginTop: 8 },
+  progressStats: { width: "100%", flexDirection: "row", justifyContent: "space-between", gap: 6, marginTop: 12 },
+  statText: { color: "#6b7280", fontSize: 12, fontWeight: "600" },
+  preparationHint: { color: "#6b7280", fontSize: 12, textAlign: "center", lineHeight: 17, marginTop: 14 },
   modeBox: { backgroundColor: "#fff", borderRadius: 14, padding: 14, gap: 14, borderWidth: 1, borderColor: "#e5e7eb" },
   modeRow: { flexDirection: "row", alignItems: "center", gap: 10 },
   radioOuter: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: "#2563eb", alignItems: "center", justifyContent: "center" },

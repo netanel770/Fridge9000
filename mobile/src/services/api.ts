@@ -26,13 +26,13 @@ async function handleJsonResponse<T>(response: Response): Promise<T> {
   return response.json();
 }
 
-export async function getInventory(): Promise<InventoryItem[]> {
-  const res = await fetch(`${API_BASE_URL}/inventory`);
+export async function getInventory(signal?: AbortSignal): Promise<InventoryItem[]> {
+  const res = await fetch(`${API_BASE_URL}/inventory`, { signal });
   return handleJsonResponse<InventoryItem[]>(res);
 }
 
-export async function getInventoryBatches(): Promise<InventoryBatchItem[]> {
-  const res = await fetch(`${API_BASE_URL}/inventory/batches`);
+export async function getInventoryBatches(signal?: AbortSignal): Promise<InventoryBatchItem[]> {
+  const res = await fetch(`${API_BASE_URL}/inventory/batches`, { signal });
   return handleJsonResponse<InventoryBatchItem[]>(res);
 }
 
@@ -84,8 +84,8 @@ export async function manualInventoryUpdate(
 
   return data;
 }
-export async function getAlerts(): Promise<AlertItem[]> {
-  const res = await fetch(`${API_BASE_URL}/alerts`);
+export async function getAlerts(signal?: AbortSignal): Promise<AlertItem[]> {
+  const res = await fetch(`${API_BASE_URL}/alerts`, { signal });
   return handleJsonResponse<AlertItem[]>(res);
 }
 
@@ -227,6 +227,64 @@ export async function uploadReceiptPdf(file: any) {
   }
 
   return data;
+}
+
+export async function updateInventoryBatchRemaining(batchId: number, remainingPercent: number) {
+  const res = await fetch(`${API_BASE_URL}/inventory/batches/${batchId}/remaining`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ remaining_percent: remainingPercent }),
+  });
+  return handleJsonResponse<{ ok: boolean; batch: InventoryBatchItem }>(res);
+}
+
+export async function uploadProductRepresentativeImage(itemId: number, imageUri: string) {
+  const formData = new FormData();
+  formData.append("file", {
+    uri: imageUri,
+    name: "product-reference.jpg",
+    type: "image/jpeg",
+  } as any);
+  const res = await fetch(`${API_BASE_URL}/items/${itemId}/representative-image`, {
+    method: "POST",
+    body: formData,
+  });
+  return handleJsonResponse<{ ok: boolean; quality_score: number }>(res);
+}
+
+export type OutlinePreparationJob = {
+  job_id: string;
+  status: "queued" | "running" | "complete" | "error";
+  phase: string;
+  message: string;
+  current_product?: string | null;
+  total: number;
+  processed: number;
+  ready: number;
+  skipped: number;
+  failed: number;
+  progress: number;
+};
+
+let currentOutlinePreparationJobId: string | null = null;
+
+export async function startOutlinePreparation(forceNewCheck = false): Promise<OutlinePreparationJob> {
+  if (!forceNewCheck && currentOutlinePreparationJobId) {
+    try {
+      return await getOutlinePreparationJob(currentOutlinePreparationJobId);
+    } catch {
+      currentOutlinePreparationJobId = null;
+    }
+  }
+  const res = await fetch(`${API_BASE_URL}/outlines/prepare`, { method: "POST" });
+  const job = await handleJsonResponse<OutlinePreparationJob>(res);
+  currentOutlinePreparationJobId = job.job_id;
+  return job;
+}
+
+export async function getOutlinePreparationJob(jobId: string): Promise<OutlinePreparationJob> {
+  const res = await fetch(`${API_BASE_URL}/outlines/jobs/${jobId}`);
+  return handleJsonResponse<OutlinePreparationJob>(res);
 }
 
 export async function updateInventoryBatchExpiry(batchId: number, expiryDate: string) {

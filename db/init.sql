@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS inventory_batches (
   expiry_date DATE,
   expiry_estimate_date DATE,
   expiry_source TEXT NOT NULL DEFAULT 'estimated',
+  open_unit_remaining_percent SMALLINT CONSTRAINT inventory_batches_remaining_percent_check CHECK (
+    open_unit_remaining_percent IS NULL
+    OR open_unit_remaining_percent BETWEEN 1 AND 99
+  ),
   created_at TIMESTAMP NOT NULL DEFAULT NOW(),
   last_updated TIMESTAMP NOT NULL DEFAULT NOW()
 );
@@ -64,6 +68,15 @@ CREATE TABLE IF NOT EXISTS scan_detections (
 
 
 CREATE INDEX IF NOT EXISTS idx_scan_detections_scan_id ON scan_detections(scan_id);
+
+CREATE TABLE IF NOT EXISTS representative_outlines (
+  item_id INT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+  image_path TEXT NOT NULL,
+  quality_score REAL NOT NULL DEFAULT 0,
+  source_detection_id INT REFERENCES scan_detections(id) ON DELETE SET NULL,
+  style_version INT NOT NULL DEFAULT 2,
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
 
 -- Manual review of detections
 CREATE TABLE IF NOT EXISTS detection_reviews (

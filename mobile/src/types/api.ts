@@ -4,6 +4,7 @@ export type InventoryItem = {
   category: string;
   quantity: number;
   status: "OK" | "LOW" | "MISSING";
+  estimated_quantity?: number;
   last_updated: string;
   expiry_date?: string | null;
   expiry_estimate_date?: string | null;
@@ -18,6 +19,7 @@ export type InventoryBatchItem = {
   expiry_date?: string | null;
   expiry_estimate_date?: string | null;
   expiry_source?: string | null;
+  open_unit_remaining_percent?: number | null;
   created_at: string;
   last_updated: string;
 };
