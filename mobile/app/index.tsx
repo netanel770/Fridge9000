@@ -143,6 +143,7 @@ export default function HomeScreen() {
 
     <View style={styles.updateArea}>
       <AppButton label="Update inventory" icon="scan-outline" onPress={() => router.push("/update-inventory")} />
+      <AppButton label="Rot Detection" icon="leaf-outline" variant="secondary" onPress={() => router.push("/rot-detection")} />
       <Text style={styles.updateHint}>Scan, upload a receipt, or update manually.</Text>
     </View>
 

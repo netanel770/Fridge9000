@@ -19,6 +19,8 @@ from fastapi.responses import FileResponse, Response
 import pytesseract
 from pdf2image import convert_from_path
 import re
+import logging
+from freshness import classification_probabilities, parse_freshness_class
 
 
 
@@ -43,6 +45,16 @@ app.add_middleware(
 )
 DATABASE_URL = os.getenv("DATABASE_URL")
 MODEL = YOLO("best.pt")
+LOGGER = logging.getLogger("uvicorn.error")
+FRESHNESS_MODEL_PATH = os.getenv(
+    "FRESHNESS_MODEL_PATH",
+    os.path.join(os.path.dirname(__file__), "fridge9000_freshness_classifier_sanity.pt"),
+)
+FRESHNESS_MAX_UPLOAD_BYTES = int(os.getenv("FRESHNESS_MAX_UPLOAD_BYTES", str(12 * 1024 * 1024)))
+FRESHNESS_UPLOAD_DIR = os.path.join(UPLOAD_DIR, "freshness")
+os.makedirs(FRESHNESS_UPLOAD_DIR, exist_ok=True)
+_FRESHNESS_MODEL = None
+_FRESHNESS_MODEL_LOCK = threading.Lock()
 RULES_PATH = os.path.join(os.path.dirname(__file__), "rules.json")
 _RULES_CACHE = None
 _SAM_MODEL = None
@@ -67,6 +79,32 @@ def load_rules():
         with open(RULES_PATH, "r", encoding="utf-8") as f:
             _RULES_CACHE = json.load(f)
     return _RULES_CACHE
+
+
+def get_freshness_model():
+    global _FRESHNESS_MODEL
+    if _FRESHNESS_MODEL is not None:
+        return _FRESHNESS_MODEL
+    with _FRESHNESS_MODEL_LOCK:
+        if _FRESHNESS_MODEL is None:
+            if not os.path.isfile(FRESHNESS_MODEL_PATH):
+                LOGGER.error("Freshness classifier model is missing: %s", FRESHNESS_MODEL_PATH)
+                raise RuntimeError("Freshness classifier model is not available.")
+            try:
+                _FRESHNESS_MODEL = YOLO(FRESHNESS_MODEL_PATH)
+            except Exception as exc:
+                LOGGER.exception("Freshness classifier model could not be loaded")
+                raise RuntimeError("Freshness classifier model could not be loaded.") from exc
+            if getattr(_FRESHNESS_MODEL, "task", None) != "classify":
+                LOGGER.error("Freshness model has unexpected task: %s", _FRESHNESS_MODEL.task)
+                _FRESHNESS_MODEL = None
+                raise RuntimeError("Freshness model is not a classification model.")
+            LOGGER.info(
+                "Freshness classifier loaded from %s with classes: %s",
+                FRESHNESS_MODEL_PATH,
+                _FRESHNESS_MODEL.names,
+            )
+    return _FRESHNESS_MODEL
 
 
 def parse_expiry_date(value: Optional[Any]) -> Optional[date]:
@@ -604,6 +642,69 @@ ensure_schema()
 def health():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
 
+
+@app.post("/freshness/analyze")
+async def analyze_freshness(file: UploadFile = File(...)):
+    allowed_types = {"image/jpeg", "image/png", "image/webp"}
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP image.")
+
+    contents = await file.read(FRESHNESS_MAX_UPLOAD_BYTES + 1)
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded image is empty.")
+    if len(contents) > FRESHNESS_MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Image is too large (maximum 12 MB).")
+
+    image = cv2.imdecode(np.frombuffer(contents, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=400, detail="Uploaded image could not be decoded.")
+
+    analysis_id = uuid.uuid4().hex
+    input_filename = f"{analysis_id}_input.jpg"
+    input_path = os.path.join(FRESHNESS_UPLOAD_DIR, input_filename)
+    if not cv2.imwrite(input_path, image):
+        raise HTTPException(status_code=500, detail="Could not save the uploaded image.")
+
+    try:
+        freshness_model = get_freshness_model()
+        with _FRESHNESS_MODEL_LOCK:
+            results = freshness_model.predict(
+                image,
+                verbose=False,
+            )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        LOGGER.exception("Freshness inference failed")
+        raise HTTPException(status_code=500, detail="Freshness analysis failed.") from exc
+
+    if not results or results[0].probs is None:
+        LOGGER.error("Freshness classifier returned no probabilities")
+        raise HTTPException(status_code=500, detail="Freshness classifier returned no result.")
+
+    result = results[0]
+    class_id = int(result.probs.top1)
+    confidence = float(result.probs.top1conf.item())
+    label = str(freshness_model.names.get(class_id, class_id))
+    classification = parse_freshness_class(label)
+    if classification is None:
+        LOGGER.error("Freshness classifier returned an unexpected class: %s", label)
+        raise HTTPException(status_code=422, detail="The model returned an unsupported freshness class.")
+    classification.update({"class_id": class_id, "confidence": confidence})
+
+    return {
+        "ok": True,
+        "classification": classification,
+        "candidates": classification_probabilities(
+            freshness_model.names, result.probs.data, limit=3
+        ),
+        "image_url": f"/uploads/freshness/{input_filename}",
+        "message": (
+            f"The image was classified as {classification['condition'].lower()} "
+            f"{classification['item'].lower()}."
+        ),
+    }
+
 @app.post("/door/closed/upload")
 async def door_closed_upload(file: UploadFile = File(...)):
     try:
@@ -852,6 +953,61 @@ def remove_inventory_batch(batch_id: int):
             sync_inventory_summary(conn)
             conn.commit()
             return {"ok": True, "removed_quantity": batch["quantity"]}
+
+
+@app.post("/inventory/batches/{batch_id}/remove-quantity")
+def remove_inventory_batch_quantity(batch_id: int, payload: Dict[str, Any]):
+    try:
+        quantity = int(payload.get("quantity"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="quantity must be a positive integer")
+    if quantity < 1:
+        raise HTTPException(status_code=400, detail="quantity must be a positive integer")
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, item_id, quantity
+                FROM inventory_batches
+                WHERE id = %s AND quantity > 0
+                FOR UPDATE;
+                """,
+                (batch_id,),
+            )
+            batch = cur.fetchone()
+            if not batch:
+                raise HTTPException(status_code=404, detail="Inventory batch not found")
+            if quantity > batch["quantity"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Only {batch['quantity']} item(s) remain in this batch",
+                )
+
+            cur.execute(
+                """
+                UPDATE inventory_batches
+                SET quantity = quantity - %s,
+                    open_unit_remaining_percent = NULL,
+                    last_updated = NOW()
+                WHERE id = %s;
+                """,
+                (quantity, batch_id),
+            )
+            cur.execute(
+                """
+                INSERT INTO events(scan_id, item_id, action, confidence, quantity_change)
+                VALUES (NULL, %s, 'Removed', 1.0, %s);
+                """,
+                (batch["item_id"], quantity),
+            )
+            sync_inventory_summary(conn)
+            conn.commit()
+            return {
+                "ok": True,
+                "removed_quantity": quantity,
+                "remaining_quantity": batch["quantity"] - quantity,
+            }
 
 
 @app.get("/inventory/all")
@@ -1658,6 +1814,7 @@ def manual_inventory(payload: Dict[str, Any]):
     action = payload.get("action")
     quantity_change = int(payload.get("quantity", 1))
     selected_expiry_date = parse_expiry_date(payload.get("expiry_date"))
+    without_expiry = payload.get("without_expiry") is True
     expiry_source = payload.get("expiry_source") or "manual"
 
     if not item_name or action not in ("Added", "Removed"):
@@ -1676,7 +1833,7 @@ def manual_inventory(payload: Dict[str, Any]):
         selected_expiry_date = estimate_expiry_date(item_name)
         expiry_source = "estimated"
 
-    if action == "Removed" and not selected_expiry_date:
+    if action == "Removed" and not selected_expiry_date and not without_expiry:
         raise HTTPException(
             status_code=400,
             detail="An expiry date must be selected when removing inventory"
@@ -1716,17 +1873,31 @@ def manual_inventory(payload: Dict[str, Any]):
                 item_id = cur.fetchone()["id"]
 
             if action == "Removed":
-                cur.execute(
-                    """
-                    SELECT id, quantity FROM inventory_batches
-                    WHERE item_id = %s
-                      AND quantity > 0
-                      AND COALESCE(expiry_date, expiry_estimate_date) = %s
-                    ORDER BY created_at
-                    FOR UPDATE
-                    """,
-                    (item_id, selected_expiry_date),
-                )
+                if without_expiry:
+                    cur.execute(
+                        """
+                        SELECT id, quantity FROM inventory_batches
+                        WHERE item_id = %s
+                          AND quantity > 0
+                          AND expiry_date IS NULL
+                          AND expiry_estimate_date IS NULL
+                        ORDER BY created_at
+                        FOR UPDATE
+                        """,
+                        (item_id,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, quantity FROM inventory_batches
+                        WHERE item_id = %s
+                          AND quantity > 0
+                          AND COALESCE(expiry_date, expiry_estimate_date) = %s
+                        ORDER BY created_at
+                        FOR UPDATE
+                        """,
+                        (item_id, selected_expiry_date),
+                    )
                 batches = cur.fetchall()
                 remaining = quantity_change
                 for batch in batches:
@@ -1749,8 +1920,8 @@ def manual_inventory(payload: Dict[str, Any]):
                     raise HTTPException(
                         status_code=400,
                         detail=(
-                            f"Cannot remove {quantity_change} {item_name} item(s) with expiry date "
-                            f"{selected_expiry_date}. Only {quantity_change - remaining} available."
+                            f"Cannot remove {quantity_change} {item_name} item(s) from the selected "
+                            f"inventory group. Only {quantity_change - remaining} available."
                         )
                     )
             else:

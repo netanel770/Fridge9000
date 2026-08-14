@@ -8,6 +8,7 @@ import type {
   DetectionItem,
   ReviewItem,
   UploadScanResponse,
+  FreshnessAnalysisResponse,
 } from "../types/api";
 
 async function handleJsonResponse<T>(response: Response): Promise<T> {
@@ -62,6 +63,7 @@ export async function manualInventoryUpdate(
   expiryDate: string,
   expirySource: "manual" | "estimated" = "manual",
 ) {
+  const withoutExpiry = action === "Removed" && expiryDate === "__NO_EXPIRY__";
   const res = await fetch(`${API_BASE_URL}/inventory/manual`, {
     method: "POST",
     headers: {
@@ -71,8 +73,9 @@ export async function manualInventoryUpdate(
       item_name: itemName,
       action,
       quantity,
-      expiry_date: expiryDate,
+      expiry_date: withoutExpiry ? null : expiryDate,
       expiry_source: expirySource,
+      without_expiry: withoutExpiry,
     }),
   });
 
@@ -229,6 +232,21 @@ export async function uploadReceiptPdf(file: any) {
   return data;
 }
 
+export async function analyzeFreshness(imageUri: string): Promise<FreshnessAnalysisResponse> {
+  const formData = new FormData();
+  formData.append("file", {
+    uri: imageUri,
+    name: "freshness-analysis.jpg",
+    type: "image/jpeg",
+  } as any);
+
+  const res = await fetch(`${API_BASE_URL}/freshness/analyze`, {
+    method: "POST",
+    body: formData,
+  });
+  return handleJsonResponse<FreshnessAnalysisResponse>(res);
+}
+
 export async function updateInventoryBatchRemaining(batchId: number, remainingPercent: number) {
   const res = await fetch(`${API_BASE_URL}/inventory/batches/${batchId}/remaining`, {
     method: "PATCH",
@@ -301,4 +319,13 @@ export async function removeInventoryBatch(batchId: number) {
     method: "POST",
   });
   return handleJsonResponse<{ ok: boolean; removed_quantity: number }>(res);
+}
+
+export async function removeInventoryBatchQuantity(batchId: number, quantity: number) {
+  const res = await fetch(`${API_BASE_URL}/inventory/batches/${batchId}/remove-quantity`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ quantity }),
+  });
+  return handleJsonResponse<{ ok: boolean; removed_quantity: number; remaining_quantity: number }>(res);
 }

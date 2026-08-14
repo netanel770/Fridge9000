@@ -23,6 +23,7 @@ import type { OutlinePreparationJob } from "../src/services/api";
 import type { InventoryBatchItem, InventoryItem } from "../src/types/api";
 
 type Mode = "Added" | "Removed";
+const NO_EXPIRY_VALUE = "__NO_EXPIRY__";
 
 function suggestedExpiryDate(itemName: string) {
   const name = itemName.toLowerCase();
@@ -108,12 +109,16 @@ export default function ManualInventoryScreen() {
     inventoryBatches
       .filter((batch) => batch.item_id === selectedItem.id && batch.quantity > 0)
       .forEach((batch) => {
-        const date = effectiveExpiry(batch);
-        if (date) quantities.set(date, (quantities.get(date) || 0) + batch.quantity);
+        const date = effectiveExpiry(batch) || NO_EXPIRY_VALUE;
+        quantities.set(date, (quantities.get(date) || 0) + batch.quantity);
       });
     return [...quantities.entries()]
       .map(([date, quantity]) => ({ date, quantity }))
-      .sort((a, b) => a.date.localeCompare(b.date));
+      .sort((a, b) => {
+        if (a.date === NO_EXPIRY_VALUE) return 1;
+        if (b.date === NO_EXPIRY_VALUE) return -1;
+        return a.date.localeCompare(b.date);
+      });
   }, [inventoryBatches, selectedItem]);
 
   const selectedDateQuantity = removalExpiryOptions.find(
@@ -140,6 +145,17 @@ export default function ManualInventoryScreen() {
       setExpiryDate(suggestedExpiryDate(item.name));
       setExpiryManuallyEdited(false);
     }
+  }
+
+  function toggleRemovalItem(item: InventoryItem) {
+    if (selectedItem?.id === item.id) {
+      setSelectedItem(null);
+      setItemName("");
+      setSelectedRemovalExpiry(null);
+      setQuantityChange(1);
+      return;
+    }
+    selectItem(item);
   }
 
   function increaseQty() {
@@ -169,7 +185,7 @@ export default function ManualInventoryScreen() {
     }
 
     const finalExpiryDate = mode === "Removed" ? selectedRemovalExpiry : expiryDate;
-    if (!finalExpiryDate || !isValidDate(finalExpiryDate)) {
+    if (!finalExpiryDate || (finalExpiryDate !== NO_EXPIRY_VALUE && !isValidDate(finalExpiryDate))) {
       Alert.alert("Invalid expiry date", "Enter or select a valid date in YYYY-MM-DD format.");
       return;
     }
@@ -306,36 +322,39 @@ export default function ManualInventoryScreen() {
               style={styles.input}
             />
             <View style={styles.listBox}>
-              {removableItems.slice(0, 10).map((item) => (
-                <Pressable
-                  key={item.id}
-                  style={[styles.inventoryRow, selectedItem?.id === item.id && styles.selectedCard]}
-                  onPress={() => selectItem(item)}
-                >
-                  <View>
-                    <Text style={styles.itemName}>{item.name}</Text>
-                    <Text style={styles.itemMeta}>{item.category}</Text>
+              {removableItems.slice(0, 10).map((item) => {
+                const isSelected = selectedItem?.id === item.id;
+                return (
+                  <View key={item.id} style={styles.inventoryItemGroup}>
+                    <Pressable
+                      style={[styles.inventoryRow, isSelected && styles.selectedProductRow]}
+                      onPress={() => toggleRemovalItem(item)}
+                    >
+                      <View>
+                        <Text style={styles.itemName}>{item.name}</Text>
+                        <Text style={styles.itemMeta}>{item.category}</Text>
+                      </View>
+                      <Text style={styles.quantityText}>Qty: {item.quantity}</Text>
+                    </Pressable>
+                    {isSelected ? (
+                      <View style={styles.expiryOptionsBox}>
+                        <Text style={styles.expiryOptionsTitle}>Choose expiry date</Text>
+                        {removalExpiryOptions.length ? removalExpiryOptions.map((option) => (
+                          <Pressable
+                            key={option.date}
+                            style={[styles.expiryRow, selectedRemovalExpiry === option.date && styles.selectedCard]}
+                            onPress={() => { setSelectedRemovalExpiry(option.date); setQuantityChange(1); }}
+                          >
+                            <Text style={styles.expiryText}>{option.date === NO_EXPIRY_VALUE ? "No expiry date" : option.date}</Text>
+                            <Text style={styles.itemMeta}>Available: {option.quantity}</Text>
+                          </Pressable>
+                        )) : <Text style={styles.errorText}>This product has no dated inventory batches.</Text>}
+                      </View>
+                    ) : null}
                   </View>
-                  <Text style={styles.quantityText}>Qty: {item.quantity}</Text>
-                </Pressable>
-              ))}
+                );
+              })}
             </View>
-
-            {selectedItem && (
-              <>
-                <Text style={styles.label}>Choose expiry date</Text>
-                {removalExpiryOptions.length ? removalExpiryOptions.map((option) => (
-                  <Pressable
-                    key={option.date}
-                    style={[styles.expiryRow, selectedRemovalExpiry === option.date && styles.selectedCard]}
-                    onPress={() => { setSelectedRemovalExpiry(option.date); setQuantityChange(1); }}
-                  >
-                    <Text style={styles.expiryText}>{option.date}</Text>
-                    <Text style={styles.itemMeta}>Available: {option.quantity}</Text>
-                  </Pressable>
-                )) : <Text style={styles.errorText}>This product has no dated inventory batches.</Text>}
-              </>
-            )}
           </>
         )}
 
@@ -425,8 +444,12 @@ const styles = StyleSheet.create({
   itemCard: { backgroundColor: "#fff", padding: 11, borderRadius: 10, borderWidth: 1, borderColor: "#e5e7eb" },
   itemName: { fontSize: 16, fontWeight: "700", color: "#111827" },
   itemMeta: { color: "#6b7280", marginTop: 3 },
-  listBox: { maxHeight: 265, gap: 8 },
+  listBox: { gap: 8 },
+  inventoryItemGroup: { gap: 0 },
   inventoryRow: { backgroundColor: "#fff", padding: 12, borderRadius: 10, borderWidth: 1, borderColor: "#e5e7eb", flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  selectedProductRow: { borderColor: "#2563eb", borderBottomLeftRadius: 0, borderBottomRightRadius: 0, backgroundColor: "#eff6ff" },
+  expiryOptionsBox: { backgroundColor: "#f8fafc", borderWidth: 1, borderTopWidth: 0, borderColor: "#bfdbfe", borderBottomLeftRadius: 10, borderBottomRightRadius: 10, padding: 10, gap: 8 },
+  expiryOptionsTitle: { color: "#374151", fontWeight: "700", fontSize: 13, marginBottom: 2 },
   selectedCard: { borderColor: "#2563eb", borderWidth: 2, backgroundColor: "#eff6ff" },
   quantityText: { color: "#2563eb", fontWeight: "700" },
   expiryRow: { backgroundColor: "#fff", borderWidth: 1, borderColor: "#d1d5db", borderRadius: 10, padding: 12, flexDirection: "row", justifyContent: "space-between", alignItems: "center" },

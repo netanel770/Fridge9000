@@ -90,3 +90,29 @@ export type UploadScanResponse = {
   events_created?: number;
   error?: string;
 };
+
+export type FreshnessCondition = "Fresh" | "Rotten";
+
+export type FreshnessClassification = {
+  class_id: number;
+  predicted_class: string;
+  item: string;
+  condition: FreshnessCondition;
+  confidence: number;
+  is_rotten: boolean;
+};
+
+export type FreshnessCandidate = {
+  class_id: number;
+  label: string;
+  confidence: number;
+  recognized: boolean;
+};
+
+export type FreshnessAnalysisResponse = {
+  ok: boolean;
+  classification: FreshnessClassification;
+  candidates: FreshnessCandidate[];
+  image_url: string;
+  message: string;
+};

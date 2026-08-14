@@ -26,6 +26,7 @@ export default function RootLayout() {
         <Stack.Screen name="adjust-open-products" options={{ title: "Adjust Open Products" }} />
         <Stack.Screen name="adjust-open-product" options={{ title: "Open Product" }} />
         <Stack.Screen name="image-inventory" options={{ title: "Update by Image" }} />
+        <Stack.Screen name="rot-detection" options={{ title: "Rot Detection" }} />
         <Stack.Screen name="expired-items" options={{ title: "Expired Products" }} />
         <Stack.Screen name="manual-confirm" options={{ title: "Confirm Update" }} />
       </Stack>

@@ -1,0 +1,10 @@
+.venv/
+uploads/
+__pycache__/
+*.py[cod]
+.env
+Ultralytics/
+runs/
+dataset/
+*.rar
+test_*.py

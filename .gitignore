@@ -18,3 +18,4 @@ node_modules/
 
 logs/
 db-data/
+backend/uploads/freshness/

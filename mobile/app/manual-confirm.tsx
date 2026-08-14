@@ -66,7 +66,7 @@ export default function ManualConfirmScreen() {
         <Text style={styles.value}>{quantityChange}</Text>
 
         <Text style={styles.label}>Expiry date</Text>
-        <Text style={styles.value}>{expiryDate}</Text>
+        <Text style={styles.value}>{expiryDate === "__NO_EXPIRY__" ? "No expiry date" : expiryDate}</Text>
         {mode === "Added" && (
           <Text style={styles.dateSource}>
             {expirySource === "estimated" ? "Suggested date" : "Manually selected date"}
