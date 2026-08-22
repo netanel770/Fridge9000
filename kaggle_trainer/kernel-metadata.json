@@ -1,0 +1,13 @@
+{
+  "id": "YOUR_KAGGLE_USERNAME/fridge9000-remote-yolo-trainer",
+  "title": "Fridge9000 Remote YOLO Trainer",
+  "code_file": "train.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

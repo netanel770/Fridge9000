@@ -7,6 +7,9 @@ venv/
 # Env / secrets
 .env
 *.env
+kaggle.json
+.kaggle/
+backend/remote_training_jobs/
 
 # Node
 node_modules/
@@ -19,3 +22,6 @@ node_modules/
 logs/
 db-data/
 backend/uploads/freshness/
+backend/candidate_models/
+backend/dataset_exports/
+backend/model_comparisons/

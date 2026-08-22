@@ -66,11 +66,14 @@ export default function ReceiptUploadScreen() {
     setLoading(true);
 
     try {
-      await uploadReceiptPdf(selectedFile);
+      const result = await uploadReceiptPdf(selectedFile);
+      if (!result.scan_id) {
+        throw new Error("Upload completed without a scan ID");
+      }
 
       router.push({
         pathname: "/review",
-        params: { mode: "Added" },
+        params: { mode: "Added", scanId: String(result.scan_id), source: "receipt" },
       });
     } catch (e: any) {
       Alert.alert("Upload failed", e.message || "Unknown error");

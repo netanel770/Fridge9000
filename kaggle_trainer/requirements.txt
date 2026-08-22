@@ -1,0 +1,4 @@
+# Match the Ultralytics version currently observed in the Fridge9000 backend image.
+# Kaggle supplies a CUDA-compatible PyTorch build; do not replace/downgrade it here.
+ultralytics==8.4.120
+PyYAML>=6.0,<7

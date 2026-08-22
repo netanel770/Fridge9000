@@ -18,11 +18,20 @@ services:
       retries: 10
 
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: fridge9000-backend
+    env_file:
+      - ./backend/.env
     environment:
       DATABASE_URL: postgresql://fridge:fridgepass@db:5432/fridge9000
       FRESHNESS_MODEL_PATH: /app/fridge9000_freshness_classifier_sanity.pt
+      MODEL_TRAIN_EPOCHS: ${MODEL_TRAIN_EPOCHS:-30}
+      MODEL_TRAIN_IMGSZ: ${MODEL_TRAIN_IMGSZ:-640}
+      MODEL_TRAIN_BATCH: ${MODEL_TRAIN_BATCH:-8}
+      MODEL_COMPARE_IMGSZ: ${MODEL_COMPARE_IMGSZ:-640}
+      MODEL_COMPARE_BATCH: ${MODEL_COMPARE_BATCH:-8}
     ports:
       - "8000:8000"
     depends_on:
@@ -30,13 +39,16 @@ services:
         condition: service_healthy
     volumes:
       - ./backend/uploads:/app/uploads
+      - ./backend/dataset_exports:/app/dataset_exports
+      - ./backend/candidate_models:/app/candidate_models
+      - ./backend/model_comparisons:/app/model_comparisons
 
   frontend:
     image: node:20-alpine
     container_name: fridge9000-frontend
     working_dir: /app
     environment:
-      EXPO_PUBLIC_API_BASE_URL: http://192.168.10.6:8000
+      EXPO_PUBLIC_API_BASE_URL: http://10.100.102.16:8000
     command: sh -c "if [ ! -d node_modules ] || [ ! -f node_modules/.package-lock-hash ] || [ \"$(sha1sum package-lock.json | awk '{print $1}')\" != \"$(cat node_modules/.package-lock-hash 2>/dev/null)\" ]; then npm install && sha1sum package-lock.json | awk '{print $1}' > node_modules/.package-lock-hash; fi && npx expo start --tunnel"
     ports:
       - "8081:8081"

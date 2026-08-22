@@ -17,7 +17,6 @@ import {
 import { router, useLocalSearchParams } from "expo-router";
 
 import {
-  getLatestScan,
   getScanDetections,
   getInventoryBatches,
   submitReview,
@@ -25,7 +24,7 @@ import {
 
 import { API_BASE_URL } from "../src/services/config";
 
-import type { InventoryBatchItem, ReviewItem } from "../src/types/api";
+import type { DetectionItem, InventoryBatchItem, ReviewItem } from "../src/types/api";
 
 function normalizeItemName(value: string) {
   return value.trim().toLowerCase();
@@ -33,6 +32,13 @@ function normalizeItemName(value: string) {
 
 function getBatchExpiryDate(batch: InventoryBatchItem) {
   return batch.expiry_date || batch.expiry_estimate_date || null;
+}
+
+const UNKNOWN_EXPIRY_KEY = "__unknown_expiry__";
+type RemovalExpiryOption = { key: string; date: string | null; label: string; quantity: number };
+
+function selectedRemovalKey(item: ReviewItem) {
+  return item.expiry_source === "inventory_unknown" ? UNKNOWN_EXPIRY_KEY : item.expiry_date || "";
 }
 
 function getSuggestedExpiryDate(itemName: string) {
@@ -55,11 +61,15 @@ function getSuggestedExpiryDate(itemName: string) {
 }
 
 export default function ReviewScreen() {
-  const { mode } = useLocalSearchParams<{
+  const { mode, scanId: scanIdParam, source } = useLocalSearchParams<{
     mode?: "Added" | "Removed";
+    scanId?: string;
+    source?: "scan" | "receipt";
   }>();
 
-  const [scanId, setScanId] = useState<number | null>(null);
+  const parsedScanId = Number(scanIdParam);
+  const scanId = Number.isInteger(parsedScanId) && parsedScanId > 0 ? parsedScanId : null;
+  const isReceiptReview = source === "receipt";
   const [items, setItems] = useState<ReviewItem[]>([]);
   const [inventoryBatches, setInventoryBatches] = useState<InventoryBatchItem[]>([]);
   const [openExpiryPicker, setOpenExpiryPicker] = useState<number | null>(null);
@@ -72,38 +82,49 @@ export default function ReviewScreen() {
     setError("");
 
     try {
-      const latestScan = await getLatestScan();
-
-      if (!latestScan?.id) {
-        setError("No scan found");
+      if (!scanId) {
+        setError("No valid scan ID was provided");
         return;
       }
 
-      setScanId(latestScan.id);
-
       const [detections, batches] = await Promise.all([
-        getScanDetections(latestScan.id),
+        getScanDetections(scanId),
         mode === "Removed" ? getInventoryBatches() : Promise.resolve([]),
       ]);
 
       setInventoryBatches(batches);
 
-      const removalAvailability = new Map<string, { date: string; remaining: number }[]>();
+      const removalAvailability = new Map<string, { key: string; date: string | null; remaining: number }[]>();
       if (mode === "Removed") {
         batches.forEach((batch) => {
           const date = getBatchExpiryDate(batch);
-          if (!date || batch.quantity <= 0) return;
+          if (batch.quantity <= 0) return;
+          const key = date || UNKNOWN_EXPIRY_KEY;
           const name = normalizeItemName(batch.name);
           const options = removalAvailability.get(name) || [];
-          const existing = options.find((option) => option.date === date);
+          const existing = options.find((option) => option.key === key);
           if (existing) existing.remaining += batch.quantity;
-          else options.push({ date, remaining: batch.quantity });
-          options.sort((a, b) => a.date.localeCompare(b.date));
+          else options.push({ key, date, remaining: batch.quantity });
+          options.sort((a, b) => a.key === UNKNOWN_EXPIRY_KEY ? 1 : b.key === UNKNOWN_EXPIRY_KEY ? -1 : a.key.localeCompare(b.key));
           removalAvailability.set(name, options);
         });
       }
 
-      const reviewItems: ReviewItem[] = detections.map((d) => {
+      const detectionsForReview: Array<DetectionItem & { quantity?: number }> = isReceiptReview
+        ? [...detections.reduce((groups, detection) => {
+            const key = normalizeItemName(detection.label);
+            const existing = groups.get(key);
+            if (existing) {
+              existing.quantity = (existing.quantity || 1) + 1;
+              existing.confidence = Math.max(existing.confidence, detection.confidence);
+            } else {
+              groups.set(key, { ...detection, quantity: 1 });
+            }
+            return groups;
+          }, new Map<string, DetectionItem & { quantity: number }>()).values()]
+        : detections;
+
+      const reviewItems: ReviewItem[] = detectionsForReview.map((d) => {
         const suggestedExpiry = mode === "Removed" ? null : getSuggestedExpiryDate(d.label);
         const removalOption = mode === "Removed"
           ? removalAvailability.get(normalizeItemName(d.label))?.find((option) => option.remaining > 0)
@@ -119,9 +140,10 @@ export default function ReviewScreen() {
           y1: d.y1,
           x2: d.x2,
           y2: d.y2,
-          expiry_date: removalOption?.date || suggestedExpiry,
+          expiry_date: removalOption?.date ?? suggestedExpiry,
           expiry_estimate_date: mode === "Removed" ? null : suggestedExpiry,
-          expiry_source: mode === "Removed" ? (removalOption ? "inventory" : null) : "estimated",
+          expiry_source: mode === "Removed" ? (removalOption ? (removalOption.date ? "inventory" : "inventory_unknown") : null) : "estimated",
+          quantity: isReceiptReview ? d.quantity || 1 : undefined,
         };
       });
 
@@ -134,36 +156,38 @@ export default function ReviewScreen() {
   }
 
   function getExpiryOptions(item: ReviewItem) {
-    const quantities = new Map<string, number>();
+    const quantities = new Map<string, RemovalExpiryOption>();
     const itemName = normalizeItemName(item.final_label || item.original_label);
 
     inventoryBatches.forEach((batch) => {
       const expiryDate = getBatchExpiryDate(batch);
-      if (normalizeItemName(batch.name) === itemName && expiryDate) {
-        quantities.set(expiryDate, (quantities.get(expiryDate) || 0) + batch.quantity);
+      if (normalizeItemName(batch.name) === itemName && batch.quantity > 0) {
+        const key = expiryDate || UNKNOWN_EXPIRY_KEY;
+        const existing = quantities.get(key);
+        if (existing) existing.quantity += batch.quantity;
+        else quantities.set(key, { key, date: expiryDate, label: expiryDate || "Unknown expiry", quantity: batch.quantity });
       }
     });
 
-    return [...quantities.entries()]
-      .map(([date, quantity]) => ({ date, quantity }))
-      .sort((a, b) => a.date.localeCompare(b.date));
+    return [...quantities.values()]
+      .sort((a, b) => a.key === UNKNOWN_EXPIRY_KEY ? 1 : b.key === UNKNOWN_EXPIRY_KEY ? -1 : a.key.localeCompare(b.key));
   }
 
-  function selectRemovalExpiry(index: number, expiryDate: string) {
+  function selectRemovalExpiry(index: number, option: RemovalExpiryOption) {
     const item = items[index];
     const itemName = normalizeItemName(item.final_label || item.original_label);
-    const available = getExpiryOptions(item).find((option) => option.date === expiryDate)?.quantity || 0;
+    const available = option.quantity;
     const alreadySelected = items.filter((candidate, candidateIndex) =>
       candidateIndex !== index &&
       candidate.included &&
       normalizeItemName(candidate.final_label || candidate.original_label) === itemName &&
-      candidate.expiry_date === expiryDate
+      selectedRemovalKey(candidate) === option.key
     ).length;
 
     if (alreadySelected >= available) {
       Alert.alert(
         "Expiry date unavailable",
-        `Only ${available} ${item.final_label || item.original_label} item(s) with expiry date ${expiryDate} are in inventory.`,
+        `Only ${available} ${item.final_label || item.original_label} item(s) with ${option.label.toLowerCase()} are in inventory.`,
       );
       return;
     }
@@ -172,9 +196,9 @@ export default function ReviewScreen() {
       candidateIndex === index
         ? {
             ...candidate,
-            expiry_date: expiryDate,
+            expiry_date: option.date,
             expiry_estimate_date: null,
-            expiry_source: "inventory",
+            expiry_source: option.date ? "inventory" : "inventory_unknown",
           }
         : candidate
     ));
@@ -186,25 +210,26 @@ export default function ReviewScreen() {
 
     for (const item of items) {
       if (!item.included) continue;
-      if (!item.expiry_date) {
+      const selectedKey = selectedRemovalKey(item);
+      if (!selectedKey) {
         Alert.alert(
-          "Missing expiry date",
-          `Please select an expiry date for ${item.final_label || item.original_label}.`,
+          "Missing inventory batch",
+          `Please select an inventory batch for ${item.final_label || item.original_label}.`,
         );
         return false;
       }
 
       const name = normalizeItemName(item.final_label || item.original_label);
-      const key = `${name}|${item.expiry_date}`;
+      const key = `${name}|${selectedKey}`;
       usage.set(key, (usage.get(key) || 0) + 1);
       const available = getExpiryOptions(item).find(
-        (option) => option.date === item.expiry_date
+        (option) => option.key === selectedKey
       )?.quantity || 0;
 
       if ((usage.get(key) || 0) > available) {
         Alert.alert(
           "Not enough inventory",
-          `Only ${available} ${item.final_label || item.original_label} item(s) with expiry date ${item.expiry_date} are in inventory.`,
+          `Only ${available} ${item.final_label || item.original_label} item(s) in the selected batch are in inventory.`,
         );
         return false;
       }
@@ -220,7 +245,7 @@ export default function ReviewScreen() {
   function updateItem(
     index: number,
     field: keyof ReviewItem,
-    value: string | boolean
+    value: string | boolean | number
   ) {
     setItems((prev) => {
       const updated = [...prev];
@@ -244,10 +269,15 @@ export default function ReviewScreen() {
       return;
     }
 
+    if (isReceiptReview && items.some((item) => item.included && (!Number.isInteger(item.quantity) || (item.quantity || 0) < 1))) {
+      Alert.alert("Invalid quantity", "Every included receipt product must have a quantity of at least 1.");
+      return;
+    }
+
     setSubmitting(true);
 
     try {
-      await submitReview(scanId, items, mode || "Added");
+      await submitReview(scanId, items, mode || "Added", isReceiptReview ? "receipt" : "scan");
 
       Alert.alert("Success", "Inventory updated successfully.");
 
@@ -291,6 +321,12 @@ export default function ReviewScreen() {
         contentContainerStyle={styles.listContent}
         keyboardShouldPersistTaps="handled"
         automaticallyAdjustKeyboardInsets
+        ListHeaderComponent={isReceiptReview ? (
+          <View style={styles.reviewHeader}>
+            <Text style={styles.reviewTitle}>Receipt review</Text>
+            <Text style={styles.reviewSubtitle}>Matching products are combined. Confirm the quantity before submitting.</Text>
+          </View>
+        ) : null}
         renderItem={({ item, index }) => (
           <View style={styles.card}>
             {scanId && item.id && item.x1 != null && (
@@ -308,8 +344,39 @@ export default function ReviewScreen() {
             <Text style={styles.label}>Original label</Text>
             <Text style={styles.originalValue}>{item.original_label}</Text>
 
-            <Text style={styles.label}>Confidence</Text>
-            <Text style={styles.confidenceText}>{(item.confidence ?? 0).toFixed(2)}</Text>
+            {!isReceiptReview && (
+              <>
+                <Text style={styles.label}>Confidence</Text>
+                <Text style={styles.confidenceText}>{(item.confidence ?? 0).toFixed(2)}</Text>
+              </>
+            )}
+
+            {isReceiptReview && (
+              <>
+                <Text style={styles.label}>Quantity</Text>
+                <View style={styles.quantityRow}>
+                  <Pressable
+                    style={styles.quantityButton}
+                    onPress={() => updateItem(index, "quantity", Math.max(1, (item.quantity || 1) - 1))}
+                  >
+                    <Text style={styles.quantityButtonText}>−</Text>
+                  </Pressable>
+                  <TextInput
+                    value={String(item.quantity || 1)}
+                    onChangeText={(text) => updateItem(index, "quantity", Math.max(1, Number.parseInt(text.replace(/\D/g, ""), 10) || 1))}
+                    keyboardType="number-pad"
+                    selectTextOnFocus
+                    style={styles.quantityInput}
+                  />
+                  <Pressable
+                    style={styles.quantityButton}
+                    onPress={() => updateItem(index, "quantity", Math.min(999, (item.quantity || 1) + 1))}
+                  >
+                    <Text style={styles.quantityButtonText}>+</Text>
+                  </Pressable>
+                </View>
+              </>
+            )}
 
             <Text style={styles.label}>Final label</Text>
             <TextInput
@@ -331,8 +398,8 @@ export default function ReviewScreen() {
                   style={styles.expirySelect}
                   onPress={() => setOpenExpiryPicker(openExpiryPicker === index ? null : index)}
                 >
-                  <Text style={item.expiry_date ? styles.expirySelectText : styles.placeholderText}>
-                    {item.expiry_date || "Select expiry date"}
+                  <Text style={selectedRemovalKey(item) ? styles.expirySelectText : styles.placeholderText}>
+                    {item.expiry_source === "inventory_unknown" ? "Unknown expiry" : item.expiry_date || "Select inventory batch"}
                   </Text>
                   <Text style={styles.chevron}>{openExpiryPicker === index ? "-" : "+"}</Text>
                 </Pressable>
@@ -340,11 +407,11 @@ export default function ReviewScreen() {
                   <View style={styles.expiryOptions}>
                     {getExpiryOptions(item).length > 0 ? getExpiryOptions(item).map((option) => (
                       <Pressable
-                        key={option.date}
+                        key={option.key}
                         style={styles.expiryOption}
-                        onPress={() => selectRemovalExpiry(index, option.date)}
+                        onPress={() => selectRemovalExpiry(index, option)}
                       >
-                        <Text style={styles.expiryOptionDate}>{option.date}</Text>
+                        <Text style={styles.expiryOptionDate}>{option.label}</Text>
                         <Text style={styles.expiryOptionQuantity}>Available: {option.quantity}</Text>
                       </Pressable>
                     )) : (
@@ -364,18 +431,45 @@ export default function ReviewScreen() {
             )}
 
             <View style={styles.switchRow}>
-              <Text style={styles.label}>Include</Text>
+              <View>
+                <Text style={styles.label}>{item.included ? "Included" : "Not included"}</Text>
+                {!item.included && !isReceiptReview ? <Text style={styles.excludedHint}>Help the AI understand why this prediction was wrong.</Text> : null}
+              </View>
               <Switch
                 value={item.included}
                 onValueChange={(value) => updateItem(index, "included", value)}
               />
             </View>
+            {!item.included && !isReceiptReview && scanId && item.id ? (
+              <Pressable
+                accessibilityRole="button"
+                style={styles.itemTeachButton}
+                onPress={() => router.push({ pathname: "/teach-fridge", params: { scanId: String(scanId), detectionId: String(item.id) } })}
+              >
+                <Text style={styles.itemTeachButtonText}>Teach AI about this product</Text>
+              </Pressable>
+            ) : null}
           </View>
         )}
-        ListEmptyComponent={<Text style={styles.empty}>No detections found</Text>}
+        ListEmptyComponent={(
+          <View style={styles.teachEmptyCard}>
+            <View style={styles.teachEmptyIcon}><Text style={styles.teachEmptyEmoji}>✨</Text></View>
+            <Text style={styles.teachEmptyTitle}>We couldn’t identify this product</Text>
+            <Text style={styles.teachEmptyMessage}>Would you like to teach Fridge 9000 what is in this photo?</Text>
+            {!isReceiptReview && scanId ? (
+              <Pressable
+                accessibilityRole="button"
+                style={styles.teachButton}
+                onPress={() => router.push({ pathname: "/teach-fridge", params: { scanId: String(scanId), addMissed: "1" } })}
+              >
+                <Text style={styles.teachButtonText}>Teach the AI</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        )}
       />
 
-      <Pressable
+      {items.length > 0 ? <Pressable
         style={[styles.submitButton, submitting && styles.disabledButton]}
         onPress={handleSubmit}
         disabled={submitting}
@@ -385,7 +479,7 @@ export default function ReviewScreen() {
         ) : (
           <Text style={styles.submitText}>Submit Review</Text>
         )}
-      </Pressable>
+      </Pressable> : null}
     </KeyboardAvoidingView>
   );
 }
@@ -400,6 +494,30 @@ const styles = StyleSheet.create({
     gap: 12,
     paddingBottom: 100,
   },
+  reviewHeader: {
+    backgroundColor: "#eff6ff",
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 4,
+  },
+  reviewTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: "#1e3a8a",
+  },
+  reviewSubtitle: {
+    fontSize: 13,
+    color: "#1e40af",
+    lineHeight: 18,
+    marginTop: 4,
+  },
+  teachEmptyCard: { marginTop: 28, padding: 24, borderRadius: 18, borderWidth: 1, borderColor: "#bfdbfe", backgroundColor: "#eff6ff", alignItems: "center", gap: 10 },
+  teachEmptyIcon: { width: 58, height: 58, borderRadius: 20, backgroundColor: "#dbeafe", alignItems: "center", justifyContent: "center", marginBottom: 4 },
+  teachEmptyEmoji: { fontSize: 28 },
+  teachEmptyTitle: { color: "#172554", fontSize: 20, fontWeight: "800", textAlign: "center" },
+  teachEmptyMessage: { color: "#475569", fontSize: 14, lineHeight: 20, textAlign: "center", marginBottom: 6 },
+  teachButton: { width: "100%", minHeight: 50, borderRadius: 12, backgroundColor: "#2563eb", alignItems: "center", justifyContent: "center", paddingHorizontal: 18 },
+  teachButtonText: { color: "#fff", fontSize: 16, fontWeight: "800" },
   card: {
     backgroundColor: "#fff",
     borderRadius: 14,
@@ -435,6 +553,39 @@ const styles = StyleSheet.create({
     color: "#2563eb",
     fontWeight: "700",
     marginBottom: 12,
+  },
+  quantityRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginBottom: 12,
+  },
+  quantityButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 10,
+    backgroundColor: "#eff6ff",
+    borderWidth: 1,
+    borderColor: "#bfdbfe",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  quantityButtonText: {
+    color: "#2563eb",
+    fontSize: 22,
+    fontWeight: "700",
+  },
+  quantityInput: {
+    flex: 1,
+    height: 44,
+    borderWidth: 1,
+    borderColor: "#d1d5db",
+    borderRadius: 10,
+    backgroundColor: "#fff",
+    color: "#111827",
+    fontSize: 17,
+    fontWeight: "700",
+    textAlign: "center",
   },
   input: {
     borderWidth: 1,
@@ -507,6 +658,9 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
   },
+  excludedHint: { color: "#64748b", fontSize: 12, lineHeight: 17, maxWidth: 250 },
+  itemTeachButton: { minHeight: 46, borderRadius: 11, backgroundColor: "#eff6ff", borderWidth: 1, borderColor: "#93c5fd", alignItems: "center", justifyContent: "center", marginTop: 12, paddingHorizontal: 14 },
+  itemTeachButtonText: { color: "#1d4ed8", fontSize: 14, fontWeight: "800" },
   submitButton: {
     position: "absolute",
     left: 16,

@@ -1,10 +1,11 @@
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { colors } from "../src/theme";
 
 export default function RootLayout() {
   return (
-    <>
+    <GestureHandlerRootView style={{ flex: 1 }}>
       <StatusBar style="dark" />
       <Stack
         screenOptions={{
@@ -27,9 +28,10 @@ export default function RootLayout() {
         <Stack.Screen name="adjust-open-product" options={{ title: "Open Product" }} />
         <Stack.Screen name="image-inventory" options={{ title: "Update by Image" }} />
         <Stack.Screen name="rot-detection" options={{ title: "Rot Detection" }} />
+        <Stack.Screen name="teach-fridge" options={{ title: "Teach Fridge 9000" }} />
         <Stack.Screen name="expired-items" options={{ title: "Expired Products" }} />
         <Stack.Screen name="manual-confirm" options={{ title: "Confirm Update" }} />
       </Stack>
-    </>
+    </GestureHandlerRootView>
   );
 }

@@ -10,3 +10,4 @@ pymupdf
 pytesseract
 pdf2image
 Pillow
+kaggle==2.2.4

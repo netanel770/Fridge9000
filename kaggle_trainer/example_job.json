@@ -1,0 +1,18 @@
+{
+  "training_run_id": "train-remote-example-001",
+  "dataset_version": "fridge9000-yolo-v1-REPLACE_ME",
+  "base_dataset_slug": "YOUR_KAGGLE_USERNAME/fridge9000-training-data",
+  "active_model_version": "fridge9000-production-initial",
+  "candidate_model_version": "fridge9000-detector-candidate-001",
+  "starting_model_version": "yolo11s-pretrained",
+  "epochs": 30,
+  "imgsz": 640,
+  "batch": 8,
+  "seed": 0,
+  "patience": 10,
+  "workers": 2,
+  "train_fraction": 0.7,
+  "val_fraction": 0.15,
+  "test_fraction": 0.15,
+  "require_cuda": true
+}

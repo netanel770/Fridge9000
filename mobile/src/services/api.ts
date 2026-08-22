@@ -5,6 +5,15 @@ import type {
   AlertItem,
   EventItem,
   LatestScan,
+  RecentScan,
+  CreateAnnotationSubmissionResponse,
+  AnnotationItem,
+  AIProgressResponse,
+  LifecycleJob,
+  AnnotationStats,
+  AnnotationStatus,
+  AnnotationSubmission,
+  AnnotationSubmissionDetail,
   DetectionItem,
   ReviewItem,
   UploadScanResponse,
@@ -113,7 +122,8 @@ export async function getScanDetections(scanId: number): Promise<DetectionItem[]
 export async function submitReview(
   scanId: number,
   items: ReviewItem[],
-  mode: "Added" | "Removed"
+  mode: "Added" | "Removed",
+  source: "scan" | "receipt" = "scan",
 ) {
   const res = await fetch(`${API_BASE_URL}/scans/${scanId}/review`, {
     method: "POST",
@@ -123,6 +133,7 @@ export async function submitReview(
     body: JSON.stringify({
       mode,
       items,
+      source,
     }),
   });
 
@@ -230,6 +241,124 @@ export async function uploadReceiptPdf(file: any) {
   }
 
   return data;
+}
+
+export async function getRecentScans(limit = 10): Promise<RecentScan[]> {
+  const res = await fetch(`${API_BASE_URL}/scans/recent?limit=${limit}`);
+  return handleJsonResponse<RecentScan[]>(res);
+}
+
+export function getScanImageUrl(scanId: number) {
+  return `${API_BASE_URL}/scans/${scanId}/image`;
+}
+
+export async function createAnnotationSubmission(
+  scanId: number,
+  annotations: Array<{
+    action: "RELABEL" | "REMOVE" | "ADJUST_BOX" | "ADD" | "CONFIRM";
+    source_detection_id?: number | null;
+    final_label?: string;
+    final_x1?: number;
+    final_y1?: number;
+    final_x2?: number;
+    final_y2?: number;
+  }>,
+): Promise<CreateAnnotationSubmissionResponse> {
+  const res = await fetch(`${API_BASE_URL}/scans/${scanId}/annotation-submissions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ annotations }),
+  });
+  return handleJsonResponse<CreateAnnotationSubmissionResponse>(res);
+}
+
+export async function getAnnotationSubmissions(status?: AnnotationStatus): Promise<AnnotationSubmission[]> {
+  const query = status ? `?status=${encodeURIComponent(status)}` : "";
+  const res = await fetch(`${API_BASE_URL}/annotation-submissions${query}`);
+  return handleJsonResponse<AnnotationSubmission[]>(res);
+}
+
+export async function getAnnotationStats(): Promise<AnnotationStats> {
+  const res = await fetch(`${API_BASE_URL}/annotation-submissions/stats`);
+  return handleJsonResponse<AnnotationStats>(res);
+}
+
+export async function getAIProgress(): Promise<AIProgressResponse> {
+  const res = await fetch(`${API_BASE_URL}/ai-progress`);
+  return handleJsonResponse<AIProgressResponse>(res);
+}
+
+export async function startCandidateTraining(): Promise<LifecycleJob> {
+  const res = await fetch(`${API_BASE_URL}/model-lifecycle/train`, { method: "POST" });
+  return handleJsonResponse<LifecycleJob>(res);
+}
+
+export async function startCandidateComparison(version: string): Promise<LifecycleJob> {
+  const res = await fetch(`${API_BASE_URL}/model-lifecycle/candidates/${encodeURIComponent(version)}/compare`, { method: "POST" });
+  return handleJsonResponse<LifecycleJob>(res);
+}
+
+export async function getLifecycleJob(jobId: string): Promise<LifecycleJob> {
+  const res = await fetch(`${API_BASE_URL}/model-lifecycle/jobs/${encodeURIComponent(jobId)}`);
+  return handleJsonResponse<LifecycleJob>(res);
+}
+
+export async function promoteCandidate(version: string, comparisonId: string) {
+  const res = await fetch(`${API_BASE_URL}/models/${encodeURIComponent(version)}/promote`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ comparison_id: comparisonId }),
+  });
+  return handleJsonResponse<{ ok: boolean; active_version: string }>(res);
+}
+
+export async function rollbackModel(version: string) {
+  const res = await fetch(`${API_BASE_URL}/models/${encodeURIComponent(version)}/rollback`, { method: "POST" });
+  return handleJsonResponse<{ ok: boolean; active_version: string }>(res);
+}
+
+export async function getAnnotationSubmission(submissionId: number): Promise<AnnotationSubmissionDetail> {
+  const res = await fetch(`${API_BASE_URL}/annotation-submissions/${submissionId}`);
+  return handleJsonResponse<AnnotationSubmissionDetail>(res);
+}
+
+export async function moderateAnnotationSubmission(
+  submissionId: number,
+  status: "approved" | "rejected",
+): Promise<AnnotationSubmission> {
+  const res = await fetch(`${API_BASE_URL}/annotation-submissions/${submissionId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+  const data = await handleJsonResponse<{ ok: boolean; submission: AnnotationSubmission }>(res);
+  return data.submission;
+}
+
+export async function updateAnnotationLabel(annotationId: number, finalLabel: string): Promise<AnnotationItem> {
+  const res = await fetch(`${API_BASE_URL}/annotations/${annotationId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ final_label: finalLabel }),
+  });
+  const data = await handleJsonResponse<{ ok: boolean; annotation: AnnotationItem }>(res);
+  return data.annotation;
+}
+
+export async function updateAnnotationBox(
+  annotationId: number,
+  box: { x1: number; y1: number; x2: number; y2: number },
+): Promise<AnnotationItem> {
+  const res = await fetch(`${API_BASE_URL}/annotations/${annotationId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      final_x1: box.x1,
+      final_y1: box.y1,
+      final_x2: box.x2,
+      final_y2: box.y2,
+    }),
+  });
+  const data = await handleJsonResponse<{ ok: boolean; annotation: AnnotationItem }>(res);
+  return data.annotation;
 }
 
 export async function analyzeFreshness(imageUri: string): Promise<FreshnessAnalysisResponse> {

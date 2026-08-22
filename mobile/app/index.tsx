@@ -147,6 +147,21 @@ export default function HomeScreen() {
       <Text style={styles.updateHint}>Scan, upload a receipt, or update manually.</Text>
     </View>
 
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel="Open Teach Fridge 9000"
+      onPress={() => router.push("/teach-fridge")}
+      style={({ pressed }) => [styles.teachCard, pressed && styles.pressed]}
+    >
+      <View style={styles.teachIcon}><Ionicons name="school-outline" size={28} color={colors.primaryText} /></View>
+      <View style={styles.teachCopy}>
+        <StatusBadge label="LIVE AI LAB" tone="info" />
+        <Text style={styles.teachTitle}>Teach Fridge 9000</Text>
+        <Text style={styles.teachMessage}>Correct detections, add missed products, and watch your feedback improve the next model.</Text>
+      </View>
+      <Ionicons name="chevron-forward" size={22} color={colors.primary} />
+    </Pressable>
+
     <SectionTitle title="Suggested updates" action={suggestions.length > 2 ? "View all" : undefined} onAction={() => router.push("/alerts")} />
     {suggestions.length ? suggestions.slice(0, 2).map((suggestion) => <Card key={suggestion.key}>
       <View style={styles.suggestionTop}>
@@ -172,5 +187,8 @@ const styles = StyleSheet.create({
   notice: { flexDirection: "row", alignItems: "center", gap: spacing.sm, backgroundColor: colors.warningBg, borderRadius: radius.lg, padding: spacing.md }, noticeText: { flex: 1, color: colors.warningFg, fontSize: 13, lineHeight: 18 }, retry: { color: colors.warningFg, fontWeight: "800" },
   summaryRow: { flexDirection: "row", gap: spacing.sm }, summary: { flex: 1, minHeight: 112, backgroundColor: colors.surface, borderRadius: radius.xl, padding: spacing.md, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center", gap: 3, shadowColor: colors.navy, shadowOpacity: 0.04, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 1 }, summaryEmoji: { fontSize: 21 }, summaryValue: { fontSize: 22, fontWeight: "800", color: colors.navy }, summaryLabelRow: { flexDirection: "row", alignItems: "center", gap: 1 }, summaryLabel: { fontSize: 12, color: colors.textMuted, fontWeight: "600" }, pressed: { opacity: 0.68, transform: [{ scale: 0.98 }] },
   updateArea: { gap: 7 }, updateHint: { textAlign: "center", color: colors.textMuted, fontSize: 12 }, suggestionTop: { flexDirection: "row", alignItems: "flex-start", gap: spacing.md }, suggestionCopy: { flex: 1, gap: spacing.xs }, suggestionTitle: { ...typography.section, fontSize: 17, color: colors.navy, marginTop: spacing.xs }, suggestionMessage: { color: colors.textMuted, lineHeight: 20 }, suggestionAction: { flexDirection: "row", justifyContent: "flex-end", alignItems: "center", gap: 4, marginTop: spacing.md, paddingTop: spacing.md, borderTopWidth: 1, borderTopColor: colors.border }, suggestionActionText: { color: colors.primary, fontWeight: "800" },
+  teachCard: { backgroundColor: colors.primarySoft, borderRadius: radius.xl, borderWidth: 1, borderColor: colors.primary, padding: spacing.lg, flexDirection: "row", alignItems: "center", gap: spacing.md, shadowColor: colors.navy, shadowOpacity: 0.09, shadowRadius: 14, shadowOffset: { width: 0, height: 5 }, elevation: 3 },
+  teachIcon: { width: 54, height: 54, borderRadius: 18, backgroundColor: colors.primary, alignItems: "center", justifyContent: "center" },
+  teachCopy: { flex: 1, gap: spacing.xs }, teachTitle: { ...typography.section, fontSize: 18, color: colors.navy }, teachMessage: { color: colors.textMuted, fontSize: 13, lineHeight: 18 },
   activityLink: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: spacing.sm, paddingVertical: spacing.sm }, activityText: { color: colors.textMuted, fontWeight: "700", flex: 0 },
 });

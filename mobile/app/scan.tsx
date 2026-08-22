@@ -41,8 +41,11 @@ export default function ScanScreen() {
       if (!res.ok) {
         throw new Error(res.error || "Upload failed");
       }
+      if (!res.scan_id) {
+        throw new Error("Upload completed without a scan ID");
+      }
 
-      router.push("/review");
+      router.push({ pathname: "/review", params: { scanId: String(res.scan_id) } });
     } catch (e: any) {
       Alert.alert("Upload failed", e.message || "Unknown error");
     } finally {
