@@ -1,0 +1,19 @@
+name: fridge9000-test
+
+services:
+  test-db:
+    image: postgres:16
+    container_name: fridge9000-test-db
+    environment:
+      POSTGRES_USER: fridge_test
+      POSTGRES_PASSWORD: fridge_test_pass
+      POSTGRES_DB: fridge9000_test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fridge_test -d fridge9000_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 15

@@ -668,6 +668,52 @@ npx expo start --tunnel
 
 Open **Expo Go** on the phone and connect to the displayed development server.
 
+## Backend Tests
+
+Install the test dependencies:
+
+```powershell
+python -m pip install -r backend/requirements-test.txt
+```
+
+Start the isolated PostgreSQL 16 test service:
+
+```powershell
+docker compose -f docker-compose.test.yml up -d --wait
+```
+
+The test service uses `fridge9000_test` on host port `5433` and does not use the development database volume. Set `TEST_DATABASE_URL` only when a different test database is needed; database fixtures reject the normal `fridge9000` database and any database name that does not end in `_test`.
+
+Run fast tests:
+
+```powershell
+pytest -m "not ml and not e2e"
+```
+
+Run integration tests:
+
+```powershell
+pytest -m integration
+```
+
+Run ML tests:
+
+```powershell
+pytest -m ml
+```
+
+Run the full suite:
+
+```powershell
+pytest
+```
+
+Stop and remove the isolated test database service:
+
+```powershell
+docker compose -f docker-compose.test.yml down -v
+```
+
 ## Main Application Screens
 
 The mobile application includes screens for:
