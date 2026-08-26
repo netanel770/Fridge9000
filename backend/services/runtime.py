@@ -1,4 +1,5 @@
 import os
+import math
 import threading
 from datetime import datetime, date, timedelta
 from typing import List, Optional, Dict, Any
@@ -1435,6 +1436,8 @@ def _parse_annotation_box(payload: Dict[str, Any], prefix: str) -> Optional[Dict
         x1, y1, x2, y2 = [float(value) for value in values]
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail=f"{prefix} bounding-box coordinates must be numbers")
+    if not all(math.isfinite(value) for value in (x1, y1, x2, y2)):
+        raise HTTPException(status_code=400, detail=f"{prefix} bounding-box coordinates must be finite")
     if x2 <= x1 or y2 <= y1:
         raise HTTPException(status_code=400, detail=f"{prefix} bounding box must have positive width and height")
     return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
@@ -1448,6 +1451,8 @@ def _validate_final_annotation_box(box, image_width: int, image_height: int):
 
 
 def _prepare_annotation(cur, scan_id: int, image_width: int, image_height: int, payload: Dict[str, Any]):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Each annotation must be an object")
     action = str(payload.get("action") or "").strip().upper()
     if action not in ANNOTATION_ACTIONS:
         raise HTTPException(status_code=400, detail="Unsupported annotation action")
@@ -1941,8 +1946,8 @@ def get_annotation_submission(submission_id: int):
 
 def update_annotation_submission(submission_id: int, payload: Dict[str, Any]):
     status = str(payload.get("status") or "").strip().lower()
-    if status not in ANNOTATION_STATUSES:
-        raise HTTPException(status_code=400, detail="A valid status is required")
+    if status not in {"approved", "rejected"}:
+        raise HTTPException(status_code=400, detail="Status must be approved or rejected")
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM annotation_submissions WHERE id = %s FOR UPDATE;", (submission_id,))
@@ -1992,6 +1997,32 @@ def update_annotation(annotation_id: int, payload: Dict[str, Any]):
             prepared = _prepare_annotation(
                 cur, current["scan_id"], current["image_width"], current["image_height"], merged
             )
+            if prepared["source_detection_id"] is not None:
+                cur.execute(
+                    """
+                    SELECT a.id
+                    FROM annotations a
+                    JOIN annotation_submissions s ON s.id = a.submission_id
+                    WHERE a.id <> %s
+                      AND a.action = %s
+                      AND a.source_detection_id = %s
+                      AND s.status <> 'rejected'
+                    LIMIT 1;
+                    """,
+                    (
+                        annotation_id,
+                        prepared["action"],
+                        prepared["source_detection_id"],
+                    ),
+                )
+                if cur.fetchone():
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"A {prepared['action']} correction already exists "
+                            "for this detection"
+                        ),
+                    )
             cur.execute(
                 """
                 UPDATE annotations SET
