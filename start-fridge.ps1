@@ -14,6 +14,7 @@ function Test-UsableLanIPv4 {
     )
 
     $parsedAddress = $null
+
     if (-not [System.Net.IPAddress]::TryParse($Address, [ref]$parsedAddress)) {
         return $false
     }
@@ -105,6 +106,7 @@ function Get-PreferredLanIPv4 {
     return $selected.Address
 }
 
+# Resolve API URL
 if ($PSBoundParameters.ContainsKey("ApiUrl")) {
     $selectedApiUrl = $ApiUrl.Trim().TrimEnd("/")
 
@@ -117,6 +119,7 @@ else {
     $selectedApiUrl = "http://${lanAddress}:8000"
 }
 
+# Validate API URL
 $parsedApiUrl = $null
 
 if (
@@ -130,10 +133,12 @@ if (
     throw "Invalid API URL '$selectedApiUrl'. Supply an absolute HTTP or HTTPS URL."
 }
 
+# Check Docker
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     throw "Docker was not found. Install or start Docker Desktop and ensure 'docker' is available in PATH."
 }
 
+# Mobile project paths
 $mobileDirectory = Join-Path $PSScriptRoot "mobile"
 $mobilePackage = Join-Path $mobileDirectory "package.json"
 
@@ -141,50 +146,74 @@ if (-not (Test-Path -LiteralPath $mobilePackage -PathType Leaf)) {
     throw "Mobile package file was not found at '$mobilePackage'."
 }
 
+# Check Node.js
 if (-not (Get-Command node.exe -ErrorAction SilentlyContinue)) {
     throw "Node.js was not found. Install Node.js and ensure 'node' is available in PATH."
 }
 
+# Check npm
 if (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) {
     throw "npm was not found. Install Node.js and ensure 'npm' is available in PATH."
 }
 
+# Check npx
 $npxCommand = Get-Command npx.cmd -ErrorAction SilentlyContinue
 
 if (-not $npxCommand) {
     throw "npx was not found. Install Node.js and ensure 'npx' is available in PATH."
 }
 
+# Save original shell state
 $originalLocation = Get-Location
 $hadOriginalApiUrl = Test-Path Env:EXPO_PUBLIC_API_BASE_URL
 $originalApiUrl = $env:EXPO_PUBLIC_API_BASE_URL
 
+$dockerStarted = $false
+
 try {
+    # Set API URL for Expo
     $env:EXPO_PUBLIC_API_BASE_URL = $selectedApiUrl
 
     Write-Host ""
+    Write-Host "========================================"
+    Write-Host "          Fridge9000 Launcher"
+    Write-Host "========================================"
+    Write-Host ""
     Write-Host "Using Expo API URL: $env:EXPO_PUBLIC_API_BASE_URL"
+    Write-Host ""
 
+    # Start backend + database
     Set-Location $PSScriptRoot
 
     Write-Host "Starting Fridge9000 database and backend..."
+
     & docker compose up --build --detach --wait
 
     if ($LASTEXITCODE -ne 0) {
         throw "docker compose exited with code $LASTEXITCODE."
     }
 
+    $dockerStarted = $true
+
+    Write-Host ""
     Write-Host "Backend and database are running."
     Write-Host ""
+    Write-Host "Press Ctrl+C to stop Fridge9000."
+    Write-Host ""
 
+    # Start Expo
     Set-Location $mobileDirectory
 
     if ($Tunnel) {
         Write-Host "Starting Expo in tunnel mode..."
+        Write-Host ""
+
         & $npxCommand.Name expo start --tunnel
     }
     else {
         Write-Host "Starting Expo in LAN mode..."
+        Write-Host ""
+
         & $npxCommand.Name expo start
     }
 
@@ -193,12 +222,44 @@ try {
     }
 }
 finally {
+    Write-Host ""
+    Write-Host "========================================"
+    Write-Host "       Shutting down Fridge9000"
+    Write-Host "========================================"
+    Write-Host ""
+
+    # Shut down Docker only if it successfully started
+    if ($dockerStarted) {
+        try {
+            Set-Location $PSScriptRoot
+
+            Write-Host "Stopping backend and database..."
+
+            & docker compose down
+
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Docker Compose shutdown returned exit code $LASTEXITCODE."
+            }
+            else {
+                Write-Host "Backend and database stopped."
+            }
+        }
+        catch {
+            Write-Warning "Failed to shut down Docker Compose cleanly: $($_.Exception.Message)"
+        }
+    }
+
+    # Restore original working directory
     Set-Location $originalLocation
 
+    # Restore original environment variable
     if ($hadOriginalApiUrl) {
         $env:EXPO_PUBLIC_API_BASE_URL = $originalApiUrl
     }
     else {
         Remove-Item Env:EXPO_PUBLIC_API_BASE_URL -ErrorAction SilentlyContinue
     }
+
+    Write-Host ""
+    Write-Host "Fridge9000 stopped."
 }
