@@ -223,7 +223,7 @@ Fridge9000/
 │   ├── services/             # Application and ML services
 │   ├── tests/                # Backend test suite
 │   ├── main.py               # FastAPI entry point
-│   ├── train.py              # Training workflow
+│   ├── train_yolo_candidate.py # Local candidate training
 │   ├── export_yolo_dataset.py
 │   └── compare_yolo_models.py
 │
