@@ -92,6 +92,16 @@ export type UploadScanResponse = {
   error?: string;
 };
 
+export type ManualAnnotationImageUpload = {
+  ok: boolean;
+  scan_id: number;
+  image_width: number;
+  image_height: number;
+  source: "manual_annotation";
+  image_url: string;
+  created_at: string;
+};
+
 export type RecentScan = {
   id: number;
   created_at: string;

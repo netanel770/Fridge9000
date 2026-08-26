@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { useLocalSearchParams } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 
 import { AppButton, Card, EmptyState, ScreenHeader, StatusBadge } from "../src/components/ui";
 import { DetectionImageViewer } from "../src/components/DetectionImageViewer";
@@ -652,6 +652,16 @@ export default function TeachFridgeScreen() {
 
       {activeTab === "Suggestions" ? (
         <View style={styles.suggestions}>
+          <Card>
+            <View style={styles.manualAnnotationCallout}>
+              <View style={styles.manualAnnotationIcon}><Ionicons name="create-outline" size={24} color={colors.primary} /></View>
+              <View style={styles.detectionCopy}>
+                <Text style={styles.manualAnnotationTitle}>Annotate a new image</Text>
+                <Text style={styles.sectionSubtitle}>Upload an image and label products yourself. No AI scan required.</Text>
+              </View>
+              <AppButton label="Start" icon="arrow-forward" onPress={() => router.push("/manual-annotation" as never)} />
+            </View>
+          </Card>
           <View style={styles.sectionHeading}>
             <View><Text style={styles.sectionTitle}>What did the AI get wrong?</Text><Text style={styles.sectionSubtitle}>Choose the product and tell us the correct answer.</Text></View>
             <Pressable accessibilityRole="button" onPress={loadSuggestions} hitSlop={8}><Ionicons name="refresh" size={21} color={colors.primary} /></Pressable>
@@ -1089,6 +1099,9 @@ const styles = StyleSheet.create({
   note: { flexDirection: "row", gap: spacing.sm, backgroundColor: colors.infoBg, borderRadius: radius.lg, padding: spacing.md },
   noteText: { flex: 1, color: colors.infoFg, fontSize: 13, lineHeight: 18 },
   suggestions: { gap: spacing.md },
+  manualAnnotationCallout: { gap: spacing.md },
+  manualAnnotationIcon: { width: 48, height: 48, borderRadius: radius.lg, backgroundColor: colors.primarySoft, alignItems: "center", justifyContent: "center" },
+  manualAnnotationTitle: { ...typography.section, color: colors.navy },
   targetedHelp: { flexDirection: "row", alignItems: "flex-start", gap: spacing.sm, backgroundColor: colors.primarySoft, borderWidth: 1, borderColor: "#93c5fd", borderRadius: radius.lg, padding: spacing.md },
   targetedHelpTitle: { color: colors.navy, fontWeight: "800" },
   targetedHelpText: { color: colors.textSecondary, fontSize: 13, lineHeight: 18 },

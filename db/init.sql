@@ -40,7 +40,10 @@ CREATE TABLE IF NOT EXISTS scans (
   created_at TIMESTAMP NOT NULL DEFAULT NOW(),
   image_ref TEXT,
   image_width INT,
-  image_height INT
+  image_height INT,
+  source TEXT NOT NULL DEFAULT 'detector' CONSTRAINT scans_source_check CHECK (
+    source IN ('detector', 'manual_annotation', 'receipt')
+  )
 );
 
 -- Events

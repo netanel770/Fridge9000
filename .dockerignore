@@ -5,6 +5,11 @@
 !kaggle_trainer/train.py
 !kaggle_trainer/kernel-metadata.json
 
+backend/.pytest_cache/
+backend/.pytest-tmp*
+backend/**/.pytest_cache/
+backend/**/.pytest-tmp*
+
 backend/.env
 backend/*.env
 backend/kaggle.json

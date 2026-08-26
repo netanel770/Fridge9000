@@ -6,6 +6,7 @@ except ModuleNotFoundError:
     from backend.services import runtime
 
 router = APIRouter()
+router.add_api_route("/annotation-images/upload", runtime.upload_annotation_image, methods=["POST"])
 router.add_api_route("/scans/{scan_id}/annotation-submissions", runtime.create_annotation_submission, methods=["POST"])
 router.add_api_route("/annotation-submissions", runtime.list_annotation_submissions, methods=["GET"])
 router.add_api_route("/annotation-submissions/stats", runtime.get_annotation_submission_stats, methods=["GET"])

@@ -428,7 +428,24 @@ def ensure_schema():
                 """
                 ALTER TABLE scans
                 ADD COLUMN IF NOT EXISTS image_width INT,
-                ADD COLUMN IF NOT EXISTS image_height INT;
+                ADD COLUMN IF NOT EXISTS image_height INT,
+                ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'detector';
+                """
+            )
+            cur.execute(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'scans_source_check'
+                          AND conrelid = 'scans'::regclass
+                    ) THEN
+                        ALTER TABLE scans
+                        ADD CONSTRAINT scans_source_check
+                        CHECK (source IN ('detector', 'manual_annotation', 'receipt'));
+                    END IF;
+                END $$;
                 """
             )
             cur.execute(
@@ -1423,6 +1440,56 @@ def inventory_all() -> List[Dict[str, Any]]:
 
 ANNOTATION_ACTIONS = {"CONFIRM", "RELABEL", "ADJUST_BOX", "ADD", "REMOVE"}
 ANNOTATION_STATUSES = {"pending", "approved", "rejected", "used"}
+
+
+async def upload_annotation_image(file: UploadFile = File(...)):
+    extensions = {
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+    }
+    extension = extensions.get(file.content_type)
+    if not extension:
+        raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP image")
+
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded image is empty")
+    image = cv2.imdecode(np.frombuffer(contents, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=400, detail="Uploaded image could not be decoded")
+
+    image_height, image_width = image.shape[:2]
+    file_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.{extension}")
+    try:
+        with open(file_path, "wb") as destination:
+            destination.write(contents)
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO scans(image_ref, image_width, image_height, source)
+                    VALUES (%s, %s, %s, 'manual_annotation')
+                    RETURNING id, image_width, image_height, source, created_at;
+                    """,
+                    (file_path, image_width, image_height),
+                )
+                scan = cur.fetchone()
+                conn.commit()
+    except Exception as exc:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "scan_id": scan["id"],
+        "image_width": scan["image_width"],
+        "image_height": scan["image_height"],
+        "source": scan["source"],
+        "image_url": f"/scans/{scan['id']}/image",
+        "created_at": scan["created_at"],
+    }
 
 
 def _parse_annotation_box(payload: Dict[str, Any], prefix: str) -> Optional[Dict[str, float]]:
@@ -2581,6 +2648,7 @@ def latest_scan():
     sql = """
     SELECT id, created_at, image_ref
     FROM scans
+    WHERE source = 'detector'
     ORDER BY created_at DESC
     LIMIT 1;
     """
@@ -2600,6 +2668,7 @@ def recent_scans(limit: int = 10):
     LEFT JOIN scan_detections d ON d.scan_id = s.id
     WHERE s.image_width IS NOT NULL
       AND s.image_height IS NOT NULL
+      AND s.source = 'detector'
     GROUP BY s.id
     ORDER BY s.created_at DESC, s.id DESC
     LIMIT %s;
@@ -2728,8 +2797,8 @@ def door_closed(payload: Dict[str, Any]):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO scans(image_ref, image_width, image_height)
-                VALUES (%s, %s, %s)
+                INSERT INTO scans(image_ref, image_width, image_height, source)
+                VALUES (%s, %s, %s, 'detector')
                 RETURNING id;
                 """,
                 (image_ref, infer_res["image_width"], infer_res["image_height"]),
@@ -3258,8 +3327,8 @@ async def upload_receipt(file: UploadFile = File(...)):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO scans(image_ref)
-                    VALUES (%s)
+                    INSERT INTO scans(image_ref, source)
+                    VALUES (%s, 'receipt')
                     RETURNING id;
                     """,
                     (file_path,),

@@ -29,6 +29,7 @@ export default function RootLayout() {
         <Stack.Screen name="image-inventory" options={{ title: "Update by Image" }} />
         <Stack.Screen name="rot-detection" options={{ title: "Rot Detection" }} />
         <Stack.Screen name="teach-fridge" options={{ title: "Teach Fridge 9000" }} />
+        <Stack.Screen name="manual-annotation" options={{ title: "Annotate Image" }} />
         <Stack.Screen name="expired-items" options={{ title: "Expired Products" }} />
         <Stack.Screen name="manual-confirm" options={{ title: "Confirm Update" }} />
       </Stack>

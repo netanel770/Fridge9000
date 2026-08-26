@@ -17,6 +17,7 @@ import type {
   DetectionItem,
   ReviewItem,
   UploadScanResponse,
+  ManualAnnotationImageUpload,
   FreshnessAnalysisResponse,
 } from "../types/api";
 
@@ -190,6 +191,20 @@ export async function uploadScanImage(imageUri: string): Promise<UploadScanRespo
   });
 
   return handleJsonResponse<UploadScanResponse>(res);
+}
+
+export async function uploadManualAnnotationImage(
+  imageUri: string,
+  fileName = "manual-annotation.jpg",
+  mimeType = "image/jpeg",
+): Promise<ManualAnnotationImageUpload> {
+  const formData = new FormData();
+  formData.append("file", { uri: imageUri, name: fileName, type: mimeType } as any);
+  const response = await fetch(`${API_BASE_URL}/annotation-images/upload`, {
+    method: "POST",
+    body: formData,
+  });
+  return handleJsonResponse<ManualAnnotationImageUpload>(response);
 }
 
 export async function updateInventoryByImage(
