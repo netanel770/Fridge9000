@@ -756,6 +756,83 @@ def sync_inventory_summary(conn):
             )
 
 
+def change_inventory_batches(cur, item_id: int, action: str, quantity: int) -> int:
+    """Apply a legacy inventory change to the authoritative batch state."""
+    cur.execute(
+        "SELECT COALESCE(SUM(quantity), 0) AS quantity FROM inventory_batches WHERE item_id = %s;",
+        (item_id,),
+    )
+    current_quantity = cur.fetchone()["quantity"]
+
+    if action == "Added":
+        cur.execute(
+            """
+            SELECT id
+            FROM inventory_batches
+            WHERE item_id = %s
+              AND expiry_date IS NULL
+              AND expiry_estimate_date IS NULL
+            ORDER BY created_at, id
+            LIMIT 1
+            FOR UPDATE;
+            """,
+            (item_id,),
+        )
+        batch = cur.fetchone()
+        if batch:
+            cur.execute(
+                """
+                UPDATE inventory_batches
+                SET quantity = quantity + %s, last_updated = NOW()
+                WHERE id = %s;
+                """,
+                (quantity, batch["id"]),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO inventory_batches(item_id, quantity, expiry_source)
+                VALUES (%s, %s, 'manual');
+                """,
+                (item_id, quantity),
+            )
+        return current_quantity + quantity
+
+    if action != "Removed":
+        return current_quantity
+    if current_quantity < quantity:
+        raise HTTPException(status_code=409, detail="Not enough inventory available")
+
+    cur.execute(
+        """
+        SELECT id, quantity
+        FROM inventory_batches
+        WHERE item_id = %s AND quantity > 0
+        ORDER BY COALESCE(expiry_date, expiry_estimate_date) NULLS LAST,
+                 created_at, id
+        FOR UPDATE;
+        """,
+        (item_id,),
+    )
+    remaining = quantity
+    for batch in cur.fetchall():
+        if remaining == 0:
+            break
+        removed = min(batch["quantity"], remaining)
+        remaining -= removed
+        cur.execute(
+            """
+            UPDATE inventory_batches
+            SET quantity = quantity - %s,
+                open_unit_remaining_percent = NULL,
+                last_updated = NOW()
+            WHERE id = %s;
+            """,
+            (removed, batch["id"]),
+        )
+    return current_quantity - quantity
+
+
 def apply_rules(raw_detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     rules = load_rules()
     deny = set([x.lower() for x in rules.get("deny_labels", [])])
@@ -2489,7 +2566,8 @@ def reset_inventory():
             with conn.cursor() as cur:
                 # Optionally clear events first to avoid FK issues
                 cur.execute("DELETE FROM events;")
-                # Clear inventory
+                # Inventory reads are derived from batches, so both stores must reset.
+                cur.execute("DELETE FROM inventory_batches;")
                 cur.execute("DELETE FROM inventory;")
                 # Optional: clear items table if you want a full reset
                 # cur.execute("DELETE FROM items;")
@@ -2510,55 +2588,25 @@ def create_event(payload: Dict[str, Any]):
         return {"ok": False, "error": "action and item_name required"}
 
     with get_conn() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # get item id
             cur.execute("SELECT id FROM items WHERE name = %s;", (item_name,))
             row = cur.fetchone()
             if not row:
                 return {"ok": False, "error": "item not found"}
 
-            item_id = row[0]
+            item_id = row["id"]
+
+            if action in ("Added", "Removed"):
+                change_inventory_batches(cur, item_id, action, 1)
 
             # insert event
             cur.execute(
                 "INSERT INTO events(scan_id, item_id, action, confidence) VALUES (%s,%s,%s,%s) RETURNING id;",
                 (scan_id, item_id, action, confidence),
             )
-            event_id = cur.fetchone()[0]
-
-            # update inventory
-            cur.execute(
-                "SELECT quantity FROM inventory WHERE item_id = %s;",
-                (item_id,),
-            )
-            inv = cur.fetchone()
-
-            if inv:
-                quantity = inv[0]
-            else:
-                quantity = 0
-                cur.execute(
-                    "INSERT INTO inventory(item_id, quantity) VALUES (%s, 0);",
-                    (item_id,),
-                )
-
-            if action == "Added":
-                quantity += 1
-            elif action == "Removed":
-                quantity = max(0, quantity - 1)
-
-            # determine status
-            if quantity == 0:
-                status = "MISSING"
-            elif quantity == 1:
-                status = "LOW"
-            else:
-                status = "OK"
-
-            cur.execute(
-                "UPDATE inventory SET quantity=%s, status=%s, last_updated=NOW() WHERE item_id=%s;",
-                (quantity, status, item_id),
-            )
+            event_id = cur.fetchone()["id"]
+            sync_inventory_summary(conn)
 
             conn.commit()
 
@@ -2681,46 +2729,15 @@ async def update_inventory_by_image(
                     else:
                         item_id = item["id"]
 
-                    cur.execute(
-                        "SELECT quantity FROM inventory WHERE item_id = %s;",
-                        (item_id,),
-                    )
-                    inv = cur.fetchone()
-                    current_qty = inv["quantity"] if inv else 0
-
-                    if action == "Removed" and current_qty <= 0:
+                    try:
+                        new_qty = change_inventory_batches(
+                            cur, item_id, action, data["count"]
+                        )
+                    except HTTPException as exc:
                         raise HTTPException(
                             status_code=400,
-                            detail=f"{name} is not in inventory"
-                        )
-
-                    if action == "Removed" and current_qty < data["count"]:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Not enough {name} in inventory"
-                        )
-
-                    if not inv:
-                        cur.execute(
-                            "INSERT INTO inventory(item_id, quantity, status) VALUES (%s, 0, 'MISSING');",
-                            (item_id,),
-                        )
-
-                    if action == "Added":
-                        new_qty = current_qty + data["count"]
-                    else:
-                        new_qty = current_qty - data["count"]
-
-                    status = "MISSING" if new_qty == 0 else "LOW" if new_qty == 1 else "OK"
-
-                    cur.execute(
-                        """
-                        UPDATE inventory
-                        SET quantity = %s, status = %s, last_updated = NOW()
-                        WHERE item_id = %s;
-                        """,
-                        (new_qty, status, item_id),
-                    )
+                            detail=f"Not enough {name} in inventory",
+                        ) from exc
 
                     cur.execute(
                         """
@@ -2737,6 +2754,7 @@ async def update_inventory_by_image(
                         "new_quantity": new_qty,
                     })
 
+                sync_inventory_summary(conn)
                 conn.commit()
 
         return {
