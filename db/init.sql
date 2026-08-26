@@ -227,6 +227,9 @@ CREATE TABLE IF NOT EXISTS model_comparisons (
   active_metrics JSONB NOT NULL,
   candidate_metrics JSONB NOT NULL,
   metric_differences JSONB NOT NULL,
+  class_comparison JSONB NOT NULL DEFAULT '{"active_classes":[],"candidate_classes":[],"shared_classes":[],"added_classes":[],"removed_classes":[]}'::jsonb,
+  shared_class_comparison JSONB NOT NULL DEFAULT '{"available":false,"classes":[],"unavailable_classes":[]}'::jsonb,
+  added_class_metrics JSONB NOT NULL DEFAULT '{"available":false,"classes":[],"unavailable_classes":[],"per_class":{}}'::jsonb,
   comparison_rule TEXT NOT NULL,
   candidate_outperforms_active BOOLEAN NOT NULL,
   summary_path TEXT
@@ -236,6 +239,11 @@ CREATE INDEX IF NOT EXISTS idx_model_comparisons_candidate
   ON model_comparisons(candidate_model_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_model_comparisons_dataset
   ON model_comparisons(dataset_version, created_at DESC);
+
+ALTER TABLE model_comparisons
+  ADD COLUMN IF NOT EXISTS class_comparison JSONB NOT NULL DEFAULT '{"active_classes":[],"candidate_classes":[],"shared_classes":[],"added_classes":[],"removed_classes":[]}'::jsonb,
+  ADD COLUMN IF NOT EXISTS shared_class_comparison JSONB NOT NULL DEFAULT '{"available":false,"classes":[],"unavailable_classes":[]}'::jsonb,
+  ADD COLUMN IF NOT EXISTS added_class_metrics JSONB NOT NULL DEFAULT '{"available":false,"classes":[],"unavailable_classes":[],"per_class":{}}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS model_activation_history (
   id SERIAL PRIMARY KEY,

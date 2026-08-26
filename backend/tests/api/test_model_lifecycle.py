@@ -1,0 +1,1026 @@
+import hashlib
+import importlib
+import itertools
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import cv2
+import numpy as np
+import pytest
+
+from backend.class_aware_metrics import build_class_aware_comparison
+
+
+pytestmark = [pytest.mark.integration, pytest.mark.api]
+
+
+class ImmediateThread:
+    def __init__(self, target, args=(), daemon=None):
+        self.target = target
+        self.args = args
+
+    def start(self):
+        self.target(*self.args)
+
+
+class DeferredThread:
+    instances = []
+
+    def __init__(self, target, args=(), daemon=None):
+        self.target = target
+        self.args = args
+        self.__class__.instances.append(self)
+
+    def start(self):
+        return None
+
+    def run(self):
+        self.target(*self.args)
+
+
+class FakeYolo:
+    metrics = {
+        "precision": 0.81,
+        "recall": 0.76,
+        "map50": 0.79,
+        "map50_95": 0.62,
+    }
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.task = "detect"
+        self.trainer = None
+
+    def train(self, **kwargs):
+        best = Path(kwargs["project"]) / kwargs["name"] / "weights" / "best.pt"
+        best.parent.mkdir(parents=True, exist_ok=True)
+        best.write_bytes(b"deterministic-fake-candidate-weights")
+        self.trainer = SimpleNamespace(best=str(best))
+
+    def val(self, **kwargs):
+        box = SimpleNamespace(
+            mp=self.metrics["precision"],
+            mr=self.metrics["recall"],
+            map50=self.metrics["map50"],
+            map=self.metrics["map50_95"],
+        )
+        return SimpleNamespace(box=box)
+
+
+@pytest.fixture
+def lifecycle_context(
+    monkeypatch, tmp_path, test_database_url, db_connection
+):
+    runtime = importlib.import_module("backend.main").runtime
+    providers = importlib.import_module("training_providers")
+    trainer = importlib.import_module("train_yolo_candidate")
+    comparison = importlib.import_module("compare_yolo_models")
+
+    root = tmp_path / "lifecycle"
+    uploads = root / "uploads"
+    uploads.mkdir(parents=True)
+    active_path = root / "active.pt"
+    active_path.write_bytes(b"deterministic-fake-active-weights")
+    active_hash = hashlib.sha256(active_path.read_bytes()).hexdigest()
+
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE model_versions
+            SET model_path = %s, model_sha256 = %s
+            WHERE status = 'active'
+            RETURNING id, version;
+            """,
+            (str(active_path), active_hash),
+        )
+        active_id, active_version = cursor.fetchone()
+    db_connection.commit()
+
+    monkeypatch.setattr(runtime, "DATABASE_URL", test_database_url)
+    monkeypatch.setattr(runtime, "BACKEND_DIR", root)
+    monkeypatch.setattr(runtime.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(providers, "DATABASE_URL", test_database_url)
+    monkeypatch.setattr(providers, "BACKEND_DIR", root)
+    monkeypatch.setattr(trainer, "YOLO", FakeYolo)
+
+    with runtime._LIFECYCLE_JOB_LOCK:
+        runtime._LIFECYCLE_JOBS.clear()
+        runtime._ACTIVE_LIFECYCLE_JOB_ID = None
+    runtime.MODEL = None
+    runtime._MODEL_VERSION = None
+    runtime._MODEL_PATH = None
+
+    yield SimpleNamespace(
+        runtime=runtime,
+        providers=providers,
+        trainer=trainer,
+        comparison=comparison,
+        root=root,
+        uploads=uploads,
+        active_id=active_id,
+        active_version=active_version,
+        active_path=active_path,
+        active_hash=active_hash,
+        database_url=test_database_url,
+    )
+
+    with runtime._LIFECYCLE_JOB_LOCK:
+        runtime._LIFECYCLE_JOBS.clear()
+        runtime._ACTIVE_LIFECYCLE_JOB_ID = None
+    runtime.MODEL = None
+    runtime._MODEL_VERSION = None
+    runtime._MODEL_PATH = None
+
+
+@pytest.fixture
+def submission_factory(test_client, db_connection, lifecycle_context):
+    sequence = itertools.count(1)
+
+    def create(kind, status, label):
+        number = next(sequence)
+        image_path = lifecycle_context.uploads / f"source-{number}.png"
+        image = np.full(
+            (80, 120, 3),
+            (30 + number, 100 + number, 210 - number),
+            dtype=np.uint8,
+        )
+        encoded, contents = cv2.imencode(".png", image)
+        assert encoded
+        image_path.write_bytes(contents.tobytes())
+
+        source = "detector" if kind == "assisted" else "manual_annotation"
+        with db_connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO scans(image_ref, image_width, image_height, source)
+                VALUES (%s, 120, 80, %s)
+                RETURNING id;
+                """,
+                (str(image_path), source),
+            )
+            scan_id = cursor.fetchone()[0]
+            detection_id = None
+            if kind == "assisted":
+                cursor.execute(
+                    """
+                    INSERT INTO scan_detections(
+                        scan_id, label, confidence, x1, y1, x2, y2
+                    ) VALUES (%s, %s, 0.92, 10, 10, 60, 60)
+                    RETURNING id;
+                    """,
+                    (scan_id, label),
+                )
+                detection_id = cursor.fetchone()[0]
+        db_connection.commit()
+
+        annotation = (
+            {"action": "CONFIRM", "source_detection_id": detection_id}
+            if kind == "assisted"
+            else {
+                "action": "ADD",
+                "final_label": label,
+                "final_x1": 15,
+                "final_y1": 12,
+                "final_x2": 70,
+                "final_y2": 65,
+            }
+        )
+        response = test_client.post(
+            f"/scans/{scan_id}/annotation-submissions",
+            json={"annotations": [annotation]},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        if status != "pending":
+            moderated = test_client.patch(
+                f"/annotation-submissions/{body['submission']['id']}",
+                json={"status": status},
+            )
+            assert moderated.status_code == 200
+        return {
+            "scan_id": scan_id,
+            "submission_id": body["submission"]["id"],
+            "annotation_id": body["annotations"][0]["id"],
+            "action": body["annotations"][0]["action"],
+            "status": status,
+        }
+
+    return create
+
+
+def _active_count(connection):
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM model_versions WHERE status = 'active';")
+        return cursor.fetchone()[0]
+
+
+def _prepare_contributions(submission_factory):
+    return {
+        "assisted": submission_factory("assisted", "approved", "Apple"),
+        "manual": submission_factory("manual", "approved", "Milk"),
+        "pending": submission_factory("assisted", "pending", "Orange"),
+        "rejected": submission_factory("manual", "rejected", "Bread"),
+    }
+
+
+def _run_successful_training(test_client, lifecycle_context):
+    response = test_client.post("/model-lifecycle/train")
+    assert response.status_code == 200
+    job = response.json()
+    assert job["kind"] == "TRAIN"
+    assert job["status"] == "completed"
+    assert job["provider"] == "local"
+    assert job["phase"] == "training_local"
+    lookup = test_client.get(f"/model-lifecycle/jobs/{job['job_id']}")
+    assert lookup.status_code == 200
+    assert lookup.json() == job
+    return job
+
+
+def _evaluation(classes, overall, per_class=None):
+    rows = per_class or {name: overall for name in classes}
+    return {
+        "classes": classes,
+        "metrics": overall,
+        "per_class": [
+            {"name": name, **rows[name]}
+            for name in classes
+            if name in rows
+        ],
+    }
+
+
+def _run_comparison(
+    test_client,
+    lifecycle_context,
+    candidate_version,
+    active_metrics,
+    candidate_metrics,
+    *,
+    active_classes=None,
+    candidate_classes=None,
+    active_per_class=None,
+    candidate_per_class=None,
+):
+    active_evaluation = _evaluation(
+        active_classes or ["Apple", "Milk"], active_metrics, active_per_class
+    )
+    candidate_evaluation = _evaluation(
+        candidate_classes or ["Apple", "Milk"],
+        candidate_metrics,
+        candidate_per_class,
+    )
+
+    def evaluate(_path, _data_yaml, _args, _output_dir, name):
+        return active_evaluation if name == "active" else candidate_evaluation
+
+    with patch.object(lifecycle_context.comparison, "evaluate", side_effect=evaluate):
+        response = test_client.post(
+            f"/model-lifecycle/candidates/{candidate_version}/compare"
+        )
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_ultralytics_per_class_rows_follow_model_class_ids(
+    monkeypatch, tmp_path
+):
+    comparison = importlib.import_module("compare_yolo_models")
+
+    class FakeBox:
+        mp = 0.75
+        mr = 0.70
+        map50 = 0.78
+        map = 0.60
+        ap_class_index = [1, 0]
+
+        @staticmethod
+        def class_result(position):
+            return (
+                (0.90, 0.85, 0.88, 0.72)
+                if position == 0
+                else (0.60, 0.55, 0.68, 0.48)
+            )
+
+    model = SimpleNamespace(
+        task="detect",
+        names={0: "Milk", 1: "Apple"},
+        val=lambda **_kwargs: SimpleNamespace(box=FakeBox()),
+    )
+    monkeypatch.setattr(comparison, "YOLO", lambda _path: model)
+    model_path = tmp_path / "model.pt"
+    model_path.write_bytes(b"fake")
+    data_yaml = tmp_path / "data.yaml"
+    data_yaml.write_text("names: {0: Milk, 1: Apple}\n", encoding="utf-8")
+    output = tmp_path / "comparison"
+    args = SimpleNamespace(
+        imgsz=640,
+        batch=2,
+        device="cpu",
+        workers=0,
+        seed=0,
+        verbose=False,
+    )
+
+    evaluated = comparison.evaluate(
+        model_path, data_yaml, args, output, "candidate"
+    )
+    assert evaluated["classes"] == ["Milk", "Apple"]
+    assert evaluated["metrics"] == pytest.approx(
+        {"precision": 0.75, "recall": 0.70, "map50": 0.78, "map50_95": 0.60}
+    )
+    assert evaluated["per_class"] == [
+        {
+            "name": "Apple",
+            "precision": 0.90,
+            "recall": 0.85,
+            "map50": 0.88,
+            "map50_95": 0.72,
+        },
+        {
+            "name": "Milk",
+            "precision": 0.60,
+            "recall": 0.55,
+            "map50": 0.68,
+            "map50_95": 0.48,
+        },
+    ]
+
+
+def test_successful_training_records_eligibility_provenance_and_candidate(
+    test_client, db_connection, lifecycle_context, submission_factory
+):
+    contributions = _prepare_contributions(submission_factory)
+    assert _active_count(db_connection) == 1
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM training_run_submission_usage;")
+        assert cursor.fetchone()[0] == 0
+        cursor.execute("SELECT COUNT(*) FROM training_run_annotation_usage;")
+        assert cursor.fetchone()[0] == 0
+
+    job = _run_successful_training(test_client, lifecycle_context)
+    result = job["result"]
+    run_id = result["training_run_id"]
+    dataset_version = result["dataset_version"]
+    manifest_path = (
+        lifecycle_context.root / "dataset_exports" / job["job_id"] / "manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    approved_ids = {
+        contributions["assisted"]["submission_id"],
+        contributions["manual"]["submission_id"],
+    }
+    assert set(manifest["included_submission_ids"]) == approved_ids
+    assert manifest["source_submission_status"] == "approved"
+
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT * FROM training_runs WHERE id = %s;", (run_id,))
+        columns = [column.name for column in cursor.description]
+        run = dict(zip(columns, cursor.fetchone()))
+        cursor.execute(
+            "SELECT * FROM model_versions WHERE training_run_id = %s;", (run_id,)
+        )
+        columns = [column.name for column in cursor.description]
+        candidate = dict(zip(columns, cursor.fetchone()))
+        cursor.execute(
+            """
+            SELECT submission_id, dataset_version, model_version_id
+            FROM training_run_submission_usage
+            WHERE training_run_id = %s ORDER BY submission_id;
+            """,
+            (run_id,),
+        )
+        submission_usage = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT annotation_id, submission_id, dataset_version, model_version_id
+            FROM training_run_annotation_usage
+            WHERE training_run_id = %s ORDER BY annotation_id;
+            """,
+            (run_id,),
+        )
+        annotation_usage = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT COUNT(*), COUNT(DISTINCT submission_id)
+            FROM training_run_submission_usage WHERE training_run_id = %s;
+            """,
+            (run_id,),
+        )
+        assert cursor.fetchone() == (2, 2)
+
+    assert run["dataset_version"] == dataset_version
+    assert run["starting_model_version"] == lifecycle_context.active_version
+    assert Path(run["starting_weights_path"]) == lifecycle_context.active_path
+    assert run["starting_weights_sha256"] == lifecycle_context.active_hash
+    assert run["training_parameters"] == {
+        "epochs": 30,
+        "imgsz": 640,
+        "batch": 8,
+        "device": "cpu",
+        "workers": 0,
+        "patience": 10,
+        "seed": 0,
+        "deterministic": True,
+    }
+    assert run["status"] == "completed"
+    assert run["ended_at"] is not None
+    assert Path(run["candidate_model_path"]).is_file()
+    assert (run["precision"], run["recall"], run["map50"], run["map50_95"]) == pytest.approx(
+        (0.81, 0.76, 0.79, 0.62)
+    )
+
+    assert candidate["status"] == "candidate"
+    assert candidate["dataset_version"] == dataset_version
+    assert candidate["training_run_id"] == run_id
+    assert candidate["model_path"] == run["candidate_model_path"]
+    assert candidate["model_sha256"] == hashlib.sha256(
+        Path(candidate["model_path"]).read_bytes()
+    ).hexdigest()
+    assert _active_count(db_connection) == 1
+
+    assert {row[0] for row in submission_usage} == approved_ids
+    assert all(row[1] == dataset_version and row[2] == candidate["id"] for row in submission_usage)
+    expected_annotations = {
+        contributions["assisted"]["annotation_id"],
+        contributions["manual"]["annotation_id"],
+    }
+    assert {row[0] for row in annotation_usage} == expected_annotations
+    assert {row[1] for row in annotation_usage} == approved_ids
+    assert all(row[2] == dataset_version and row[3] == candidate["id"] for row in annotation_usage)
+    assert contributions["pending"]["submission_id"] not in {row[0] for row in submission_usage}
+    assert contributions["rejected"]["submission_id"] not in {row[0] for row in submission_usage}
+
+    for key in ("assisted", "manual"):
+        detail = test_client.get(
+            f"/annotation-submissions/{contributions[key]['submission_id']}"
+        ).json()
+        assert detail["submission"]["status"] == "approved"
+        assert detail["submission"]["training_status"] == "used"
+        assert detail["submission"]["training_usages"][0]["training_run_id"] == run_id
+
+    progress = test_client.get("/ai-progress")
+    assert progress.status_code == 200
+    body = progress.json()
+    assert body["active_model"]["id"] == lifecycle_context.active_id
+    assert body["latest_candidate"]["id"] == candidate["id"]
+    assert body["comparison"] is None
+    assert body["contributions"] == {
+        "total_approved": 2,
+        "used_in_training": 2,
+        "approved_waiting": 0,
+    }
+    assert body["training_history"][0]["status"] == "completed"
+    assert body["actions"]["can_train"] is False
+    assert body["actions"]["can_compare"] is True
+    assert body["actions"]["can_promote"] is False
+
+
+def test_failed_training_preserves_active_model_and_has_no_usage(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    approved = submission_factory("assisted", "approved", "Apple")
+    submission_factory("manual", "approved", "Milk")
+
+    class FailingYolo:
+        def __init__(self, _path):
+            raise RuntimeError("deterministic training failure")
+
+    monkeypatch.setattr(lifecycle_context.trainer, "YOLO", FailingYolo)
+    response = test_client.post("/model-lifecycle/train")
+    assert response.status_code == 200
+    job = response.json()
+    assert job["status"] == "failed"
+    assert job["error"] == {
+        "type": "RuntimeError",
+        "message": "deterministic training failure",
+    }
+    lookup = test_client.get(f"/model-lifecycle/jobs/{job['job_id']}")
+    assert lookup.status_code == 200
+    assert lookup.json()["status"] == "failed"
+
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT * FROM training_runs;")
+        columns = [column.name for column in cursor.description]
+        run = dict(zip(columns, cursor.fetchone()))
+        cursor.execute("SELECT COUNT(*) FROM model_versions WHERE status = 'candidate';")
+        assert cursor.fetchone()[0] == 0
+        cursor.execute("SELECT COUNT(*) FROM training_run_submission_usage;")
+        assert cursor.fetchone()[0] == 0
+        cursor.execute("SELECT COUNT(*) FROM training_run_annotation_usage;")
+        assert cursor.fetchone()[0] == 0
+        cursor.execute(
+            "SELECT status FROM annotation_submissions WHERE id = %s;",
+            (approved["submission_id"],),
+        )
+        assert cursor.fetchone()[0] == "approved"
+    assert run["status"] == "failed"
+    assert run["ended_at"] is not None
+    assert run["candidate_model_path"] is None
+    assert run["error"]["type"] == "RuntimeError"
+    assert "deterministic training failure" in run["error"]["message"]
+    assert _active_count(db_connection) == 1
+
+
+def test_lifecycle_job_queue_lookup_and_conflict_are_deterministic(
+    test_client, lifecycle_context, submission_factory, monkeypatch
+):
+    submission_factory("manual", "approved", "Milk")
+    DeferredThread.instances.clear()
+    monkeypatch.setattr(lifecycle_context.runtime.threading, "Thread", DeferredThread)
+    monkeypatch.setattr(
+        lifecycle_context.providers,
+        "training_provider",
+        lambda _name: lambda job_id, progress: {"training_run_id": job_id},
+    )
+
+    queued = test_client.post("/model-lifecycle/train")
+    assert queued.status_code == 200
+    job = queued.json()
+    assert job["status"] == "queued"
+    assert test_client.get(f"/model-lifecycle/jobs/{job['job_id']}").json()["status"] == "queued"
+    assert test_client.get("/model-lifecycle/jobs/not-a-job").status_code == 404
+
+    conflict = test_client.post("/model-lifecycle/train")
+    assert conflict.status_code == 409
+    assert "already running" in conflict.json()["detail"]
+
+    assert len(DeferredThread.instances) == 1
+    DeferredThread.instances[0].run()
+    completed = test_client.get(f"/model-lifecycle/jobs/{job['job_id']}")
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "completed"
+
+
+@pytest.mark.parametrize(
+    ("active_metrics", "candidate_metrics", "outperforms"),
+    [
+        (
+            {"precision": 0.70, "recall": 0.68, "map50": 0.72, "map50_95": 0.55},
+            {"precision": 0.78, "recall": 0.75, "map50": 0.80, "map50_95": 0.63},
+            True,
+        ),
+        (
+            {"precision": 0.80, "recall": 0.78, "map50": 0.82, "map50_95": 0.66},
+            {"precision": 0.76, "recall": 0.73, "map50": 0.79, "map50_95": 0.61},
+            False,
+        ),
+    ],
+)
+def test_comparison_persists_fingerprints_metrics_and_decision(
+    test_client,
+    db_connection,
+    lifecycle_context,
+    submission_factory,
+    active_metrics,
+    candidate_metrics,
+    outperforms,
+):
+    submission_factory("assisted", "approved", "Apple")
+    submission_factory("manual", "approved", "Milk")
+    trained = _run_successful_training(test_client, lifecycle_context)
+    candidate_version = trained["result"]["model_version"]
+    compared = _run_comparison(
+        test_client,
+        lifecycle_context,
+        candidate_version,
+        active_metrics,
+        candidate_metrics,
+    )
+    assert compared["status"] == "completed"
+    assert compared["result"]["candidate_outperforms_active"] is outperforms
+    comparison_id = compared["result"]["comparison_id"]
+
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT * FROM model_comparisons WHERE id = %s;", (comparison_id,))
+        columns = [column.name for column in cursor.description]
+        row = dict(zip(columns, cursor.fetchone()))
+        cursor.execute(
+            "SELECT id, dataset_version FROM model_versions WHERE version = %s;",
+            (candidate_version,),
+        )
+        candidate_id, dataset_version = cursor.fetchone()
+
+    assert row["active_model_id"] == lifecycle_context.active_id
+    assert row["candidate_model_id"] == candidate_id
+    assert row["dataset_version"] == dataset_version
+    assert len(row["dataset_content_sha256"]) == 64
+    assert len(row["validation_split_sha256"]) == 64
+    assert row["evaluation_parameters"] == {
+        "split": "val",
+        "imgsz": 640,
+        "batch": 8,
+        "device": "cpu",
+        "workers": 0,
+        "seed": 0,
+        "deterministic": True,
+    }
+    assert row["active_metrics"] == active_metrics
+    assert row["candidate_metrics"] == candidate_metrics
+    assert row["metric_differences"] == pytest.approx(
+        {key: candidate_metrics[key] - active_metrics[key] for key in active_metrics}
+    )
+    assert row["class_comparison"] == {
+        "active_classes": ["Apple", "Milk"],
+        "candidate_classes": ["Apple", "Milk"],
+        "shared_classes": ["Apple", "Milk"],
+        "added_classes": [],
+        "removed_classes": [],
+    }
+    assert row["shared_class_comparison"]["available"] is True
+    assert row["shared_class_comparison"]["classes"] == ["Apple", "Milk"]
+    assert row["added_class_metrics"]["available"] is False
+    assert row["added_class_metrics"]["classes"] == []
+    assert "candidate map50_95" in row["comparison_rule"]
+    assert row["candidate_outperforms_active"] is outperforms
+    assert _active_count(db_connection) == 1
+
+    progress = test_client.get("/ai-progress").json()
+    assert progress["comparison"]["id"] == comparison_id
+    assert progress["comparison"]["candidate_outperforms_active"] is outperforms
+    assert progress["actions"]["can_promote"] is outperforms
+
+
+@pytest.mark.parametrize(
+    ("active_classes", "candidate_classes", "expected"),
+    [
+        (
+            ["Apple", "Banana", "Milk"],
+            ["Milk", "Apple", "Banana", "Cheese"],
+            {
+                "shared_classes": ["Apple", "Banana", "Milk"],
+                "added_classes": ["Cheese"],
+                "removed_classes": [],
+            },
+        ),
+        (
+            ["Apple", "Banana", "Milk"],
+            ["Apple", "Milk"],
+            {
+                "shared_classes": ["Apple", "Milk"],
+                "added_classes": [],
+                "removed_classes": ["Banana"],
+            },
+        ),
+    ],
+)
+def test_class_sets_are_persisted_by_semantic_name_not_numeric_order(
+    test_client,
+    db_connection,
+    lifecycle_context,
+    submission_factory,
+    active_classes,
+    candidate_classes,
+    expected,
+):
+    submission_factory("assisted", "approved", "Apple")
+    submission_factory("manual", "approved", "Milk")
+    trained = _run_successful_training(test_client, lifecycle_context)
+    candidate_version = trained["result"]["model_version"]
+    overall = {"precision": 0.75, "recall": 0.74, "map50": 0.76, "map50_95": 0.60}
+    compared = _run_comparison(
+        test_client,
+        lifecycle_context,
+        candidate_version,
+        overall,
+        overall,
+        active_classes=active_classes,
+        candidate_classes=candidate_classes,
+    )
+    assert compared["status"] == "completed"
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT class_comparison FROM model_comparisons WHERE id = %s;",
+            (compared["result"]["comparison_id"],),
+        )
+        class_comparison = cursor.fetchone()[0]
+    assert class_comparison["active_classes"] == active_classes
+    assert class_comparison["candidate_classes"] == candidate_classes
+    for field, value in expected.items():
+        assert class_comparison[field] == value
+    assert _active_count(db_connection) == 1
+
+
+def test_expanded_candidate_records_shared_regression_and_added_class_quality(
+    test_client, db_connection, lifecycle_context, submission_factory
+):
+    submission_factory("assisted", "approved", "Apple")
+    submission_factory("manual", "approved", "Milk")
+    trained = _run_successful_training(test_client, lifecycle_context)
+    candidate_version = trained["result"]["model_version"]
+    active_classes = ["Apple", "Banana", "Milk"]
+    candidate_classes = ["Apple", "Banana", "Milk", "Cheese", "Orange"]
+    active_overall = {"precision": 0.84, "recall": 0.82, "map50": 0.86, "map50_95": 0.80}
+    candidate_overall = {"precision": 0.77, "recall": 0.75, "map50": 0.79, "map50_95": 0.72}
+    active_per_class = {
+        name: {"precision": 0.84, "recall": 0.82, "map50": 0.86, "map50_95": 0.80}
+        for name in active_classes
+    }
+    candidate_per_class = {
+        name: {"precision": 0.83, "recall": 0.81, "map50": 0.85, "map50_95": 0.79}
+        for name in active_classes
+    }
+    candidate_per_class.update(
+        {
+            "Cheese": {"precision": 0.70, "recall": 0.64, "map50": 0.68, "map50_95": 0.45},
+            "Orange": {"precision": 0.42, "recall": 0.31, "map50": 0.35, "map50_95": 0.12},
+        }
+    )
+    compared = _run_comparison(
+        test_client,
+        lifecycle_context,
+        candidate_version,
+        active_overall,
+        candidate_overall,
+        active_classes=active_classes,
+        candidate_classes=candidate_classes,
+        active_per_class=active_per_class,
+        candidate_per_class=candidate_per_class,
+    )
+    assert compared["status"] == "completed"
+    assert compared["result"]["candidate_outperforms_active"] is False
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT metric_differences, class_comparison,
+                   shared_class_comparison, added_class_metrics
+            FROM model_comparisons WHERE id = %s;
+            """,
+            (compared["result"]["comparison_id"],),
+        )
+        overall_delta, classes, shared, added = cursor.fetchone()
+
+    assert overall_delta["map50_95"] == pytest.approx(-0.08)
+    assert classes["shared_classes"] == active_classes
+    assert classes["added_classes"] == ["Cheese", "Orange"]
+    assert classes["removed_classes"] == []
+    assert shared["available"] is True
+    assert shared["classes"] == active_classes
+    assert shared["active_metrics"]["map50_95"] == pytest.approx(0.80)
+    assert shared["candidate_metrics"]["map50_95"] == pytest.approx(0.79)
+    assert shared["metric_differences"]["map50_95"] == pytest.approx(-0.01)
+    assert added["available"] is True
+    assert added["classes"] == ["Cheese", "Orange"]
+    assert added["aggregate"] == pytest.approx(
+        {"precision": 0.56, "recall": 0.475, "map50": 0.515, "map50_95": 0.285}
+    )
+    assert added["per_class"]["Cheese"]["map50_95"] == pytest.approx(0.45)
+    assert added["per_class"]["Orange"]["map50_95"] == pytest.approx(0.12)
+
+    progress = test_client.get("/ai-progress").json()
+    assert progress["comparison"]["class_comparison"] == classes
+    assert progress["comparison"]["shared_class_comparison"] == shared
+    assert progress["comparison"]["added_class_metrics"] == added
+
+
+@pytest.mark.parametrize("invalid_metric", [float("nan"), float("inf"), float("-inf"), "0.5"])
+def test_class_aware_metrics_reject_non_finite_and_non_numeric_values(invalid_metric):
+    valid = {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.8}
+    invalid = {**valid, "map50_95": invalid_metric}
+    with pytest.raises(ValueError):
+        build_class_aware_comparison(
+            _evaluation(["Apple"], valid),
+            _evaluation(["Apple"], valid, {"Apple": invalid}),
+        )
+
+
+@pytest.mark.parametrize(
+    "candidate_evaluation",
+    [
+        {"classes": ["Apple", " apple "], "per_class": []},
+        {"classes": ["Apple", ""], "per_class": []},
+        {
+            "classes": ["Apple"],
+            "per_class": [{"name": "Cheese", "precision": 0.5, "recall": 0.5, "map50": 0.5, "map50_95": 0.5}],
+        },
+        {
+            "classes": ["Apple"],
+            "per_class": [{"name": "Apple", "precision": 0.5, "recall": 0.5, "map50": 0.5}],
+        },
+    ],
+)
+def test_class_metadata_and_required_metrics_are_strictly_validated(candidate_evaluation):
+    valid = {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.8}
+    with pytest.raises(ValueError):
+        build_class_aware_comparison(
+            _evaluation(["Apple"], valid), candidate_evaluation
+        )
+
+
+def test_remote_class_aware_artifact_must_match_declared_model_metadata(
+    lifecycle_context
+):
+    active_metrics = {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.8}
+    candidate_metrics = {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.6}
+    active_evaluation = _evaluation(["Apple", "Banana"], active_metrics)
+    candidate_evaluation = _evaluation(
+        ["Banana", "Apple", "Cheese"], candidate_metrics
+    )
+    class_aware = build_class_aware_comparison(
+        active_evaluation, candidate_evaluation
+    )
+    artifact = {
+        "active_model": {
+            "classes": active_evaluation["classes"],
+            "per_class": active_evaluation["per_class"],
+        },
+        "candidate_model": {
+            "classes": candidate_evaluation["classes"],
+            "per_class": candidate_evaluation["per_class"],
+        },
+        **class_aware,
+    }
+    assert lifecycle_context.providers._remote_class_aware_comparison(artifact) == class_aware
+
+    artifact["class_comparison"] = {
+        **artifact["class_comparison"],
+        "added_classes": ["Orange"],
+    }
+    with pytest.raises(
+        lifecycle_context.providers.ProviderError, match="disagrees"
+    ):
+        lifecycle_context.providers._remote_class_aware_comparison(artifact)
+
+
+def test_invalid_comparison_metrics_are_not_persisted(
+    test_client, db_connection, lifecycle_context, submission_factory
+):
+    submission_factory("assisted", "approved", "Apple")
+    submission_factory("manual", "approved", "Milk")
+    trained = _run_successful_training(test_client, lifecycle_context)
+    candidate_version = trained["result"]["model_version"]
+    valid = {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.7}
+    invalid = {**valid, "map50_95": float("nan")}
+
+    compared = _run_comparison(
+        test_client, lifecycle_context, candidate_version, valid, invalid
+    )
+    assert compared["status"] == "failed"
+    assert compared["error"]["type"] == "ValueError"
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM model_comparisons;")
+        assert cursor.fetchone()[0] == 0
+    assert _active_count(db_connection) == 1
+
+
+def test_promotion_and_rollback_preserve_single_active_and_history(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    submission_factory("assisted", "approved", "Apple")
+    submission_factory("manual", "approved", "Milk")
+    trained = _run_successful_training(test_client, lifecycle_context)
+    candidate_version = trained["result"]["model_version"]
+    active_metrics = {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.5}
+    candidate_metrics = {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.6}
+    compared = _run_comparison(
+        test_client, lifecycle_context, candidate_version, active_metrics, candidate_metrics
+    )
+    comparison_id = compared["result"]["comparison_id"]
+
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (SimpleNamespace(task="detect"), str(Path(record["model_path"]).resolve())),
+    )
+    promoted = test_client.post(
+        f"/models/{candidate_version}/promote", json={"comparison_id": comparison_id}
+    )
+    assert promoted.status_code == 200
+    assert promoted.json()["previous_active_version"] == lifecycle_context.active_version
+    assert promoted.json()["active_version"] == candidate_version
+    assert _active_count(db_connection) == 1
+
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, version, status FROM model_versions ORDER BY id;"
+        )
+        models = {row[1]: (row[0], row[2]) for row in cursor.fetchall()}
+        cursor.execute(
+            "SELECT action, from_model_id, to_model_id, comparison_id FROM model_activation_history;"
+        )
+        promotion = cursor.fetchone()
+    assert models[lifecycle_context.active_version][1] == "archived"
+    assert models[candidate_version][1] == "active"
+    assert promotion == (
+        "PROMOTE",
+        lifecycle_context.active_id,
+        models[candidate_version][0],
+        comparison_id,
+    )
+
+    rolled_back = test_client.post(
+        f"/models/{lifecycle_context.active_version}/rollback"
+    )
+    assert rolled_back.status_code == 200
+    assert rolled_back.json()["previous_active_version"] == candidate_version
+    assert rolled_back.json()["active_version"] == lifecycle_context.active_version
+    assert _active_count(db_connection) == 1
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT version, status FROM model_versions ORDER BY id;"
+        )
+        statuses = dict(cursor.fetchall())
+        cursor.execute(
+            """
+            SELECT action, from_model_id, to_model_id, comparison_id
+            FROM model_activation_history ORDER BY id;
+            """
+        )
+        history = cursor.fetchall()
+    assert statuses[lifecycle_context.active_version] == "active"
+    assert statuses[candidate_version] == "archived"
+    assert history[1] == (
+        "ROLLBACK",
+        models[candidate_version][0],
+        lifecycle_context.active_id,
+        None,
+    )
+
+
+def test_invalid_promotion_and_rollback_leave_active_model_unchanged(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    submission_factory("assisted", "approved", "Apple")
+    submission_factory("manual", "approved", "Milk")
+    trained = _run_successful_training(test_client, lifecycle_context)
+    candidate_version = trained["result"]["model_version"]
+    active_metrics = {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.7}
+    losing_metrics = {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.6}
+    compared = _run_comparison(
+        test_client, lifecycle_context, candidate_version, active_metrics, losing_metrics
+    )
+    comparison_id = compared["result"]["comparison_id"]
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (SimpleNamespace(task="detect"), str(Path(record["model_path"]).resolve())),
+    )
+
+    attempts = [
+        test_client.post("/models/unknown/promote", json={"comparison_id": comparison_id}),
+        test_client.post(f"/models/{candidate_version}/promote", json={}),
+        test_client.post(
+            f"/models/{candidate_version}/promote",
+            json={"comparison_id": comparison_id},
+        ),
+        test_client.post(f"/models/{lifecycle_context.active_version}/rollback"),
+        test_client.post("/models/unknown/rollback"),
+        test_client.post(f"/models/{candidate_version}/rollback"),
+    ]
+    assert [response.status_code for response in attempts] == [404, 400, 409, 409, 404, 409]
+    assert "did not outperform" in attempts[2].json()["detail"]
+    assert _active_count(db_connection) == 1
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT version FROM model_versions WHERE status = 'active';")
+        assert cursor.fetchone()[0] == lifecycle_context.active_version
+        cursor.execute("SELECT COUNT(*) FROM model_activation_history;")
+        assert cursor.fetchone()[0] == 0
+
+
+def test_stale_comparison_cannot_promote_against_a_new_active_model(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    submission_factory("assisted", "approved", "Apple")
+    submission_factory("manual", "approved", "Milk")
+    trained = _run_successful_training(test_client, lifecycle_context)
+    candidate_version = trained["result"]["model_version"]
+    metrics = {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.5}
+    better = {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.6}
+    compared = _run_comparison(
+        test_client, lifecycle_context, candidate_version, metrics, better
+    )
+    comparison_id = compared["result"]["comparison_id"]
+
+    replacement_path = lifecycle_context.root / "replacement.pt"
+    replacement_path.write_bytes(b"replacement-active")
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE model_versions SET status = 'archived' WHERE status = 'active';"
+        )
+        cursor.execute(
+            """
+            INSERT INTO model_versions(version, model_path, status)
+            VALUES ('replacement-active', %s, 'active');
+            """,
+            (str(replacement_path),),
+        )
+    db_connection.commit()
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (SimpleNamespace(task="detect"), str(Path(record["model_path"]).resolve())),
+    )
+
+    response = test_client.post(
+        f"/models/{candidate_version}/promote", json={"comparison_id": comparison_id}
+    )
+    assert response.status_code == 409
+    assert "current active model" in response.json()["detail"]
+    assert _active_count(db_connection) == 1
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT version FROM model_versions WHERE status = 'active';")
+        assert cursor.fetchone()[0] == "replacement-active"
+        cursor.execute("SELECT COUNT(*) FROM model_activation_history;")
+        assert cursor.fetchone()[0] == 0

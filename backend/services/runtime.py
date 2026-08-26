@@ -592,6 +592,9 @@ def ensure_schema():
                     active_metrics JSONB NOT NULL,
                     candidate_metrics JSONB NOT NULL,
                     metric_differences JSONB NOT NULL,
+                    class_comparison JSONB NOT NULL DEFAULT '{"active_classes":[],"candidate_classes":[],"shared_classes":[],"added_classes":[],"removed_classes":[]}'::jsonb,
+                    shared_class_comparison JSONB NOT NULL DEFAULT '{"available":false,"classes":[],"unavailable_classes":[]}'::jsonb,
+                    added_class_metrics JSONB NOT NULL DEFAULT '{"available":false,"classes":[],"unavailable_classes":[],"per_class":{}}'::jsonb,
                     comparison_rule TEXT NOT NULL,
                     candidate_outperforms_active BOOLEAN NOT NULL,
                     summary_path TEXT
@@ -603,7 +606,10 @@ def ensure_schema():
                     ON model_comparisons(dataset_version, created_at DESC);
 
                 ALTER TABLE model_comparisons
-                    ADD COLUMN IF NOT EXISTS validation_split_sha256 TEXT;
+                    ADD COLUMN IF NOT EXISTS validation_split_sha256 TEXT,
+                    ADD COLUMN IF NOT EXISTS class_comparison JSONB NOT NULL DEFAULT '{"active_classes":[],"candidate_classes":[],"shared_classes":[],"added_classes":[],"removed_classes":[]}'::jsonb,
+                    ADD COLUMN IF NOT EXISTS shared_class_comparison JSONB NOT NULL DEFAULT '{"available":false,"classes":[],"unavailable_classes":[]}'::jsonb,
+                    ADD COLUMN IF NOT EXISTS added_class_metrics JSONB NOT NULL DEFAULT '{"available":false,"classes":[],"unavailable_classes":[],"per_class":{}}'::jsonb;
 
                 CREATE TABLE IF NOT EXISTS model_activation_history (
                     id SERIAL PRIMARY KEY,
@@ -970,16 +976,22 @@ def _activate_model(version: str, action: str, comparison_id: Optional[str] = No
                         raise HTTPException(status_code=400, detail="A successful comparison_id is required")
                     cur.execute(
                         """
-                        SELECT id FROM model_comparisons
+                        SELECT id, candidate_outperforms_active FROM model_comparisons
                         WHERE id = %s AND candidate_model_id = %s
                           AND active_model_id = %s;
                         """,
                         (comparison_id, target["id"], current["id"]),
                     )
-                    if not cur.fetchone():
+                    comparison = cur.fetchone()
+                    if not comparison:
                         raise HTTPException(
                             status_code=409,
                             detail="Candidate was not compared with the current active model",
+                        )
+                    if not comparison["candidate_outperforms_active"]:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Candidate did not outperform the current active model",
                         )
 
                 # Load and validate before changing registry state.
@@ -1758,7 +1770,8 @@ def get_ai_progress():
                     """
                     SELECT id, dataset_version, created_at, active_metrics, candidate_metrics,
                            metric_differences, comparison_rule, candidate_outperforms_active,
-                           evaluation_parameters
+                           evaluation_parameters, class_comparison,
+                           shared_class_comparison, added_class_metrics
                     FROM model_comparisons
                     WHERE active_model_id = %s AND candidate_model_id = %s
                     ORDER BY created_at DESC LIMIT 1;
@@ -1811,7 +1824,9 @@ def get_ai_progress():
         "actions": {
             "can_train": contributions["approved_waiting"] > 0,
             "can_compare": candidate is not None,
-            "can_promote": comparison is not None,
+            "can_promote": bool(
+                comparison and comparison["candidate_outperforms_active"]
+            ),
             "can_rollback": bool(archived_models),
         },
     }

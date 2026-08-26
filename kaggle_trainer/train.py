@@ -8,6 +8,7 @@ import importlib.metadata
 import importlib.util
 import json
 import math
+import numbers
 import os
 import platform
 import re
@@ -522,27 +523,60 @@ def build_combined_dataset(base_root: Path, corrections_root: Path, correction_i
 
 
 def finite(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise WorkerError("Ultralytics returned a non-numeric metric")
     number = float(value)
     if not math.isfinite(number):
         raise WorkerError("Ultralytics returned a non-finite metric")
     return number
 
 
+def normalized_class_names(raw: Any, field: str) -> list[str]:
+    if isinstance(raw, dict):
+        try:
+            indexed = {int(key): value for key, value in raw.items()}
+        except (TypeError, ValueError) as exc:
+            raise WorkerError(f"{field} class IDs must be integers") from exc
+        if set(indexed) != set(range(len(indexed))):
+            raise WorkerError(f"{field} class IDs must be contiguous from zero")
+        values = [indexed[index] for index in range(len(indexed))]
+    elif isinstance(raw, (list, tuple)):
+        values = list(raw)
+    else:
+        raise WorkerError(f"{field} classes must be an indexed mapping or list")
+    names = []
+    identities = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise WorkerError(f"{field} contains an empty or non-string class name")
+        name = value.strip()
+        if name.casefold() in identities:
+            raise WorkerError(f"{field} contains duplicate normalized class name {name!r}")
+        identities.add(name.casefold())
+        names.append(name)
+    if not names:
+        raise WorkerError(f"{field} contains no classes")
+    return names
+
+
 def metrics_from_result(result: Any, names: list[str]) -> dict[str, Any]:
     overall = {"precision": finite(result.box.mp), "recall": finite(result.box.mr), "map50": finite(result.box.map50), "map50_95": finite(result.box.map)}
     per_class = []
-    maps = list(getattr(result.box, "maps", []))
     precision = list(getattr(result.box, "p", []))
     recall = list(getattr(result.box, "r", []))
-    ap50 = getattr(result.box, "ap50", [])
-    measured_ids = list(getattr(result.box, "ap_class_index", range(len(maps))))
+    ap50 = list(getattr(result.box, "ap50", []))
+    ap = list(getattr(result.box, "ap", []))
+    measured_ids = list(getattr(result.box, "ap_class_index", range(len(ap))))
     measured_positions = {int(class_id): position for position, class_id in enumerate(measured_ids)}
     for index, name in enumerate(names):
-        row: dict[str, Any] = {"class_id": index, "name": name}
         position = measured_positions.get(index)
-        for key, values in (("precision", precision), ("recall", recall), ("map50", ap50), ("map50_95", maps)):
-            if position is not None and position < len(values):
-                row[key] = finite(values[position])
+        if position is None:
+            continue
+        row: dict[str, Any] = {"class_id": index, "name": name}
+        for key, values in (("precision", precision), ("recall", recall), ("map50", ap50), ("map50_95", ap)):
+            if position >= len(values):
+                raise WorkerError(f"Ultralytics omitted {key} for evaluated class {name!r}")
+            row[key] = finite(values[position])
         per_class.append(row)
     return {**overall, "per_class": per_class}
 
@@ -581,60 +615,61 @@ def candidate_is_better(delta: dict[str, float], tolerance: float = 1e-12) -> bo
 
 
 def per_class_differences(candidate: dict[str, Any], active: dict[str, Any]) -> list[dict[str, Any]]:
-    active_rows = {row["class_id"]: row for row in active.get("per_class", [])}
-    candidate_rows = {row["class_id"]: row for row in candidate.get("per_class", [])}
+    active_rows = {row["name"].strip().casefold(): row for row in active.get("per_class", [])}
+    candidate_rows = {row["name"].strip().casefold(): row for row in candidate.get("per_class", [])}
     rows = []
-    for class_id in sorted(set(active_rows) & set(candidate_rows)):
-        old, new = active_rows[class_id], candidate_rows[class_id]
+    for identity in sorted(set(active_rows) & set(candidate_rows)):
+        old, new = active_rows[identity], candidate_rows[identity]
         common_metrics = [key for key in METRIC_KEYS if key in old and key in new]
-        rows.append({"class_id": class_id, "name": new.get("name") or old.get("name"), "delta": {key: finite(new[key]) - finite(old[key]) for key in common_metrics}})
+        rows.append({"name": new.get("name") or old.get("name"), "delta": {key: finite(new[key]) - finite(old[key]) for key in common_metrics}})
     return rows
 
 
-def shared_class_comparison(
-    candidate: dict[str, Any],
-    active: dict[str, Any],
-    names: list[str],
-    candidate_output_classes: int,
-    active_output_classes: int,
-) -> dict[str, Any]:
-    """Compare only classes both detector heads can predict on this evaluation split."""
-    shared_ids = set(range(min(candidate_output_classes, active_output_classes, len(names))))
-    active_rows = {row["class_id"]: row for row in active.get("per_class", [])}
-    candidate_rows = {row["class_id"]: row for row in candidate.get("per_class", [])}
-    evaluated_ids = [
-        class_id for class_id in sorted(shared_ids)
-        if all(key in active_rows.get(class_id, {}) and key in candidate_rows.get(class_id, {}) for key in METRIC_KEYS)
-    ]
-    if not evaluated_ids:
-        return {
-            "available": False,
-            "class_count": 0,
-            "class_ids": [],
-            "class_names": [],
-            "note": "No shared classes had labeled instances in the evaluation split.",
-        }
-
-    def aggregate(rows: dict[int, dict[str, Any]]) -> dict[str, float]:
-        return {
-            key: sum(finite(rows[class_id][key]) for class_id in evaluated_ids) / len(evaluated_ids)
-            for key in METRIC_KEYS
-        }
-
-    active_metrics = aggregate(active_rows)
-    candidate_metrics = aggregate(candidate_rows)
-    delta = metric_differences(candidate_metrics, active_metrics)
-    return {
-        "available": True,
-        "class_count": len(evaluated_ids),
-        "class_ids": evaluated_ids,
-        "class_names": [names[class_id] for class_id in evaluated_ids],
-        "active_metrics": active_metrics,
-        "candidate_metrics": candidate_metrics,
-        "metric_differences": delta,
-        "candidate_outperforms_active": candidate_is_better(delta),
-        "note": "Macro-average over shared classes with labeled instances in the same evaluation split.",
+def class_aware_comparison(active_classes, candidate_classes, active, candidate):
+    active_names = normalized_class_names(active_classes, "active model")
+    candidate_names = normalized_class_names(candidate_classes, "candidate model")
+    active_ids = {name.casefold(): name for name in active_names}
+    candidate_ids = {name.casefold(): name for name in candidate_names}
+    analysis = {
+        "active_classes": active_names,
+        "candidate_classes": candidate_names,
+        "shared_classes": [name for name in active_names if name.casefold() in candidate_ids],
+        "added_classes": [name for name in candidate_names if name.casefold() not in active_ids],
+        "removed_classes": [name for name in active_names if name.casefold() not in candidate_ids],
     }
+    active_rows = {row["name"].strip().casefold(): row for row in active.get("per_class", [])}
+    candidate_rows = {row["name"].strip().casefold(): row for row in candidate.get("per_class", [])}
+    shared_names = [name for name in analysis["shared_classes"] if name.casefold() in active_rows and name.casefold() in candidate_rows]
+
+    def aggregate(rows, names):
+        return {key: sum(finite(rows[name.casefold()][key]) for name in names) / len(names) for key in METRIC_KEYS}
+
+    if shared_names:
+        active_shared = aggregate(active_rows, shared_names)
+        candidate_shared = aggregate(candidate_rows, shared_names)
+        shared = {
+            "available": True, "classes": shared_names,
+            "class_count": len(shared_names), "class_names": shared_names,
+            "unavailable_classes": [name for name in analysis["shared_classes"] if name not in shared_names],
+            "active_metrics": active_shared, "candidate_metrics": candidate_shared,
+            "metric_differences": metric_differences(candidate_shared, active_shared),
+            "candidate_outperforms_active": candidate_is_better(metric_differences(candidate_shared, active_shared)),
+            "note": "Macro-average of per-class metrics for the same semantic classes from each model's evaluation on the identical validation split.",
+        }
+    else:
+        shared = {"available": False, "classes": [], "class_count": 0, "class_names": [], "unavailable_classes": analysis["shared_classes"], "note": "No shared class had metrics in both model evaluations."}
+    added_names = [name for name in analysis["added_classes"] if name.casefold() in candidate_rows]
+    if added_names:
+        added = {
+            "available": True, "classes": added_names,
+            "unavailable_classes": [name for name in analysis["added_classes"] if name not in added_names],
+            "aggregate": aggregate(candidate_rows, added_names),
+            "per_class": {name: {key: finite(candidate_rows[name.casefold()][key]) for key in METRIC_KEYS} for name in added_names},
+            "note": "Macro-average of candidate per-class metrics for newly added classes.",
+        }
+    else:
+        added = {"available": False, "classes": [], "unavailable_classes": analysis["added_classes"], "per_class": {}, "note": "No added class had metrics in the candidate evaluation."}
+    return {"class_comparison": analysis, "shared_class_comparison": shared, "added_class_metrics": added}
 
 
 def run_worker(input_root: Path, working_root: Path, validate_only: bool = False) -> dict[str, Any]:
@@ -748,15 +783,15 @@ def run_worker(input_root: Path, working_root: Path, validate_only: bool = False
         if candidate_model.task != "detect":
             raise WorkerError("Trained candidate is not an object-detection model")
         stage = "candidate_evaluation"
+        candidate_classes = normalized_class_names(candidate_model.names, "candidate model")
         candidate_missing_classes = align_model_names_for_evaluation(candidate_model, dataset["classes"])
-        candidate_output_classes = len(dataset["classes"]) - len(candidate_missing_classes)
         evaluation_kwargs = dict(
             data=dataset["data_yaml"], split=dataset["evaluation_split"], imgsz=job.imgsz, batch=job.batch,
             workers=job.workers, device=device, seed=job.seed, deterministic=True,
             project=str(working_root / "yolo_runs"), exist_ok=False, verbose=True,
         )
         candidate_result = candidate_model.val(name="candidate_evaluation", **evaluation_kwargs)
-        candidate_metrics = metrics_from_result(candidate_result, dataset["classes"])
+        candidate_metrics = metrics_from_result(candidate_result, candidate_classes)
         stage = "active_evaluation"
         # model.train() mutates/reloads the training object with trained weights.
         # Reload the unchanged starting checkpoint so this is a genuinely
@@ -764,14 +799,13 @@ def run_worker(input_root: Path, working_root: Path, validate_only: bool = False
         active_evaluator = YOLO(str(active_copy))
         if active_evaluator.task != "detect":
             raise WorkerError("Starting active checkpoint is no longer an object detector")
+        active_classes = normalized_class_names(active_evaluator.names, "active model")
         active_missing_classes = align_model_names_for_evaluation(active_evaluator, dataset["classes"])
-        active_output_classes = len(dataset["classes"]) - len(active_missing_classes)
         active_result = active_evaluator.val(name="active_evaluation", **evaluation_kwargs)
-        active_metrics = metrics_from_result(active_result, dataset["classes"])
+        active_metrics = metrics_from_result(active_result, active_classes)
         delta = metric_differences(candidate_metrics, active_metrics)
-        shared_comparison = shared_class_comparison(
-            candidate_metrics, active_metrics, dataset["classes"],
-            candidate_output_classes, active_output_classes,
+        class_aware = class_aware_comparison(
+            active_classes, candidate_classes, active_metrics, candidate_metrics
         )
         comparison = {
             "training_run_id": job.training_run_id, "dataset_version": job.dataset_version,
@@ -782,10 +816,10 @@ def run_worker(input_root: Path, working_root: Path, validate_only: bool = False
                 "note": "Missing classes receive no predictions and therefore count as false negatives; model weights are unchanged.",
             },
             "evaluation_split_sha256": split_sha256(dataset["splits"][dataset["evaluation_split"]], Path(dataset["dataset_root"])),
-            "active_model": {"version": job.active_model_version, **active_metrics},
-            "candidate_model": {"version": job.candidate_model_version, **candidate_metrics},
+            "active_model": {"version": job.active_model_version, "classes": active_classes, **active_metrics},
+            "candidate_model": {"version": job.candidate_model_version, "classes": candidate_classes, **candidate_metrics},
             "delta": delta, "per_class_delta": per_class_differences(candidate_metrics, active_metrics),
-            "shared_class_comparison": shared_comparison,
+            **class_aware,
             "comparison_rule": COMPARISON_RULE, "candidate_outperforms_active": candidate_is_better(delta),
         }
         write_json(working_root / "comparison.json", comparison)

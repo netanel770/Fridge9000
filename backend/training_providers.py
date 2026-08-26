@@ -18,6 +18,8 @@ from typing import Any, Callable
 import psycopg2
 from psycopg2.extras import Json, RealDictCursor
 
+from class_aware_metrics import build_class_aware_comparison
+
 try:
     from core.config import (
         BACKEND_DIR, DATABASE_URL, KAGGLE_API_TOKEN, KAGGLE_CLI_PATH, KAGGLE_COMMAND_TIMEOUT_SECONDS,
@@ -81,6 +83,24 @@ def _metric(value: Any, name: str) -> float:
     if not math.isfinite(number):
         raise ProviderError(f"Remote metric {name} is not finite")
     return number
+
+
+def _remote_class_aware_comparison(comparison: dict[str, Any]) -> dict[str, Any]:
+    active = comparison.get("active_model")
+    candidate = comparison.get("candidate_model")
+    if not isinstance(active, dict) or not isinstance(candidate, dict):
+        raise ProviderError("Remote comparison is missing model metadata")
+    try:
+        expected = build_class_aware_comparison(
+            {"classes": active.get("classes"), "per_class": active.get("per_class")},
+            {"classes": candidate.get("classes"), "per_class": candidate.get("per_class")},
+        )
+    except ValueError as exc:
+        raise ProviderError(f"Remote class-aware metrics are invalid: {exc}") from exc
+    for field, expected_value in expected.items():
+        if comparison.get(field) != expected_value:
+            raise ProviderError(f"Remote {field} disagrees with model class metadata or metrics")
+    return expected
 
 
 def _resolve_model_path(raw: str) -> Path:
@@ -292,15 +312,8 @@ def _register_remote(
     candidate_metrics = {key: _metric(comparison["candidate_model"].get(key), key) for key in METRICS}
     active_metrics = {key: _metric(comparison["active_model"].get(key), key) for key in METRICS}
     delta = {key: _metric(comparison.get("delta", {}).get(key), f"delta.{key}") for key in METRICS}
-    shared_comparison = comparison.get("shared_class_comparison")
-    if not isinstance(shared_comparison, dict) or not isinstance(shared_comparison.get("available"), bool):
-        raise ProviderError("Remote comparison is missing shared-class metrics")
-    if shared_comparison["available"]:
-        for section in ("active_metrics", "candidate_metrics", "metric_differences"):
-            shared_comparison[section] = {
-                key: _metric(shared_comparison.get(section, {}).get(key), f"shared_class_comparison.{section}.{key}")
-                for key in METRICS
-            }
+    class_aware = _remote_class_aware_comparison(comparison)
+    shared_comparison = class_aware["shared_class_comparison"]
     split_hash = comparison.get("evaluation_split_sha256")
     if not isinstance(split_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", split_hash):
         raise ProviderError("Remote comparison is missing its evaluation split fingerprint")
@@ -355,11 +368,14 @@ def _register_remote(
                 cursor.execute(
                     """INSERT INTO model_comparisons(id,dataset_version,dataset_content_sha256,validation_split_sha256,
                        active_model_id,candidate_model_id,evaluation_parameters,active_metrics,candidate_metrics,
-                       metric_differences,comparison_rule,candidate_outperforms_active,summary_path)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);""",
+                       metric_differences,class_comparison,shared_class_comparison,added_class_metrics,
+                       comparison_rule,candidate_outperforms_active,summary_path)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);""",
                     (comparison_id, dataset_version, dataset_manifest.get("content_sha256", "remote"),
                      split_hash, active["id"], model_id, Json({"provider": "kaggle", "split": comparison.get("evaluation_split"), "shared_class_comparison": shared_comparison}),
-                     Json(active_metrics), Json(candidate_metrics), Json(delta), comparison.get("comparison_rule", "remote comparison"),
+                     Json(active_metrics), Json(candidate_metrics), Json(delta),
+                     Json(class_aware["class_comparison"]), Json(shared_comparison),
+                     Json(class_aware["added_class_metrics"]), comparison.get("comparison_rule", "remote comparison"),
                      bool(comparison.get("candidate_outperforms_active")), str(_unique_file(output, "comparison.json"))),
                 )
     except BaseException:

@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from train import Job, WorkerError, _parse_detection_label, align_model_names_for_evaluation, candidate_is_better, discover_inputs, ensure_training_dependencies, metric_differences, run_worker, safe_extract_zip, shared_class_comparison
+from train import Job, WorkerError, _parse_detection_label, align_model_names_for_evaluation, candidate_is_better, class_aware_comparison, discover_inputs, ensure_training_dependencies, metric_differences, run_worker, safe_extract_zip
 
 
 class TrainerValidationTests(unittest.TestCase):
@@ -145,7 +145,7 @@ class TrainerValidationTests(unittest.TestCase):
         self.assertTrue(candidate_is_better(delta))
         self.assertFalse(candidate_is_better(metric_differences(active, candidate)))
 
-    def test_shared_class_comparison_excludes_candidate_only_classes(self):
+    def test_class_aware_comparison_matches_names_instead_of_ids(self):
         active = {
             "per_class": [
                 {"class_id": 0, "name": "Apple", "precision": .5, "recall": .4, "map50": .6, "map50_95": .3},
@@ -155,17 +155,21 @@ class TrainerValidationTests(unittest.TestCase):
         }
         candidate = {
             "per_class": [
-                {"class_id": 0, "name": "Apple", "precision": .6, "recall": .5, "map50": .7, "map50_95": .4},
-                {"class_id": 1, "name": "Banana", "precision": .8, "recall": .7, "map50": .9, "map50_95": .6},
+                {"class_id": 0, "name": "Banana", "precision": .8, "recall": .7, "map50": .9, "map50_95": .6},
+                {"class_id": 1, "name": "Apple", "precision": .6, "recall": .5, "map50": .7, "map50_95": .4},
                 {"class_id": 2, "name": "New", "precision": .9, "recall": .9, "map50": .9, "map50_95": .9},
             ]
         }
-        result = shared_class_comparison(candidate, active, ["Apple", "Banana", "New"], 3, 2)
-        self.assertEqual(result["class_ids"], [0, 1])
-        self.assertEqual(result["class_count"], 2)
-        self.assertAlmostEqual(result["active_metrics"]["precision"], .6)
-        self.assertAlmostEqual(result["candidate_metrics"]["precision"], .7)
-        self.assertTrue(result["candidate_outperforms_active"])
+        result = class_aware_comparison(
+            ["Apple", "Banana"], ["Banana", "Apple", "New"], active, candidate
+        )
+        self.assertEqual(result["class_comparison"]["shared_classes"], ["Apple", "Banana"])
+        self.assertEqual(result["class_comparison"]["added_classes"], ["New"])
+        shared = result["shared_class_comparison"]
+        self.assertEqual(shared["class_count"], 2)
+        self.assertAlmostEqual(shared["active_metrics"]["precision"], .6)
+        self.assertAlmostEqual(shared["candidate_metrics"]["precision"], .7)
+        self.assertTrue(shared["candidate_outperforms_active"])
 
 
     def test_training_dependencies_pin_cuda_torch_and_ultralytics(self):

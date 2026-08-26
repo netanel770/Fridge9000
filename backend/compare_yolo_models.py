@@ -15,7 +15,13 @@ import psycopg2
 from psycopg2.extras import Json, RealDictCursor
 from ultralytics import YOLO
 
-from train_yolo_candidate import file_sha256, finite_metric, validate_dataset, write_json
+from class_aware_metrics import (
+    METRIC_KEYS,
+    build_class_aware_comparison,
+    finite_metric,
+    normalized_class_names,
+)
+from train_yolo_candidate import file_sha256, validate_dataset, write_json
 
 
 RULE = "candidate map50_95 > active map50_95; if equal, candidate map50 > active map50"
@@ -62,23 +68,40 @@ def load_models(database_url: str, candidate_version: str):
     return active, candidate
 
 
-def evaluate(model_path: Path, data_yaml: Path, args, output_dir: Path, name: str) -> dict[str, float | None]:
+def evaluate(model_path: Path, data_yaml: Path, args, output_dir: Path, name: str) -> dict[str, Any]:
     if not model_path.is_file():
         raise FileNotFoundError(f"Model weights not found: {model_path}")
     model = YOLO(str(model_path))
     if model.task != "detect":
         raise ValueError(f"Model {model_path} is not an object detector")
+    classes = normalized_class_names(model.names, f"{name} model")
     result = model.val(
         data=str(data_yaml), split="val", imgsz=args.imgsz, batch=args.batch,
         device=args.device, workers=args.workers, seed=args.seed, deterministic=True,
         project=str(output_dir / "ultralytics"), name=name, exist_ok=False, verbose=args.verbose,
     )
-    return {
-        "precision": finite_metric(result.box.mp),
-        "recall": finite_metric(result.box.mr),
-        "map50": finite_metric(result.box.map50),
-        "map50_95": finite_metric(result.box.map),
+    overall = {
+        "precision": finite_metric(result.box.mp, f"{name}.precision"),
+        "recall": finite_metric(result.box.mr, f"{name}.recall"),
+        "map50": finite_metric(result.box.map50, f"{name}.map50"),
+        "map50_95": finite_metric(result.box.map, f"{name}.map50_95"),
     }
+    per_class = []
+    for position, raw_class_id in enumerate(result.box.ap_class_index):
+        class_id = int(raw_class_id)
+        if class_id < 0 or class_id >= len(classes):
+            raise ValueError(f"{name} metrics reference unknown class ID {class_id}")
+        values = result.box.class_result(position)
+        per_class.append(
+            {
+                "name": classes[class_id],
+                **{
+                    key: finite_metric(value, f"{name}.{classes[class_id]}.{key}")
+                    for key, value in zip(METRIC_KEYS, values)
+                },
+            }
+        )
+    return {"classes": classes, "metrics": overall, "per_class": per_class}
 
 
 def differences(candidate: dict[str, float | None], active: dict[str, float | None]):
@@ -102,15 +125,18 @@ def persist(database_url: str, summary: dict[str, Any], active_id: int, candidat
                     id, dataset_version, dataset_content_sha256, validation_split_sha256,
                     active_model_id, candidate_model_id,
                     created_at, evaluation_parameters, active_metrics, candidate_metrics,
-                    metric_differences, comparison_rule, candidate_outperforms_active, summary_path
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                    metric_differences, class_comparison, shared_class_comparison,
+                    added_class_metrics, comparison_rule, candidate_outperforms_active, summary_path
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
                 """,
                 (
                     summary["comparison_id"], summary["dataset_version"], summary["dataset_content_sha256"],
                     summary["validation_split_sha256"], active_id, candidate_id, summary["created_at"],
                     Json(summary["evaluation_parameters"]),
                     Json(summary["active"]["metrics"]), Json(summary["candidate"]["metrics"]),
-                    Json(summary["metric_differences"]), RULE, summary["candidate_outperforms_active"],
+                    Json(summary["metric_differences"]), Json(summary["class_comparison"]),
+                    Json(summary["shared_class_comparison"]), Json(summary["added_class_metrics"]),
+                    RULE, summary["candidate_outperforms_active"],
                     summary["summary_path"],
                 ),
             )
@@ -130,13 +156,16 @@ def compare(args):
     output_dir = args.output_root.resolve() / args.dataset_version / comparison_id
     output_dir.mkdir(parents=True, exist_ok=False)
     parameters = {"split": "val", "imgsz": args.imgsz, "batch": args.batch, "device": args.device, "workers": args.workers, "seed": args.seed, "deterministic": True}
-    active_metrics = evaluate(active_path, data_yaml, args, output_dir, "active")
-    candidate_metrics = evaluate(candidate_path, data_yaml, args, output_dir, "candidate")
+    active_evaluation = evaluate(active_path, data_yaml, args, output_dir, "active")
+    candidate_evaluation = evaluate(candidate_path, data_yaml, args, output_dir, "candidate")
     if validation_split_sha256(dataset_dir, data_yaml) != validation_hash_before:
         raise RuntimeError("Validation data changed during comparison")
     if file_sha256(active_path) != active_hash_before:
         raise RuntimeError("Active model changed during comparison")
+    active_metrics = active_evaluation["metrics"]
+    candidate_metrics = candidate_evaluation["metrics"]
     delta = differences(candidate_metrics, active_metrics)
+    class_aware = build_class_aware_comparison(active_evaluation, candidate_evaluation)
     summary_path = output_dir / "comparison_summary.json"
     summary = {
         "comparison_id": comparison_id, "created_at": utc_now(),
@@ -145,6 +174,7 @@ def compare(args):
         "evaluation_parameters": parameters,
         "active": {"id": active["id"], "version": active["version"], "path": str(active_path), "sha256": active_hash_before, "metrics": active_metrics},
         "candidate": {"id": candidate["id"], "version": candidate["version"], "path": str(candidate_path), "sha256": file_sha256(candidate_path), "metrics": candidate_metrics},
+        **class_aware,
         "metric_differences": delta, "comparison_rule": RULE,
         "candidate_outperforms_active": candidate_is_better(delta), "summary_path": str(summary_path),
     }
