@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.metadata
-import importlib.util
+import importlib
 import json
 import math
 import numbers
@@ -38,13 +37,6 @@ class WorkerError(RuntimeError):
     """Expected, actionable worker failure."""
 
 
-def _installed_version(package: str) -> str | None:
-    try:
-        return importlib.metadata.version(package)
-    except importlib.metadata.PackageNotFoundError:
-        return None
-
-
 def _pip_install(arguments: list[str], description: str) -> None:
     print(f"Installing {description}...")
     result = subprocess.run(
@@ -52,23 +44,132 @@ def _pip_install(arguments: list[str], description: str) -> None:
         check=False,
     )
     if result.returncode != 0:
-        raise WorkerError(f"Could not install {description}; pip exited with {result.returncode}")
+        raise WorkerError(
+            f"Dependency installation failed for {description}; pip exited with "
+            f"{result.returncode}. Network access may be unavailable."
+        )
 
 
-def ensure_training_dependencies() -> None:
-    """Install a deterministic CUDA stack that supports Kaggle's older GPU pool."""
-    torch_version = _installed_version("torch") or ""
-    torchvision_version = _installed_version("torchvision") or ""
-    if not torch_version.startswith(TORCH_VERSION) or not torchvision_version.startswith(TORCHVISION_VERSION) or "cu118" not in torch_version:
+def _dependency_probe() -> dict[str, Any]:
+    """Inspect the training stack in a fresh interpreter so pip fallbacks are visible."""
+    script = r'''
+import json
+
+status = {"errors": {}}
+try:
+    import torch
+    cuda_available = bool(torch.cuda.is_available())
+    status.update({
+        "torch_version": str(torch.__version__),
+        "cuda_version": str(torch.version.cuda) if torch.version.cuda else None,
+        "cuda_available": cuda_available,
+        "device_count": int(torch.cuda.device_count()),
+        "gpu_name": torch.cuda.get_device_name(0) if cuda_available else None,
+    })
+except BaseException as exc:
+    status["errors"]["torch"] = f"{type(exc).__name__}: {exc}"
+try:
+    import torchvision
+    status["torchvision_version"] = str(torchvision.__version__)
+except BaseException as exc:
+    status["errors"]["torchvision"] = f"{type(exc).__name__}: {exc}"
+try:
+    import ultralytics
+    from ultralytics import YOLO
+    if not callable(YOLO):
+        raise TypeError("ultralytics.YOLO is not callable")
+    status["ultralytics_version"] = str(ultralytics.__version__)
+except BaseException as exc:
+    status["errors"]["ultralytics"] = f"{type(exc).__name__}: {exc}"
+print(json.dumps(status))
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, check=False
+    )
+    try:
+        status = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as exc:
+        diagnostic = (result.stderr or result.stdout).strip()[-1000:]
+        raise WorkerError(
+            f"Could not validate the Kaggle training dependencies: {diagnostic}"
+        ) from exc
+    if not isinstance(status, dict) or not isinstance(status.get("errors"), dict):
+        raise WorkerError("Kaggle dependency validation returned an invalid result")
+    status.update(_nvidia_smi_diagnostic())
+    return status
+
+
+def _nvidia_smi_diagnostic() -> dict[str, Any]:
+    executable = shutil.which("nvidia-smi")
+    if executable is None:
+        return {"nvidia_smi_available": False, "nvidia_smi_gpu_names": []}
+    try:
+        result = subprocess.run(
+            [executable, "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return {"nvidia_smi_available": False, "nvidia_smi_gpu_names": []}
+    names = [name.strip() for name in result.stdout.splitlines() if name.strip()]
+    return {
+        "nvidia_smi_available": result.returncode == 0,
+        "nvidia_smi_gpu_names": names if result.returncode == 0 else [],
+    }
+
+
+def _print_dependency_diagnostics(status: dict[str, Any]) -> None:
+    print(
+        "Detected training stack: "
+        f"torch={status.get('torch_version', 'unavailable')}; "
+        f"torchvision={status.get('torchvision_version', 'unavailable')}; "
+        f"CUDA runtime={status.get('cuda_version') or 'unavailable'}; "
+        f"CUDA available={bool(status.get('cuda_available'))}; "
+        f"device count={status.get('device_count', 0)}; "
+        f"GPU={status.get('gpu_name') or 'unavailable'}; "
+        f"nvidia-smi={'available' if status.get('nvidia_smi_available') else 'unavailable'}; "
+        f"ultralytics={status.get('ultralytics_version', 'unavailable')}"
+    )
+
+
+def ensure_training_dependencies(*, require_cuda: bool = True) -> None:
+    """Prefer Kaggle's usable preinstalled stack and install only as a fallback."""
+    status = _dependency_probe()
+    _print_dependency_diagnostics(status)
+    if require_cuda and not status.get("cuda_available"):
+        raise WorkerError(
+            "CUDA is required, but this Kaggle worker does not currently expose "
+            "usable CUDA through PyTorch. Verify GPU provisioning and machine_shape."
+        )
+    errors = status["errors"]
+    needs_torch_stack = (
+        "torch" in errors
+        or "torchvision" in errors
+    )
+    needs_ultralytics = "ultralytics" in errors
+    if needs_torch_stack:
         _pip_install(
             ["--index-url", PYTORCH_CUDA_INDEX, f"torch=={TORCH_VERSION}", f"torchvision=={TORCHVISION_VERSION}"],
             f"PyTorch {TORCH_VERSION} / TorchVision {TORCHVISION_VERSION} CUDA 11.8",
         )
-    if _installed_version("ultralytics") != ULTRALYTICS_VERSION:
+    if needs_ultralytics:
         _pip_install([f"ultralytics=={ULTRALYTICS_VERSION}"], f"Ultralytics {ULTRALYTICS_VERSION}")
+    if not needs_torch_stack and not needs_ultralytics:
+        return
+
     importlib.invalidate_caches()
-    if importlib.util.find_spec("ultralytics") is None:
-        raise WorkerError(f"Kaggle dependency installation completed but ultralytics=={ULTRALYTICS_VERSION} is still unavailable")
+    status = _dependency_probe()
+    _print_dependency_diagnostics(status)
+    if status["errors"]:
+        details = "; ".join(
+            f"{name}: {message}" for name, message in status["errors"].items()
+        )
+        raise WorkerError(f"Kaggle training dependencies remain unusable: {details}")
+    if require_cuda and not status.get("cuda_available"):
+        raise WorkerError(
+            "Kaggle training dependencies remain unusable: CUDA is required but unavailable"
+        )
 
 
 @dataclass(frozen=True)
@@ -767,7 +868,7 @@ def run_worker(input_root: Path, working_root: Path, validate_only: bool = False
             return report
 
         stage = "dependency_installation"
-        ensure_training_dependencies()
+        ensure_training_dependencies(require_cuda=job.require_cuda)
         stage = "runtime_validation"
         import torch
         import ultralytics

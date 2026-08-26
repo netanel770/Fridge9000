@@ -25,14 +25,14 @@ from class_aware_metrics import build_class_aware_comparison, require_class_pres
 try:
     from core.config import (
         BACKEND_DIR, DATABASE_URL, KAGGLE_API_TOKEN, KAGGLE_CLI_PATH, KAGGLE_COMMAND_TIMEOUT_SECONDS, LOCAL_BASE_DATASET_PATH,
-        KAGGLE_DATASET_SLUG_PREFIX, KAGGLE_KERNEL_SLUG, KAGGLE_KEY,
+        KAGGLE_DATASET_SLUG_PREFIX, KAGGLE_KERNEL_SLUG, KAGGLE_KEY, KAGGLE_MACHINE_SHAPE,
         KAGGLE_POLL_INTERVAL_SECONDS, KAGGLE_STARTING_MODEL_VERSION, KAGGLE_STARTING_WEIGHTS_PATH,
         KAGGLE_TIMEOUT_SECONDS, KAGGLE_USERNAME,
     )
 except ModuleNotFoundError:
     from backend.core.config import (
         BACKEND_DIR, DATABASE_URL, KAGGLE_API_TOKEN, KAGGLE_CLI_PATH, KAGGLE_COMMAND_TIMEOUT_SECONDS, LOCAL_BASE_DATASET_PATH,
-        KAGGLE_DATASET_SLUG_PREFIX, KAGGLE_KERNEL_SLUG, KAGGLE_KEY,
+        KAGGLE_DATASET_SLUG_PREFIX, KAGGLE_KERNEL_SLUG, KAGGLE_KEY, KAGGLE_MACHINE_SHAPE,
         KAGGLE_POLL_INTERVAL_SECONDS, KAGGLE_STARTING_MODEL_VERSION, KAGGLE_STARTING_WEIGHTS_PATH,
         KAGGLE_TIMEOUT_SECONDS, KAGGLE_USERNAME,
     )
@@ -50,6 +50,42 @@ class KaggleForbiddenError(ProviderError):
     """Kaggle denied a request; newly-created private resources may do this briefly."""
 
     pass
+
+
+def _kernel_metadata(
+    template: dict[str, Any], kernel_slug: str, dataset_slug: str
+) -> dict[str, Any]:
+    if not KAGGLE_MACHINE_SHAPE:
+        raise ProviderError("KAGGLE_MACHINE_SHAPE cannot be empty")
+    metadata = dict(template)
+    metadata.update(
+        {
+            "id": kernel_slug,
+            "title": kernel_slug.split("/", 1)[1],
+            "dataset_sources": [
+                f"{KAGGLE_USERNAME}/{KAGGLE_DATASET_SLUG_PREFIX}",
+                dataset_slug,
+            ],
+            "is_private": True,
+            "enable_gpu": True,
+            "machine_shape": KAGGLE_MACHINE_SHAPE,
+            "enable_internet": True,
+        }
+    )
+    return metadata
+
+
+def _kernel_push_command(kernel_dir: Path) -> list[str]:
+    if not KAGGLE_MACHINE_SHAPE:
+        raise ProviderError("KAGGLE_MACHINE_SHAPE cannot be empty")
+    return [
+        "kernels",
+        "push",
+        "-p",
+        str(kernel_dir),
+        "--accelerator",
+        KAGGLE_MACHINE_SHAPE,
+    ]
 
 
 def _kaggle_resource_slug(owner: str, base: str, unique_suffix: str) -> str:
@@ -282,22 +318,49 @@ def _wait_for_remote_dataset_files(
     """Wait for Kaggle's file listing and notebook mounts to become consistent."""
     deadline = time.monotonic() + timeout_seconds
     complete_checks = 0
-    last_listing = ""
+    last_found: set[str] = set()
     while True:
         try:
-            listing = runner.run(["datasets", "files", dataset_slug], retry=True)
-            last_listing = listing
+            found: set[str] = set()
+            page_token = None
+            seen_tokens: set[str] = set()
+            while True:
+                arguments = [
+                    "datasets", "files", dataset_slug, "--page-size", "200"
+                ]
+                if page_token is not None:
+                    arguments.extend(["--page-token", page_token])
+                listing = runner.run(arguments, retry=True)
+                found.update(
+                    name
+                    for name in required_files
+                    if re.search(rf"(?m)^\s*{re.escape(name)}(?:\s|$)", listing)
+                )
+                if found == set(required_files):
+                    break
+                token_match = re.search(
+                    r"(?m)^Next Page Token\s*=\s*(\S+)\s*$", listing
+                )
+                if token_match is None:
+                    break
+                page_token = token_match.group(1)
+                if page_token in seen_tokens:
+                    raise ProviderError(
+                        f"Kaggle repeated dataset page token {page_token!r}"
+                    )
+                seen_tokens.add(page_token)
+            last_found = found
         except KaggleForbiddenError:
             # A freshly-created private dataset can return 403 until its ACL has
             # propagated. Treat it as not-ready here, but nowhere else.
-            listing = ""
-        complete_checks = complete_checks + 1 if all(name in listing for name in required_files) else 0
+            found = set()
+        complete_checks = complete_checks + 1 if found == set(required_files) else 0
         if complete_checks >= 2:
             # File listing can become consistent shortly before notebook mounts do.
             time.sleep(settle_seconds)
             return
         if time.monotonic() >= deadline:
-            missing = [name for name in required_files if name not in last_listing]
+            missing = [name for name in required_files if name not in last_found]
             raise ProviderError(f"Timed out waiting for Kaggle dataset files: {', '.join(missing)}")
         time.sleep(poll_seconds)
 
@@ -531,14 +594,14 @@ def kaggle_training(job_id: str, progress: Progress, runner: KaggleCommandRunner
             kernel = root / "kernel_stage"
             kernel.mkdir()
             shutil.copy2(trainer_script, kernel / "train.py")
-            metadata = _json(kernel_metadata)
-            kernel_title = kernel_slug.split("/", 1)[1]
-            metadata.update({"id": kernel_slug, "title": kernel_title, "dataset_sources": [f"{KAGGLE_USERNAME}/{KAGGLE_DATASET_SLUG_PREFIX}", dataset_slug], "is_private": True, "enable_gpu": True})
+            metadata = _kernel_metadata(
+                _json(kernel_metadata), kernel_slug, dataset_slug
+            )
             (kernel / "kernel-metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
             progress(phase="queued", remote_kernel=kernel_slug)
             _remote_phase(run_id, "queued", remote_dataset=dataset_slug, remote_kernel=kernel_slug)
             # Never retry submission: an ambiguous timeout must not launch a duplicate run.
-            runner.run(["kernels", "push", "-p", str(kernel)], retry=False)
+            runner.run(_kernel_push_command(kernel), retry=False)
             output = root / "outputs"
             output.mkdir()
             deadline = time.monotonic() + KAGGLE_TIMEOUT_SECONDS

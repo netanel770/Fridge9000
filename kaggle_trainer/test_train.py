@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from train import Job, WorkerError, _parse_detection_label, align_model_names_for_evaluation, candidate_is_better, class_aware_comparison, discover_inputs, ensure_training_dependencies, metric_differences, require_class_preservation, run_worker, safe_extract_zip
+from train import Job, WorkerError, _nvidia_smi_diagnostic, _parse_detection_label, align_model_names_for_evaluation, candidate_is_better, class_aware_comparison, discover_inputs, ensure_training_dependencies, metric_differences, require_class_preservation, run_worker, safe_extract_zip
 
 
 class TrainerValidationTests(unittest.TestCase):
@@ -238,22 +238,111 @@ class TrainerValidationTests(unittest.TestCase):
         self.assertTrue(shared["candidate_outperforms_active"])
 
 
-    def test_training_dependencies_pin_cuda_torch_and_ultralytics(self):
-        versions = {"torch": "2.9.0+cu130", "torchvision": "0.24.0+cu130", "ultralytics": None}
-        with patch("train._installed_version", side_effect=lambda package: versions[package]), patch("train.importlib.util.find_spec", return_value=object()), patch("train.subprocess.run", return_value=SimpleNamespace(returncode=0)) as run:
-            ensure_training_dependencies()
-        self.assertEqual(run.call_count, 2)
-        torch_command = run.call_args_list[0].args[0]
-        ultralytics_command = run.call_args_list[1].args[0]
-        self.assertIn("torch==2.7.1", torch_command)
-        self.assertIn("torchvision==0.22.1", torch_command)
-        self.assertIn("https://download.pytorch.org/whl/cu118", torch_command)
-        self.assertIn("ultralytics==8.4.120", ultralytics_command)
+    @staticmethod
+    def usable_dependency_stack():
+        return {
+            "errors": {},
+            "torch_version": "2.9.0+cu130",
+            "torchvision_version": "0.24.0+cu130",
+            "cuda_version": "13.0",
+            "cuda_available": True,
+            "device_count": 1,
+            "gpu_name": "Kaggle Test GPU",
+            "nvidia_smi_available": False,
+            "nvidia_smi_gpu_names": [],
+            "ultralytics_version": "8.3.99",
+        }
 
-    def test_failed_training_dependency_install_is_actionable(self):
-        with patch("train._installed_version", return_value=None), patch("train.subprocess.run", return_value=SimpleNamespace(returncode=1)):
-            with self.assertRaisesRegex(WorkerError, "PyTorch 2.7.1.*pip exited with 1"):
-                ensure_training_dependencies()
+    def test_cuda_stack_is_accepted_when_nvidia_smi_is_unavailable(self):
+        with patch("train._dependency_probe", return_value=self.usable_dependency_stack()), patch("train._pip_install") as install:
+            ensure_training_dependencies(require_cuda=True)
+        install.assert_not_called()
+
+    def test_missing_torchvision_installs_fallback_torch_stack_only(self):
+        unavailable = {
+            **self.usable_dependency_stack(),
+            "errors": {"torchvision": "RuntimeError: missing CUDA operator"},
+        }
+        with patch("train._dependency_probe", side_effect=[unavailable, self.usable_dependency_stack()]), patch("train._pip_install") as install:
+            ensure_training_dependencies(require_cuda=True)
+        install.assert_called_once()
+        arguments, description = install.call_args.args
+        self.assertIn("torch==2.7.1", arguments)
+        self.assertIn("torchvision==0.22.1", arguments)
+        self.assertIn("https://download.pytorch.org/whl/cu118", arguments)
+        self.assertIn("PyTorch", description)
+
+    def test_missing_ultralytics_installs_only_ultralytics(self):
+        unavailable = {
+            **self.usable_dependency_stack(),
+            "errors": {"ultralytics": "ModuleNotFoundError: ultralytics"},
+        }
+        with patch("train._dependency_probe", side_effect=[unavailable, self.usable_dependency_stack()]), patch("train._pip_install") as install:
+            ensure_training_dependencies(require_cuda=True)
+        install.assert_called_once_with(
+            ["ultralytics==8.4.120"], "Ultralytics 8.4.120"
+        )
+
+    def test_cuda_is_optional_when_job_does_not_require_it(self):
+        cpu_stack = {
+            **self.usable_dependency_stack(),
+            "cuda_version": None,
+            "cuda_available": False,
+            "device_count": 0,
+            "gpu_name": None,
+        }
+        with patch("train._dependency_probe", return_value=cpu_stack), patch("train._pip_install") as install:
+            ensure_training_dependencies(require_cuda=False)
+        install.assert_not_called()
+
+    def test_failed_required_dependency_install_reports_network_failure(self):
+        unavailable = {
+            "errors": {"torch": "ModuleNotFoundError: torch"},
+            "cuda_available": False,
+            "device_count": 0,
+            "gpu_name": None,
+            "nvidia_smi_available": False,
+        }
+        with patch("train._dependency_probe", return_value=unavailable), patch("train.subprocess.run", return_value=SimpleNamespace(returncode=1)):
+            with self.assertRaisesRegex(
+                WorkerError, "Dependency installation failed.*Network access may be unavailable"
+            ):
+                ensure_training_dependencies(require_cuda=False)
+
+    def test_cpu_provisioned_cuda_job_fails_without_pip_installation(self):
+        cpu_stack = {
+            "errors": {},
+            "torch_version": "2.10.0+cpu",
+            "torchvision_version": "0.25.0+cpu",
+            "cuda_version": None,
+            "cuda_available": False,
+            "device_count": 0,
+            "gpu_name": None,
+            "nvidia_smi_available": False,
+            "ultralytics_version": "8.4.120",
+        }
+        with patch("train._dependency_probe", return_value=cpu_stack), patch("train._pip_install") as install:
+            with self.assertRaisesRegex(WorkerError, "does not currently expose usable CUDA"):
+                ensure_training_dependencies(require_cuda=True)
+        install.assert_not_called()
+
+    def test_nvidia_smi_present_is_captured_as_optional_diagnostic(self):
+        result = SimpleNamespace(
+            returncode=0, stdout="NVIDIA Tesla T4\n", stderr=""
+        )
+        with patch("train.shutil.which", return_value="/usr/bin/nvidia-smi"), patch("train.subprocess.run", return_value=result):
+            diagnostic = _nvidia_smi_diagnostic()
+        self.assertIs(diagnostic["nvidia_smi_available"], True)
+        self.assertEqual(diagnostic["nvidia_smi_gpu_names"], ["NVIDIA Tesla T4"])
+
+    def test_missing_nvidia_smi_is_reported_without_invoking_it(self):
+        with patch("train.shutil.which", return_value=None), patch("train.subprocess.run") as run:
+            diagnostic = _nvidia_smi_diagnostic()
+        self.assertEqual(
+            diagnostic,
+            {"nvidia_smi_available": False, "nvidia_smi_gpu_names": []},
+        )
+        run.assert_not_called()
 
     def test_active_model_can_be_fairly_evaluated_when_dataset_adds_a_class(self):
         core = SimpleNamespace(names={0: "Apple", 1: "Banana"}, model=[SimpleNamespace(nc=2)])

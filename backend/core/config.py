@@ -31,11 +31,15 @@ CORS_ORIGINS = [
 ]
 
 TRAINING_PROVIDER = os.getenv("TRAINING_PROVIDER", "local").strip().lower()
+DEFAULT_KAGGLE_MACHINE_SHAPE = "NvidiaTeslaT4"
 KAGGLE_USERNAME = os.getenv("KAGGLE_USERNAME", "").strip()
 KAGGLE_KEY = os.getenv("KAGGLE_KEY", "").strip()
 KAGGLE_API_TOKEN = os.getenv("KAGGLE_API_TOKEN", "").strip()
 KAGGLE_DATASET_SLUG_PREFIX = os.getenv("KAGGLE_DATASET_SLUG_PREFIX", "fridge9000-training-data").strip()
 KAGGLE_KERNEL_SLUG = os.getenv("KAGGLE_KERNEL_SLUG", "").strip()
+KAGGLE_MACHINE_SHAPE = os.getenv(
+    "KAGGLE_MACHINE_SHAPE", DEFAULT_KAGGLE_MACHINE_SHAPE
+).strip()
 KAGGLE_STARTING_WEIGHTS_PATH = Path(os.getenv("KAGGLE_STARTING_WEIGHTS_PATH", str(BACKEND_DIR / "yolo11s.pt")))
 KAGGLE_STARTING_MODEL_VERSION = os.getenv("KAGGLE_STARTING_MODEL_VERSION", "yolo11s-pretrained").strip()
 KAGGLE_CLI_PATH = os.getenv("KAGGLE_CLI_PATH", "kaggle").strip()

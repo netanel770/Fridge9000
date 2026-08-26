@@ -3,12 +3,74 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import training_providers as providers
+from core.config import DEFAULT_KAGGLE_MACHINE_SHAPE
 
 
 class TrainingProviderTests(unittest.TestCase):
+    def test_default_kaggle_machine_shape_is_tesla_t4(self):
+        self.assertEqual(DEFAULT_KAGGLE_MACHINE_SHAPE, "NvidiaTeslaT4")
+
+    def test_generated_kernel_metadata_requests_gpu_and_internet(self):
+        with (
+            patch.object(providers, "KAGGLE_USERNAME", "owner"),
+            patch.object(providers, "KAGGLE_DATASET_SLUG_PREFIX", "base-data"),
+            patch.object(providers, "KAGGLE_MACHINE_SHAPE", "NvidiaTeslaT4"),
+        ):
+            metadata = providers._kernel_metadata(
+                {"enable_gpu": False, "enable_internet": False},
+                "owner/run-kernel",
+                "owner/run-data",
+            )
+        self.assertIs(metadata["enable_gpu"], True)
+        self.assertIs(metadata["enable_internet"], True)
+        self.assertEqual(metadata["machine_shape"], "NvidiaTeslaT4")
+
+    def test_configured_kaggle_machine_shape_is_honored(self):
+        with (
+            patch.object(providers, "KAGGLE_USERNAME", "owner"),
+            patch.object(providers, "KAGGLE_DATASET_SLUG_PREFIX", "base-data"),
+            patch.object(providers, "KAGGLE_MACHINE_SHAPE", "NvidiaA100"),
+        ):
+            metadata = providers._kernel_metadata(
+                {}, "owner/run-kernel", "owner/run-data"
+            )
+        self.assertEqual(metadata["machine_shape"], "NvidiaA100")
+
+    def test_kernel_push_requests_default_accelerator(self):
+        kernel_dir = Path("kernel-stage")
+        with patch.object(
+            providers, "KAGGLE_MACHINE_SHAPE", DEFAULT_KAGGLE_MACHINE_SHAPE
+        ):
+            command = providers._kernel_push_command(kernel_dir)
+        self.assertEqual(
+            command,
+            [
+                "kernels",
+                "push",
+                "-p",
+                str(kernel_dir),
+                "--accelerator",
+                "NvidiaTeslaT4",
+            ],
+        )
+
+    def test_custom_accelerator_is_propagated_to_cli_and_metadata(self):
+        with (
+            patch.object(providers, "KAGGLE_USERNAME", "owner"),
+            patch.object(providers, "KAGGLE_DATASET_SLUG_PREFIX", "base-data"),
+            patch.object(providers, "KAGGLE_MACHINE_SHAPE", "NvidiaA100"),
+        ):
+            command = providers._kernel_push_command(Path("kernel-stage"))
+            metadata = providers._kernel_metadata(
+                {}, "owner/run-kernel", "owner/run-data"
+            )
+        accelerator_index = command.index("--accelerator") + 1
+        self.assertEqual(command[accelerator_index], "NvidiaA100")
+        self.assertEqual(metadata["machine_shape"], command[accelerator_index])
+
     def test_provider_selection(self):
         self.assertIs(providers.training_provider("local"), providers.local_training)
         self.assertIs(providers.training_provider("kaggle"), providers.kaggle_training)
@@ -42,17 +104,62 @@ class TrainingProviderTests(unittest.TestCase):
         with self.assertRaises(providers.ProviderError):
             providers.parse_kernel_status("unknown")
 
-    def test_remote_dataset_waits_for_two_complete_listings_before_settling(self):
+    def test_remote_dataset_files_ready_on_first_page(self):
+        listing = "active_model.pt\nstarting_model.pt\njob.json\ndataset/manifest.json"
+        runner = SimpleNamespace(run=Mock(side_effect=[listing, listing]))
+        required = ("active_model.pt", "starting_model.pt", "job.json", "dataset/manifest.json")
+        with patch.object(providers.time, "sleep") as sleep:
+            providers._wait_for_remote_dataset_files(
+                runner, "owner/run", required, poll_seconds=0, settle_seconds=20
+            )
+        expected = ["datasets", "files", "owner/run", "--page-size", "200"]
+        self.assertEqual(runner.run.call_args_list, [call(expected, retry=True)] * 2)
+        sleep.assert_any_call(20)
+
+    def test_remote_dataset_files_are_aggregated_across_pages(self):
+        first = "Next Page Token = token-2\nactive_model.pt\nimage-001.jpg"
+        second = "starting_model.pt\njob.json\ndataset/manifest.json"
+        runner = SimpleNamespace(run=Mock(side_effect=[first, second, first, second]))
+        required = ("active_model.pt", "starting_model.pt", "job.json", "dataset/manifest.json")
+        with patch.object(providers.time, "sleep"):
+            providers._wait_for_remote_dataset_files(
+                runner, "owner/run", required, poll_seconds=0, settle_seconds=0
+            )
+        first_args = ["datasets", "files", "owner/run", "--page-size", "200"]
+        second_args = first_args + ["--page-token", "token-2"]
+        self.assertEqual(
+            runner.run.call_args_list,
+            [
+                call(first_args, retry=True),
+                call(second_args, retry=True),
+                call(first_args, retry=True),
+                call(second_args, retry=True),
+            ],
+        )
+
+    def test_remote_dataset_missing_file_after_all_pages_times_out(self):
+        runner = SimpleNamespace(run=Mock(side_effect=[
+            "Next Page Token = token-2\nactive_model.pt",
+            "starting_model.pt\njob.json",
+        ]))
+        required = ("active_model.pt", "starting_model.pt", "job.json", "dataset/manifest.json")
+        with patch.object(providers.time, "sleep"):
+            with self.assertRaisesRegex(providers.ProviderError, "dataset/manifest.json"):
+                providers._wait_for_remote_dataset_files(
+                    runner, "owner/run", required, timeout_seconds=0, poll_seconds=0
+                )
+        self.assertEqual(runner.run.call_count, 2)
+
+    def test_remote_dataset_temporary_forbidden_still_retries_and_settles(self):
         runner = SimpleNamespace(run=Mock(side_effect=[
             providers.KaggleForbiddenError("private dataset ACL is still propagating"),
-            "active_model.pt\njob.json",
             "active_model.pt\nstarting_model.pt\njob.json\ndataset/manifest.json",
             "active_model.pt\nstarting_model.pt\njob.json\ndataset/manifest.json",
         ]))
         required = ("active_model.pt", "starting_model.pt", "job.json", "dataset/manifest.json")
         with patch.object(providers.time, "sleep") as sleep:
             providers._wait_for_remote_dataset_files(runner, "owner/run", required, poll_seconds=0, settle_seconds=20)
-        self.assertEqual(runner.run.call_count, 4)
+        self.assertEqual(runner.run.call_count, 3)
         sleep.assert_any_call(20)
 
     def test_kaggle_resource_slug_obeys_length_limit_and_keeps_run_identity(self):
