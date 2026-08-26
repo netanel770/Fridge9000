@@ -618,15 +618,30 @@ git clone https://github.com/netanel770/Fridge9000.git
 cd Fridge9000
 ```
 
-## Start the Backend and Database
+## Start the Project
 
 From the project root:
 
-```bash
+```powershell
+.\start-fridge.ps1
+```
+
+The PowerShell launcher detects an active LAN IPv4 address and sets `EXPO_PUBLIC_API_BASE_URL` automatically. PostgreSQL and FastAPI run in Docker, then Expo runs directly on Windows so its tunnel status, interactive CLI, and QR code display normally.
+
+To use a Cloudflare Tunnel, ngrok, or another public backend URL instead of LAN detection:
+
+```powershell
+.\start-fridge.ps1 -ApiUrl "https://example.com"
+```
+
+You can also copy the optional root environment example and start the Docker backend and database separately:
+
+```powershell
+Copy-Item .env.example .env
 docker compose up --build
 ```
 
-The backend and PostgreSQL database will start through Docker.
+LAN URLs require the phone and PC to be on a mutually reachable local network. A tunnel URL can work when the devices are on different networks.
 
 To stop the application:
 
@@ -648,28 +663,12 @@ Install dependencies:
 npm install
 ```
 
-The mobile application needs to know the address of the machine running the backend.
+The mobile application reads the backend address from `EXPO_PUBLIC_API_BASE_URL`. Set that environment variable before starting Expo directly; do not edit the source configuration for each network.
 
-Configure:
-
-```text
-mobile/src/services/config.ts
-```
-
-or the relevant environment configuration.
-
-Example:
-
-```text
-http://192.168.1.100:8000
-```
-
-When using a local-network address, make sure the phone and backend computer are reachable from the same network.
-
-Start Expo:
+Start Expo in tunnel mode:
 
 ```bash
-npx expo start
+npx expo start --tunnel
 ```
 
 Open **Expo Go** on the phone and connect to the displayed development server.
