@@ -78,13 +78,10 @@ The system can detect products from images, track inventory changes, process sho
 ```text
                                Fridge 9000
                                     │
-                   ┌────────────────┴────────────────┐
-                   │                                 │
-              Mobile Client                      Web Client
-            React Native / Expo                    Frontend
-                   │                                 │
-                   └───────────────┬─────────────────┘
-                                   │
+                                    │
+                              Mobile Client
+                            React Native / Expo
+                                    │
                                    ▼
                              FastAPI Backend
                                    │
@@ -167,8 +164,6 @@ Fridge9000/
 │
 ├── db/
 │   └── init.sql
-│
-├── frontend/
 │
 ├── mobile/
 │   ├── app/

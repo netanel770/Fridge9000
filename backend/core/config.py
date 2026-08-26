@@ -15,9 +15,7 @@ FRESHNESS_UPLOAD_DIR = UPLOAD_DIR / "freshness"
 SEGMENTATION_MODEL_PATH = Path(os.getenv("SEGMENTATION_MODEL_PATH", str(BACKEND_DIR / "sam2_t.pt")))
 OUTLINE_DIR = UPLOAD_DIR / "outlines"
 CORS_ORIGINS = [
-    "http://localhost:5173",
     "http://localhost:8081",
-    "http://127.0.0.1:5173",
     "http://127.0.0.1:8081",
 ]
 

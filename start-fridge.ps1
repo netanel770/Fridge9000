@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$ApiUrl
+    [string]$ApiUrl,
+    [switch]$Tunnel
 )
 
 Set-StrictMode -Version Latest
@@ -22,6 +23,7 @@ function Test-UsableLanIPv4 {
     }
 
     $octets = $parsedAddress.GetAddressBytes()
+
     return $octets[0] -ne 0 -and
         $octets[0] -ne 127 -and
         $octets[0] -lt 224 -and
@@ -42,6 +44,7 @@ function Get-PreferredLanIPv4 {
 
     foreach ($configuration in $configurations) {
         $adapterText = "$($configuration.InterfaceAlias) $($configuration.InterfaceDescription)"
+
         if ($adapterText -match $virtualAdapterPattern) {
             continue
         }
@@ -52,36 +55,47 @@ function Get-PreferredLanIPv4 {
 
         foreach ($addressEntry in @($configuration.IPv4Address)) {
             $address = [string]$addressEntry.IPAddress
+
             if (-not (Test-UsableLanIPv4 -Address $address)) {
                 continue
             }
 
             $score = 0
+
             if ($configuration.IPv4DefaultGateway) {
                 $score += 100
             }
+
             if ($adapterText -match $preferredAdapterPattern) {
                 $score += 50
             }
+
             if ($configuration.NetAdapter -and $configuration.NetAdapter.HardwareInterface) {
                 $score += 25
             }
 
             $metric = [int]::MaxValue
-            if ($configuration.NetIPv4Interface -and $null -ne $configuration.NetIPv4Interface.InterfaceMetric) {
+
+            if (
+                $configuration.NetIPv4Interface -and
+                $null -ne $configuration.NetIPv4Interface.InterfaceMetric
+            ) {
                 $metric = [int]$configuration.NetIPv4Interface.InterfaceMetric
             }
 
             $candidates += [PSCustomObject]@{
                 Address = $address
-                Score = $score
-                Metric = $metric
+                Score   = $score
+                Metric  = $metric
             }
         }
     }
 
     $selected = $candidates |
-        Sort-Object -Property @{ Expression = "Score"; Descending = $true }, @{ Expression = "Metric"; Ascending = $true } |
+        Sort-Object `
+            -Property `
+                @{ Expression = "Score"; Descending = $true },
+                @{ Expression = "Metric"; Ascending = $true } |
         Select-Object -First 1
 
     if (-not $selected) {
@@ -93,6 +107,7 @@ function Get-PreferredLanIPv4 {
 
 if ($PSBoundParameters.ContainsKey("ApiUrl")) {
     $selectedApiUrl = $ApiUrl.Trim().TrimEnd("/")
+
     if ([string]::IsNullOrWhiteSpace($selectedApiUrl)) {
         throw "-ApiUrl cannot be empty."
     }
@@ -103,8 +118,15 @@ else {
 }
 
 $parsedApiUrl = $null
-if (-not [System.Uri]::TryCreate($selectedApiUrl, [System.UriKind]::Absolute, [ref]$parsedApiUrl) -or
-    $parsedApiUrl.Scheme -notin @("http", "https")) {
+
+if (
+    -not [System.Uri]::TryCreate(
+        $selectedApiUrl,
+        [System.UriKind]::Absolute,
+        [ref]$parsedApiUrl
+    ) -or
+    $parsedApiUrl.Scheme -notin @("http", "https")
+) {
     throw "Invalid API URL '$selectedApiUrl'. Supply an absolute HTTP or HTTPS URL."
 }
 
@@ -114,6 +136,7 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 
 $mobileDirectory = Join-Path $PSScriptRoot "mobile"
 $mobilePackage = Join-Path $mobileDirectory "package.json"
+
 if (-not (Test-Path -LiteralPath $mobilePackage -PathType Leaf)) {
     throw "Mobile package file was not found at '$mobilePackage'."
 }
@@ -121,10 +144,13 @@ if (-not (Test-Path -LiteralPath $mobilePackage -PathType Leaf)) {
 if (-not (Get-Command node.exe -ErrorAction SilentlyContinue)) {
     throw "Node.js was not found. Install Node.js and ensure 'node' is available in PATH."
 }
+
 if (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) {
     throw "npm was not found. Install Node.js and ensure 'npm' is available in PATH."
 }
+
 $npxCommand = Get-Command npx.cmd -ErrorAction SilentlyContinue
+
 if (-not $npxCommand) {
     throw "npx was not found. Install Node.js and ensure 'npx' is available in PATH."
 }
@@ -135,22 +161,40 @@ $originalApiUrl = $env:EXPO_PUBLIC_API_BASE_URL
 
 try {
     $env:EXPO_PUBLIC_API_BASE_URL = $selectedApiUrl
+
+    Write-Host ""
     Write-Host "Using Expo API URL: $env:EXPO_PUBLIC_API_BASE_URL"
 
     Set-Location $PSScriptRoot
+
+    Write-Host "Starting Fridge9000 database and backend..."
     & docker compose up --build --detach --wait
+
     if ($LASTEXITCODE -ne 0) {
         throw "docker compose exited with code $LASTEXITCODE."
     }
 
+    Write-Host "Backend and database are running."
+    Write-Host ""
+
     Set-Location $mobileDirectory
-    & $npxCommand.Name expo start --tunnel
+
+    if ($Tunnel) {
+        Write-Host "Starting Expo in tunnel mode..."
+        & $npxCommand.Name expo start --tunnel
+    }
+    else {
+        Write-Host "Starting Expo in LAN mode..."
+        & $npxCommand.Name expo start
+    }
+
     if ($LASTEXITCODE -ne 0) {
         throw "Expo exited with code $LASTEXITCODE."
     }
 }
 finally {
     Set-Location $originalLocation
+
     if ($hadOriginalApiUrl) {
         $env:EXPO_PUBLIC_API_BASE_URL = $originalApiUrl
     }
