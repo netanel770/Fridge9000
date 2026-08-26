@@ -12,10 +12,10 @@ The system can detect products from refrigerator images, review and correct AI p
 
 ### AI Product Detection
 
-- Detects food and beverage products using **YOLO**.
-- Stores detection labels, confidence scores, and bounding boxes.
-- Lets users review detections before applying inventory changes.
-- Supports correcting labels, adjusting boxes, removing false positives, and adding missed products.
+* Detects food and beverage products using **YOLO**.
+* Stores detection labels, confidence scores, and bounding boxes.
+* Lets users review detections before applying inventory changes.
+* Supports correcting labels, adjusting boxes, removing false positives, and adding missed products.
 
 ### Human-in-the-Loop Learning
 
@@ -34,14 +34,16 @@ REMOVE
 Users can teach the detector in two ways:
 
 1. **AI-assisted annotation**
-   - Run a normal YOLO scan.
-   - Review the detected products.
-   - Confirm or correct the model's predictions.
+
+   * Run a normal YOLO scan.
+   * Review the detected products.
+   * Confirm or correct the model's predictions.
 
 2. **Manual annotation**
-   - Upload an image without running YOLO.
-   - Draw bounding boxes and assign product labels manually.
-   - Submit annotations through the same moderation and training pipeline.
+
+   * Upload an image without running YOLO.
+   * Draw bounding boxes and assign product labels manually.
+   * Submit annotations through the same moderation and training pipeline.
 
 Manual annotations do not create fake detector predictions. They are stored as `ADD` annotations with no source detection, preserving accurate provenance.
 
@@ -75,35 +77,35 @@ Rollback Available
 
 The system tracks:
 
-- Annotation submissions and individual corrections
-- Dataset versions
-- Training runs
-- Starting model and weights
-- Training parameters and metrics
-- Which annotations were consumed by training
-- Candidate and active model versions
-- Model comparisons
-- Promotion and rollback history
+* Annotation submissions and individual corrections
+* Dataset versions
+* Training runs
+* Starting model and weights
+* Training parameters and metrics
+* Which annotations were consumed by training
+* Candidate and active model versions
+* Model comparisons
+* Promotion and rollback history
 
 Only one detector can be active at a time.
 
 ### Inventory Management
 
-- Add or remove products using refrigerator scans.
-- Add products manually.
-- Track quantities using separate inventory batches.
-- Track multiple expiration dates for the same product.
-- Track partially consumed/open products.
-- Preserve inventory event history.
+* Add or remove products using refrigerator scans.
+* Add products manually.
+* Track quantities using separate inventory batches.
+* Track multiple expiration dates for the same product.
+* Track partially consumed/open products.
+* Preserve inventory event history.
 
 ### Expiration and Alerts
 
 Fridge 9000 tracks known or estimated expiration dates and can identify:
 
-- Expired products
-- Products expiring soon
-- Low-stock products
-- Missing products
+* Expired products
+* Products expiring soon
+* Low-stock products
+* Missing products
 
 ### Receipt OCR
 
@@ -129,16 +131,16 @@ The mobile application is built with **React Native, Expo, TypeScript, and Expo 
 
 It provides interfaces for:
 
-- Inventory
-- Product scans
-- Detection review
-- Manual annotation
-- AI contributions and moderation
-- Model progress
-- Alerts and expiration
-- Receipts
-- Freshness detection
-- Inventory history
+* Inventory
+* Product scans
+* Detection review
+* Manual annotation
+* AI contributions and moderation
+* Model progress
+* Alerts and expiration
+* Receipts
+* Freshness detection
+* Inventory history
 
 ---
 
@@ -183,30 +185,30 @@ It provides interfaces for:
 
 ### Backend
 
-- Python
-- FastAPI
-- PostgreSQL
-- psycopg2
-- OpenCV
-- Ultralytics YOLO
-- SAM2
-- Tesseract OCR
-- NumPy
+* Python
+* FastAPI
+* PostgreSQL
+* psycopg2
+* OpenCV
+* Ultralytics YOLO
+* SAM2
+* Tesseract OCR
+* NumPy
 
 ### Mobile
 
-- React Native
-- Expo
-- TypeScript
-- Expo Router
+* React Native
+* Expo
+* TypeScript
+* Expo Router
 
 ### Infrastructure and Testing
 
-- Docker
-- Docker Compose
-- PostgreSQL 16
-- pytest
-- FastAPI TestClient
+* Docker
+* Docker Compose
+* PostgreSQL 16
+* pytest
+* FastAPI TestClient
 
 ---
 
@@ -237,7 +239,8 @@ Fridge9000/
 ├── kaggle_trainer/           # Remote training support
 ├── docker-compose.yml        # Development DB + backend
 ├── docker-compose.test.yml   # Isolated PostgreSQL test DB
-├── start-fridge.ps1          # Development launcher
+├── run-fridge.bat            # One-click Windows launcher
+├── start-fridge.ps1          # PowerShell launcher and lifecycle management
 ├── pytest.ini
 └── README.md
 ```
@@ -250,11 +253,12 @@ Fridge9000/
 
 Install:
 
-- Docker Desktop
-- Git
-- Node.js and npm
-- Python
-- Expo Go on the mobile device used for development
+* Docker Desktop
+* Git
+* Node.js and npm
+* Expo Go on the mobile device used for development
+
+Python is also required when running the backend test suite directly from the host.
 
 Clone the repository:
 
@@ -271,7 +275,30 @@ npm install
 cd ..
 ```
 
-## Start the Application
+## Quick Start on Windows
+
+Make sure **Docker Desktop is running**.
+
+Then double-click:
+
+```text
+run-fridge.bat
+```
+
+Alternatively, from Command Prompt:
+
+```cmd
+run-fridge
+```
+
+The launcher automatically:
+
+1. Detects a suitable LAN IPv4 address.
+2. Sets `EXPO_PUBLIC_API_BASE_URL`.
+3. Builds and starts PostgreSQL and FastAPI with Docker Compose.
+4. Waits for the backend services to become healthy.
+5. Starts Expo directly from `mobile/`.
+6. Displays the Expo QR code for connecting the mobile application.
 
 The normal development architecture is:
 
@@ -283,39 +310,52 @@ FastAPI      ─┘
 Expo / Metro ─── Windows host
 ```
 
-Expo intentionally runs outside Docker so its interactive CLI and QR code work normally.
+Expo intentionally runs outside Docker so its interactive CLI, LAN discovery, and QR code work normally.
 
-### PowerShell
+Once Expo starts, scan the displayed QR code using **Expo Go**.
 
-From the project root:
+The phone and development PC must be able to reach each other on the same local network.
 
-```powershell
-.\start-fridge.ps1
-```
-
-### Command Prompt
-
-From CMD:
-
-```cmd
-powershell -ExecutionPolicy Bypass -File .\start-fridge.ps1
-```
-
-The launcher:
-
-1. Detects a suitable LAN IPv4 address.
-2. Sets `EXPO_PUBLIC_API_BASE_URL`.
-3. Builds and starts PostgreSQL and FastAPI with Docker Compose.
-4. Waits for both services to become healthy.
-5. Starts Expo directly from `mobile/`.
-
-The default backend is available on:
+The backend is automatically exposed at:
 
 ```text
 http://<your-LAN-IP>:8000
 ```
 
-The phone and development PC must be able to reach each other on the local network.
+## Stopping Fridge 9000
+
+Press:
+
+```text
+Ctrl + C
+```
+
+in the launcher terminal.
+
+The launcher automatically:
+
+1. Stops Expo.
+2. Shuts down the FastAPI and PostgreSQL Docker containers.
+3. Restores the previous `EXPO_PUBLIC_API_BASE_URL` environment state.
+4. Restores the original terminal working directory.
+
+The PostgreSQL development data is preserved between runs because the Docker volume is not deleted.
+
+Do **not** use:
+
+```bash
+docker compose down -v
+```
+
+unless you intentionally want to delete the development database volume.
+
+## Advanced Launcher Usage
+
+The underlying PowerShell launcher can also be run directly from the project root:
+
+```powershell
+.\start-fridge.ps1
+```
 
 ### Custom Backend URL
 
@@ -324,6 +364,8 @@ A specific backend URL can be supplied with:
 ```powershell
 .\start-fridge.ps1 -ApiUrl "https://example.com"
 ```
+
+### Expo Tunnel Mode
 
 Expo tunnel mode is also available:
 
@@ -335,48 +377,16 @@ Expo tunnel mode is also available:
 
 ---
 
-## Stopping the Application
-
-First stop Expo in the terminal where it is running:
-
-```text
-Ctrl + C
-```
-
-Then stop the backend and PostgreSQL containers:
-
-```bash
-docker compose down
-```
-
-This removes the development containers and network while preserving the PostgreSQL data volume.
-
-Do **not** use:
-
-```bash
-docker compose down -v
-```
-
-unless you intentionally want to delete the development database volume.
-
-To verify that the containers have stopped:
-
-```bash
-docker ps
-```
-
----
-
 # Testing
 
 The backend test suite uses a **separate PostgreSQL 16 database** so tests cannot accidentally modify the development database.
 
 The isolated test database:
 
-- Uses database `fridge9000_test`
-- Runs on host port `5433`
-- Uses temporary storage instead of the development database volume
-- Is rejected by the fixtures if configured to use the normal development database
+* Uses database `fridge9000_test`
+* Runs on host port `5433`
+* Uses temporary storage instead of the development database volume
+* Is rejected by the fixtures if configured to use the normal development database
 
 Install test dependencies:
 
@@ -416,14 +426,14 @@ pytest -m "not ml and not e2e"
 
 The current automated tests cover important workflows including:
 
-- Database and health checks
-- Inventory and inventory batches
-- Scan persistence and review
-- Inventory consistency and transaction rollback
-- Annotation creation and validation
-- Moderation and annotation provenance
-- Manual annotation without YOLO inference
-- Invalid and cross-scan/cross-image operations
+* Database and health checks
+* Inventory and inventory batches
+* Scan persistence and review
+* Inventory consistency and transaction rollback
+* Annotation creation and validation
+* Moderation and annotation provenance
+* Manual annotation without YOLO inference
+* Invalid and cross-scan/cross-image operations
 
 Manual-annotation tests can also be run directly:
 
