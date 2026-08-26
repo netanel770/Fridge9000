@@ -7,7 +7,7 @@ import { AppButton, Card, EmptyState, ScreenHeader, StatusBadge } from "../src/c
 import { DetectionImageViewer } from "../src/components/DetectionImageViewer";
 import { BoundingBoxEditor } from "../src/components/BoundingBoxEditor";
 import { createAnnotationSubmission, getAIProgress, getAllInventory, getAnnotationSubmission, getAnnotationSubmissions, getLifecycleJob, getRecentScans, getScanDetections, getScanImageUrl, moderateAnnotationSubmission, promoteCandidate, rollbackModel, startCandidateComparison, startCandidateTraining, updateAnnotationBox, updateAnnotationLabel } from "../src/services/api";
-import type { AIProgressResponse, AnnotationItem, AnnotationStatus, AnnotationSubmission, AnnotationSubmissionDetail, DetectionItem, InventoryItem, LifecycleJob, ModelMetrics, RecentScan } from "../src/types/api";
+import type { AIProgressResponse, AnnotationItem, AnnotationStatus, AnnotationSubmission, AnnotationSubmissionDetail, DetectionItem, InventoryItem, LifecycleJob, ModelMetrics, PromotionReason, RecentScan } from "../src/types/api";
 import { getMinimumAnnotationBoxSize } from "../src/utils/imageCoordinates";
 import type { ImageBoundingBox } from "../src/utils/imageCoordinates";
 import { colors, radius, spacing, typography } from "../src/theme";
@@ -73,6 +73,23 @@ function formatMetricDifference(value: number | null | undefined) {
   if (value == null) return "—";
   const points = value * 100;
   return `${points > 0 ? "+" : ""}${points.toFixed(1)} pp`;
+}
+
+function promotionReasonText(reason: PromotionReason) {
+  if (reason.code === "shared_class_regression" && reason.difference != null && reason.maximum_regression != null) {
+    return `Existing-class performance changed by ${formatMetricDifference(reason.difference)}. Maximum allowed regression is ${formatMetricDifference(-reason.maximum_regression)}.`;
+  }
+  if (reason.code === "added_class_quality" && reason.value != null && reason.minimum != null) {
+    return `New-product mAP50-95 is ${formatMetric(reason.value)}. Minimum required is ${formatMetric(reason.minimum)}.`;
+  }
+  if (reason.code === "added_class_below_minimum" && reason.classes && !Array.isArray(reason.classes) && reason.minimum != null) {
+    const values = Object.entries(reason.classes).map(([name, value]) => `${name}: ${formatMetric(value)}`).join(", ");
+    return `${values}. Each new product must reach ${formatMetric(reason.minimum)}.`;
+  }
+  if (reason.code === "removed_classes" && Array.isArray(reason.classes)) {
+    return `Supported products cannot be removed: ${reason.classes.join(", ")}.`;
+  }
+  return reason.message;
 }
 
 function lifecyclePhaseLabel(job: LifecycleJob) {
@@ -857,12 +874,12 @@ export default function TeachFridgeScreen() {
               {lifecycleJob && lifecycleAction ? <View style={styles.jobStatus}><ActivityIndicator color={colors.primary} /><View style={styles.detectionCopy}><Text style={styles.jobTitle}>{lifecycleAction}</Text><Text style={styles.jobMeta}>{lifecyclePhaseLabel(lifecycleJob)}</Text></View></View> : null}
               <View style={styles.lifecycleActions}>
                 <AppButton label="Train New Model" icon="school-outline" loading={lifecycleAction === "Train New Model"} disabled={Boolean(lifecycleAction) || !progressStats.actions.can_train} onPress={() => runLongLifecycleAction("Train New Model", startCandidateTraining)} />
-                {progressStats.latest_candidate && !progressStats.comparison ? <AppButton label="Compare Models" icon="analytics-outline" variant="secondary" loading={lifecycleAction === "Compare Models"} disabled={Boolean(lifecycleAction) || !progressStats.actions.can_compare} onPress={() => runLongLifecycleAction("Compare Models", () => startCandidateComparison(progressStats.latest_candidate!.version))} /> : null}
+                {progressStats.latest_candidate && (!progressStats.comparison || progressStats.promotion_evaluation.stale) ? <AppButton label="Compare Models" icon="analytics-outline" variant="secondary" loading={lifecycleAction === "Compare Models"} disabled={Boolean(lifecycleAction) || !progressStats.actions.can_compare} onPress={() => runLongLifecycleAction("Compare Models", () => startCandidateComparison(progressStats.latest_candidate!.version))} /> : null}
                 <AppButton label="Use New Model" icon="rocket-outline" variant="secondary" loading={lifecycleAction === "Promote Candidate"} disabled={Boolean(lifecycleAction) || !progressStats.actions.can_promote} onPress={confirmPromotion} />
               </View>
               {!progressStats.actions.can_train ? <Text style={styles.actionHint}>Approve at least one contribution before training.</Text> : null}
               {!progressStats.latest_candidate ? <Text style={styles.actionHint}>Train a candidate before comparing or promoting.</Text> : null}
-              {progressStats.latest_candidate && !progressStats.comparison ? <Text style={styles.actionHint}>Compare the candidate with the active model before promotion.</Text> : null}
+              {progressStats.latest_candidate && (!progressStats.comparison || progressStats.promotion_evaluation.stale) ? <Text style={styles.actionHint}>Compare the candidate with the current active model before promotion.</Text> : null}
               <View style={styles.rollbackSection}>
                 <Text style={styles.modelRole}>ROLLBACK OPTIONS</Text>
                 {progressStats.archived_models.length ? progressStats.archived_models.map((model) => <View key={model.id} style={styles.rollbackRow}><View style={styles.detectionCopy}><Text style={styles.modelVersion}>{model.version}</Text><Text style={styles.trainingMeta}>Archived · {new Date(model.created_at).toLocaleDateString("en-GB")}</Text></View><AppButton label="Rollback" icon="arrow-undo-outline" variant="danger" disabled={Boolean(lifecycleAction)} onPress={() => confirmRollback(model.version)} /></View>) : <Text style={styles.actionHint}>No archived model is available for rollback.</Text>}
@@ -885,36 +902,46 @@ export default function TeachFridgeScreen() {
 
             {progressStats.comparison && progressStats.latest_candidate ? <Card>
               <View style={styles.comparisonHeading}>
-                <View style={styles.detectionCopy}><Text style={styles.sectionTitle}>Which model performed better?</Text><Text style={styles.sectionSubtitle}>Both models were tested on the same images from {progressStats.comparison.dataset_version}.</Text></View>
-                <StatusBadge label={progressStats.comparison.candidate_outperforms_active ? "IMPROVED" : "NO IMPROVEMENT"} tone={progressStats.comparison.candidate_outperforms_active ? "success" : "warning"} />
+                <View style={styles.detectionCopy}><Text style={styles.sectionTitle}>Candidate {progressStats.latest_candidate.version}</Text><Text style={styles.sectionSubtitle}>Both models were tested on the same images from {progressStats.comparison.dataset_version}.</Text></View>
+                <StatusBadge label={progressStats.promotion_evaluation.eligible ? "ELIGIBLE" : "NOT ELIGIBLE"} tone={progressStats.promotion_evaluation.eligible ? "success" : "warning"} />
               </View>
-              <View style={styles.metricHeader}><Text style={styles.metricName}>Metric</Text><Text style={styles.metricNumber}>Active</Text><Text style={styles.metricNumber}>Candidate</Text><Text style={styles.metricDelta}>Change</Text></View>
-              {METRIC_ROWS.map(({ key, label }) => {
-                const difference = progressStats.comparison?.metric_differences[key];
-                return <View key={key} style={styles.metricRow}>
-                  <Text style={styles.metricName}>{label}</Text>
-                  <Text style={styles.metricNumber}>{formatMetric(progressStats.comparison?.active_metrics[key])}</Text>
-                  <Text style={styles.metricNumber}>{formatMetric(progressStats.comparison?.candidate_metrics[key])}</Text>
-                  <Text style={[styles.metricDelta, difference != null && difference > 0 ? styles.positiveDelta : difference != null && difference < 0 ? styles.negativeDelta : null]}>{formatMetricDifference(difference)}</Text>
-                </View>;
-              })}
-              <Text style={styles.comparisonSummary}>{progressStats.comparison.candidate_outperforms_active ? "The candidate improved the primary evaluation score." : "The candidate did not beat the active model under the stored comparison rule."}</Text>
-              {progressStats.comparison.evaluation_parameters?.shared_class_comparison?.available ? <View style={styles.sharedComparison}>
-                <Text style={styles.sectionTitle}>Existing product performance</Text>
-                <Text style={styles.sectionSubtitle}>A separate comparison across {progressStats.comparison.evaluation_parameters.shared_class_comparison.class_count} product classes both models can recognize.</Text>
+              {progressStats.promotion_evaluation.mode === "expanded_classes" ? <>
+                <Text style={styles.modelRole}>ADDS {progressStats.comparison.class_comparison.added_classes.length} PRODUCTS</Text>
+                {progressStats.comparison.class_comparison.added_classes.map((name) => <Text key={name} style={styles.comparisonSummary}>+ {name}</Text>)}
+                {progressStats.comparison.class_comparison.removed_classes.length ? <Text style={styles.comparisonSummary}>Removes: {progressStats.comparison.class_comparison.removed_classes.join(", ")}</Text> : null}
+                <View style={styles.sharedComparison}>
+                  <Text style={styles.sectionTitle}>Existing products</Text>
+                  <View style={styles.metricHeader}><Text style={styles.metricName}>mAP50-95</Text><Text style={styles.metricNumber}>Active</Text><Text style={styles.metricNumber}>Candidate</Text><Text style={styles.metricDelta}>Change</Text></View>
+                  <View style={styles.metricRow}>
+                    <Text style={styles.metricName}>Shared classes</Text>
+                    <Text style={styles.metricNumber}>{formatMetric(progressStats.comparison.shared_class_comparison.active_metrics?.map50_95)}</Text>
+                    <Text style={styles.metricNumber}>{formatMetric(progressStats.comparison.shared_class_comparison.candidate_metrics?.map50_95)}</Text>
+                    <Text style={styles.metricDelta}>{formatMetricDifference(progressStats.comparison.shared_class_comparison.metric_differences?.map50_95)}</Text>
+                  </View>
+                  <Text style={styles.comparisonSummary}>Allowed regression: {formatMetricDifference(-progressStats.promotion_evaluation.thresholds.max_shared_map50_95_regression)}</Text>
+                </View>
+                <View style={styles.sharedComparison}>
+                  <Text style={styles.sectionTitle}>New products</Text>
+                  <Text style={styles.comparisonSummary}>Aggregate mAP50-95: {formatMetric(progressStats.comparison.added_class_metrics.aggregate?.map50_95)}</Text>
+                  {Object.entries(progressStats.comparison.added_class_metrics.per_class).map(([name, metrics]) => <Text key={name} style={styles.comparisonSummary}>{name}: {formatMetric(metrics.map50_95)}</Text>)}
+                </View>
+              </> : <>
                 <View style={styles.metricHeader}><Text style={styles.metricName}>Metric</Text><Text style={styles.metricNumber}>Active</Text><Text style={styles.metricNumber}>Candidate</Text><Text style={styles.metricDelta}>Change</Text></View>
-                {METRIC_ROWS.map(({ key, label }) => {
-                  const shared = progressStats.comparison?.evaluation_parameters?.shared_class_comparison;
-                  const difference = shared?.metric_differences?.[key];
-                  return <View key={`shared-${key}`} style={styles.metricRow}>
+                {METRIC_ROWS.filter(({ key }) => key === "map50_95" || key === "map50").map(({ key, label }) => {
+                  const difference = progressStats.comparison?.metric_differences[key];
+                  return <View key={key} style={styles.metricRow}>
                     <Text style={styles.metricName}>{label}</Text>
-                    <Text style={styles.metricNumber}>{formatMetric(shared?.active_metrics?.[key])}</Text>
-                    <Text style={styles.metricNumber}>{formatMetric(shared?.candidate_metrics?.[key])}</Text>
+                    <Text style={styles.metricNumber}>{formatMetric(progressStats.comparison?.active_metrics[key])}</Text>
+                    <Text style={styles.metricNumber}>{formatMetric(progressStats.comparison?.candidate_metrics[key])}</Text>
                     <Text style={[styles.metricDelta, difference != null && difference > 0 ? styles.positiveDelta : difference != null && difference < 0 ? styles.negativeDelta : null]}>{formatMetricDifference(difference)}</Text>
                   </View>;
                 })}
-                <Text style={styles.comparisonSummary}>{progressStats.comparison.evaluation_parameters.shared_class_comparison.candidate_outperforms_active ? "The candidate improved performance on existing products." : "The candidate did not improve performance on existing products."}</Text>
-              </View> : null}
+              </>}
+              <View style={styles.sharedComparison}>
+                <Text style={styles.sectionTitle}>Promotion</Text>
+                <Text style={styles.comparisonSummary}>{progressStats.promotion_evaluation.eligible ? "Eligible" : "Not eligible"}</Text>
+                {progressStats.promotion_evaluation.reasons.map((reason, index) => <Text key={`${reason.code}-${index}`} style={styles.actionHint}>{promotionReasonText(reason)}</Text>)}
+              </View>
             </Card> : progressStats.latest_candidate ? <Card><EmptyState icon="analytics-outline" title="Comparison needed" message="Compare the new model with the current model on the same test images before using it." /></Card> : null}
 
             <View style={styles.progressGrid}>

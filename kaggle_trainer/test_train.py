@@ -6,11 +6,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from train import Job, WorkerError, _parse_detection_label, align_model_names_for_evaluation, candidate_is_better, class_aware_comparison, discover_inputs, ensure_training_dependencies, metric_differences, run_worker, safe_extract_zip
+from train import Job, WorkerError, _parse_detection_label, align_model_names_for_evaluation, candidate_is_better, class_aware_comparison, discover_inputs, ensure_training_dependencies, metric_differences, require_class_preservation, run_worker, safe_extract_zip
 
 
 class TrainerValidationTests(unittest.TestCase):
-    def make_package(self, root: Path, *, malformed_job=False):
+    def make_package(
+        self,
+        root: Path,
+        *,
+        malformed_job=False,
+        correction_class="Apple",
+        base_classes=("Apple",),
+    ):
         source = root / "source"
         (source / "images" / "train").mkdir(parents=True)
         (source / "images" / "val").mkdir(parents=True)
@@ -19,8 +26,11 @@ class TrainerValidationTests(unittest.TestCase):
         for split in ("train", "val"):
             (source / "images" / split / f"{split}.jpg").write_bytes(b"mock-image")
             (source / "labels" / split / f"{split}.txt").write_text("0 0.5 0.5 0.4 0.4\n", encoding="utf-8")
-        (source / "data.yaml").write_text("train: images/train\nval: images/val\nnc: 1\nnames:\n  0: Apple\n", encoding="utf-8")
-        manifest = {"dataset_version": "dataset-v1", "source_submission_status": "approved", "class_mapping": [{"id": 0, "name": "Apple"}]}
+        (source / "data.yaml").write_text(
+            f"train: images/train\nval: images/val\nnc: 1\nnames:\n  0: {correction_class}\n",
+            encoding="utf-8",
+        )
+        manifest = {"dataset_version": "dataset-v1", "source_submission_status": "approved", "class_mapping": [{"id": 0, "name": correction_class}]}
         (source / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         input_root = root / "input" / "attached-dataset"
         input_root.mkdir(parents=True)
@@ -33,10 +43,13 @@ class TrainerValidationTests(unittest.TestCase):
         base = root / "input" / "base-dataset" / "data"
         (base / "images").mkdir(parents=True)
         (base / "labels").mkdir()
-        (base / "classes.txt").write_text("Apple\n", encoding="utf-8")
+        (base / "classes.txt").write_text(
+            "".join(f"{name}\n" for name in base_classes), encoding="utf-8"
+        )
         for index in range(30):
             (base / "images" / f"base_{index}.jpg").write_bytes(f"base-image-{index}".encode())
-            (base / "labels" / f"base_{index}.txt").write_text("0 0.5 0.5 0.4 0.4\n", encoding="utf-8")
+            class_id = index % len(base_classes)
+            (base / "labels" / f"base_{index}.txt").write_text(f"{class_id} 0.5 0.5 0.4 0.4\n", encoding="utf-8")
         job = {"training_run_id": "run-1", "dataset_version": "dataset-v1", "base_dataset_slug": "owner/base", "active_model_version": "active-v1", "candidate_model_version": "candidate-v2", "starting_model_version": "yolo11s-pretrained", "require_cuda": True}
         (input_root / "job.json").write_text("{" if malformed_job else json.dumps(job), encoding="utf-8")
         return root / "input"
@@ -58,6 +71,59 @@ class TrainerValidationTests(unittest.TestCase):
             second_assignment = {sample["source_image_sha256"]: sample["split"] for sample in second["dataset"]["manifest"]["samples"]}
             self.assertEqual(first_assignment, second_assignment)
             self.assertNotEqual(Path(result["candidate_output"]).name, "active_model.pt")
+
+    def test_combined_dataset_preserves_base_vocabulary_and_adds_lemon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_root = self.make_package(
+                root,
+                correction_class="Lemon",
+                base_classes=("apple", "banana", "milk"),
+            )
+            result = run_worker(input_root, root / "working", validate_only=True)
+            correction_manifest = json.loads(
+                (root / "working" / "dataset" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            combined_manifest = result["dataset"]["manifest"]
+            self.assertEqual(
+                [entry["name"] for entry in correction_manifest["class_mapping"]],
+                ["Lemon"],
+            )
+            self.assertEqual(
+                [entry["name"] for entry in combined_manifest["class_mapping"]],
+                ["apple", "banana", "milk", "Lemon"],
+            )
+
+    def test_class_preservation_is_semantic_and_order_independent(self):
+        require_class_preservation(
+            ["apple", "banana", "milk"],
+            ["MILK", "Apple", "lemon", "Banana"],
+            "combined training dataset",
+        )
+
+    def test_class_preservation_rejects_missing_active_class(self):
+        with self.assertRaisesRegex(WorkerError, "(?i)banana"):
+            require_class_preservation(
+                ["apple", "banana", "milk"],
+                ["apple", "milk", "lemon"],
+                "combined training dataset",
+            )
+
+    def test_missing_base_dataset_fails_before_training(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_root = self.make_package(root, correction_class="Lemon")
+            import shutil
+
+            shutil.rmtree(input_root / "base-dataset")
+            with self.assertRaisesRegex(WorkerError, "base dataset"):
+                run_worker(input_root, root / "working", validate_only=True)
+            failure = json.loads(
+                (root / "working" / "failure.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(failure["stage"], "base_dataset_validation")
 
     def test_validation_accepts_kaggle_expanded_dataset(self):
         with tempfile.TemporaryDirectory() as directory:

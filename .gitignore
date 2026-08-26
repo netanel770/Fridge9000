@@ -28,3 +28,4 @@ backend/uploads/
 backend/candidate_models/
 backend/dataset_exports/
 backend/model_comparisons/
+backend/base_dataset/

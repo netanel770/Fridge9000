@@ -509,7 +509,9 @@ def build_combined_dataset(base_root: Path, corrections_root: Path, correction_i
     names_yaml = "\n".join(f"  {index}: {json.dumps(name, ensure_ascii=False)}" for index, name in enumerate(classes))
     (output_root / "data.yaml").write_text(f"path: {output_root.as_posix()}\ntrain: images/train\nval: images/val\ntest: images/test\nnc: {len(classes)}\nnames:\n{names_yaml}\n", encoding="utf-8")
     manifest = {
+        "dataset_id": job.dataset_version, "dataset_version": job.dataset_version,
         "format_version": "fridge9000-combined-v1", "created_at": utc_now(),
+        "source_submission_status": "approved",
         "correction_dataset_version": job.dataset_version, "base_dataset_slug": job.base_dataset_slug,
         "base_dataset_content_sha256": directory_sha256(base_root),
         "skipped_conflicting_base_duplicates": skipped_conflicts,
@@ -518,6 +520,20 @@ def build_combined_dataset(base_root: Path, corrections_root: Path, correction_i
         "split_strategy": {"name": "stable_image_sha256", "seed": "fridge9000-combined-split-v1", "fractions": {"train": job.train_fraction, "val": job.val_fraction, "test": job.test_fraction}},
         "split_counts": counts, "source_counts": source_counts, "samples": manifest_samples,
     }
+    manifest["image_count"] = sum(item["images"] for item in counts.values())
+    manifest["annotation_count"] = sum(item["annotations"] for item in counts.values())
+    identity = {
+        "base_dataset_content_sha256": manifest["base_dataset_content_sha256"],
+        "correction_content_sha256": correction_info["manifest"].get("content_sha256"),
+        "class_mapping": manifest["class_mapping"],
+        "samples": [
+            (item["source_image_sha256"], item["split"], item["source"])
+            for item in manifest_samples
+        ],
+    }
+    manifest["content_sha256"] = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     write_json(output_root / "manifest.json", manifest)
     return {"dataset_root": str(output_root), "data_yaml": str(output_root / "data.yaml"), "manifest": manifest, "classes": classes, "splits": {split: {**counts[split], "images_dir": str(output_root / "images" / split), "labels_dir": str(output_root / "labels" / split)} for split in counts}, "evaluation_split": "test", "evaluation_limitation": None}
 
@@ -557,6 +573,17 @@ def normalized_class_names(raw: Any, field: str) -> list[str]:
     if not names:
         raise WorkerError(f"{field} contains no classes")
     return names
+
+
+def require_class_preservation(required_classes: Any, available_classes: Any, context: str) -> None:
+    required = normalized_class_names(required_classes, "active model")
+    available = normalized_class_names(available_classes, context)
+    available_identities = {name.casefold() for name in available}
+    missing = [name for name in required if name.casefold() not in available_identities]
+    if missing:
+        raise WorkerError(
+            f"{context} is missing active detector classes: {', '.join(missing)}"
+        )
 
 
 def metrics_from_result(result: Any, names: list[str]) -> dict[str, Any]:
@@ -760,6 +787,10 @@ def run_worker(input_root: Path, working_root: Path, validate_only: bool = False
         active_model = YOLO(str(active_copy))
         if active_model.task != "detect":
             raise WorkerError(f"active_model.pt must be YOLO object-detection weights, got task={active_model.task!r}")
+        active_classes = normalized_class_names(active_model.names, "active model")
+        require_class_preservation(
+            active_classes, dataset["classes"], "Combined training dataset"
+        )
         training_model = YOLO(str(pretrained_copy))
         if training_model.task != "detect":
             raise WorkerError(f"starting_model.pt must be YOLO object-detection weights, got task={training_model.task!r}")
@@ -784,6 +815,9 @@ def run_worker(input_root: Path, working_root: Path, validate_only: bool = False
             raise WorkerError("Trained candidate is not an object-detection model")
         stage = "candidate_evaluation"
         candidate_classes = normalized_class_names(candidate_model.names, "candidate model")
+        require_class_preservation(
+            active_classes, candidate_classes, "Trained candidate"
+        )
         candidate_missing_classes = align_model_names_for_evaluation(candidate_model, dataset["classes"])
         evaluation_kwargs = dict(
             data=dataset["data_yaml"], split=dataset["evaluation_split"], imgsz=job.imgsz, batch=job.batch,
@@ -799,7 +833,9 @@ def run_worker(input_root: Path, working_root: Path, validate_only: bool = False
         active_evaluator = YOLO(str(active_copy))
         if active_evaluator.task != "detect":
             raise WorkerError("Starting active checkpoint is no longer an object detector")
-        active_classes = normalized_class_names(active_evaluator.names, "active model")
+        evaluated_active_classes = normalized_class_names(active_evaluator.names, "active model")
+        if [name.casefold() for name in evaluated_active_classes] != [name.casefold() for name in active_classes]:
+            raise WorkerError("Active detector class metadata changed during training")
         active_missing_classes = align_model_names_for_evaluation(active_evaluator, dataset["classes"])
         active_result = active_evaluator.val(name="active_evaluation", **evaluation_kwargs)
         active_metrics = metrics_from_result(active_result, active_classes)

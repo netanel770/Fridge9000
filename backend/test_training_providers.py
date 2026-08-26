@@ -87,6 +87,99 @@ class TrainingProviderTests(unittest.TestCase):
             with zipfile.ZipFile(destination) as archive:
                 self.assertEqual(sorted(archive.namelist()), ["data.yaml", "images/train/one.jpg"])
 
+    def test_local_provider_requires_base_dataset_before_training(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            corrections = root / "corrections"
+            corrections.mkdir()
+            active = root / "active.pt"
+            active.write_bytes(b"active")
+            with (
+                patch.object(
+                    providers,
+                    "_export",
+                    return_value=(corrections, {"dataset_version": "corrections-v1"}),
+                ),
+                patch.object(
+                    providers,
+                    "_active_model",
+                    return_value={"resolved_path": active},
+                ),
+                patch.object(providers, "LOCAL_BASE_DATASET_PATH", root / "missing"),
+                patch("train_yolo_candidate.train_candidate") as train_candidate,
+            ):
+                with self.assertRaisesRegex(
+                    providers.ProviderError,
+                    "requires a real base dataset.*LOCAL_BASE_DATASET_PATH",
+                ):
+                    providers.local_training("job-1", lambda **kwargs: None)
+            train_candidate.assert_not_called()
+
+    def test_local_combined_dataset_preserves_base_classes_and_adds_correction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "base"
+            (base / "images").mkdir(parents=True)
+            (base / "labels").mkdir()
+            (base / "classes.txt").write_text(
+                "apple\nbanana\nmilk\n", encoding="utf-8"
+            )
+            for index in range(30):
+                class_id = index % 3
+                (base / "images" / f"base-{index}.jpg").write_bytes(
+                    f"base-{index}".encode()
+                )
+                (base / "labels" / f"base-{index}.txt").write_text(
+                    f"{class_id} 0.5 0.5 0.4 0.4\n", encoding="utf-8"
+                )
+
+            corrections = root / "job-1"
+            for split in ("train", "val"):
+                (corrections / "images" / split).mkdir(parents=True)
+                (corrections / "labels" / split).mkdir(parents=True)
+                (corrections / "images" / split / f"{split}.jpg").write_bytes(
+                    f"lemon-{split}".encode()
+                )
+                (corrections / "labels" / split / f"{split}.txt").write_text(
+                    "0 0.5 0.5 0.4 0.4\n", encoding="utf-8"
+                )
+            (corrections / "data.yaml").write_text(
+                "train: images/train\nval: images/val\nnc: 1\nnames:\n  0: lemon\n",
+                encoding="utf-8",
+            )
+            (corrections / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "dataset_version": "corrections-v1",
+                        "source_submission_status": "approved",
+                        "class_mapping": [{"id": 0, "name": "lemon"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(providers, "LOCAL_BASE_DATASET_PATH", base):
+                combined = providers._prepare_local_combined_dataset(
+                    corrections, "corrections-v1"
+                )
+
+            manifest = json.loads(
+                (combined / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                [entry["name"] for entry in manifest["class_mapping"]],
+                ["apple", "banana", "milk", "lemon"],
+            )
+            correction_manifest = json.loads(
+                (root / "job-1-corrections" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                [entry["name"] for entry in correction_manifest["class_mapping"]],
+                ["lemon"],
+            )
+
     def test_remote_artifact_validation_rejects_mismatch_before_registration(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
@@ -96,6 +189,33 @@ class TrainingProviderTests(unittest.TestCase):
             (output / "run_manifest.json").write_text(json.dumps({"job": {"training_run_id": "run"}}), encoding="utf-8")
             with self.assertRaisesRegex(providers.ProviderError, "another training run"):
                 providers._register_remote("run", "dataset", output / "local-dataset", {"version": "active"}, "candidate", output)
+
+    def test_remote_candidate_missing_active_class_is_rejected(self):
+        metrics = {
+            "precision": 0.8,
+            "recall": 0.8,
+            "map50": 0.8,
+            "map50_95": 0.8,
+        }
+
+        def evaluation(classes):
+            return {
+                "classes": classes,
+                "per_class": [
+                    {"class_id": index, "name": name, **metrics}
+                    for index, name in enumerate(classes)
+                ],
+            }
+
+        active = evaluation(["apple", "banana", "milk"])
+        candidate = evaluation(["lemon", "apple", "milk"])
+        comparison = {
+            "active_model": active,
+            "candidate_model": candidate,
+            **providers.build_class_aware_comparison(active, candidate),
+        }
+        with self.assertRaisesRegex(providers.ProviderError, "banana"):
+            providers._remote_class_aware_comparison(comparison)
 
 
 if __name__ == "__main__":

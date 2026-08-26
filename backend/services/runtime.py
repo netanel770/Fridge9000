@@ -19,13 +19,15 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 try:
-    from core.config import BACKEND_DIR, DATABASE_URL, FRESHNESS_MAX_UPLOAD_BYTES, FRESHNESS_MODEL_PATH, FRESHNESS_UPLOAD_DIR, OUTLINE_DIR, RULES_PATH, SEGMENTATION_MODEL_PATH, UPLOAD_DIR
+    from core.config import BACKEND_DIR, DATABASE_URL, FRESHNESS_MAX_UPLOAD_BYTES, FRESHNESS_MODEL_PATH, FRESHNESS_UPLOAD_DIR, MAX_SHARED_MAP50_95_REGRESSION, MIN_ADDED_CLASS_MAP50_95, MIN_ADDED_CLASS_PER_CLASS_MAP50_95, OUTLINE_DIR, RULES_PATH, SEGMENTATION_MODEL_PATH, UPLOAD_DIR
     from db.connection import get_conn
     from freshness import classification_probabilities, parse_freshness_class
+    from model_promotion_policy import evaluate_promotion
 except ModuleNotFoundError:
-    from backend.core.config import BACKEND_DIR, DATABASE_URL, FRESHNESS_MAX_UPLOAD_BYTES, FRESHNESS_MODEL_PATH, FRESHNESS_UPLOAD_DIR, OUTLINE_DIR, RULES_PATH, SEGMENTATION_MODEL_PATH, UPLOAD_DIR
+    from backend.core.config import BACKEND_DIR, DATABASE_URL, FRESHNESS_MAX_UPLOAD_BYTES, FRESHNESS_MODEL_PATH, FRESHNESS_UPLOAD_DIR, MAX_SHARED_MAP50_95_REGRESSION, MIN_ADDED_CLASS_MAP50_95, MIN_ADDED_CLASS_PER_CLASS_MAP50_95, OUTLINE_DIR, RULES_PATH, SEGMENTATION_MODEL_PATH, UPLOAD_DIR
     from backend.db.connection import get_conn
     from backend.freshness import classification_probabilities, parse_freshness_class
+    from backend.model_promotion_policy import evaluate_promotion
 
 
 
@@ -950,6 +952,17 @@ def get_detection_model():
         return MODEL
 
 
+def _promotion_decision(comparison, current_active_id, candidate_id):
+    return evaluate_promotion(
+        comparison,
+        current_active_id=current_active_id,
+        candidate_id=candidate_id,
+        max_shared_map50_95_regression=MAX_SHARED_MAP50_95_REGRESSION,
+        min_added_class_map50_95=MIN_ADDED_CLASS_MAP50_95,
+        min_added_class_per_class_map50_95=MIN_ADDED_CLASS_PER_CLASS_MAP50_95,
+    )
+
+
 def _activate_model(version: str, action: str, comparison_id: Optional[str] = None):
     global MODEL, _MODEL_VERSION, _MODEL_PATH
     required_status = "candidate" if action == "PROMOTE" else "archived"
@@ -976,11 +989,14 @@ def _activate_model(version: str, action: str, comparison_id: Optional[str] = No
                         raise HTTPException(status_code=400, detail="A successful comparison_id is required")
                     cur.execute(
                         """
-                        SELECT id, candidate_outperforms_active FROM model_comparisons
-                        WHERE id = %s AND candidate_model_id = %s
-                          AND active_model_id = %s;
+                        SELECT id, active_model_id, candidate_model_id,
+                               active_metrics, candidate_metrics,
+                               candidate_outperforms_active, class_comparison,
+                               shared_class_comparison, added_class_metrics
+                        FROM model_comparisons
+                        WHERE id = %s AND candidate_model_id = %s;
                         """,
-                        (comparison_id, target["id"], current["id"]),
+                        (comparison_id, target["id"]),
                     )
                     comparison = cur.fetchone()
                     if not comparison:
@@ -988,10 +1004,11 @@ def _activate_model(version: str, action: str, comparison_id: Optional[str] = No
                             status_code=409,
                             detail="Candidate was not compared with the current active model",
                         )
-                    if not comparison["candidate_outperforms_active"]:
+                    decision = _promotion_decision(comparison, current["id"], target["id"])
+                    if not decision["eligible"]:
                         raise HTTPException(
                             status_code=409,
-                            detail="Candidate did not outperform the current active model",
+                            detail=decision["reasons"][0]["message"],
                         )
 
                 # Load and validate before changing registry state.
@@ -1765,18 +1782,19 @@ def get_ai_progress():
             candidate = cur.fetchone()
 
             comparison = None
-            if active and candidate:
+            if candidate:
                 cur.execute(
                     """
-                    SELECT id, dataset_version, created_at, active_metrics, candidate_metrics,
+                    SELECT id, dataset_version, created_at, active_model_id, candidate_model_id,
+                           active_metrics, candidate_metrics,
                            metric_differences, comparison_rule, candidate_outperforms_active,
                            evaluation_parameters, class_comparison,
                            shared_class_comparison, added_class_metrics
                     FROM model_comparisons
-                    WHERE active_model_id = %s AND candidate_model_id = %s
+                    WHERE candidate_model_id = %s
                     ORDER BY created_at DESC LIMIT 1;
                     """,
-                    (active["id"], candidate["id"]),
+                    (candidate["id"],),
                 )
                 comparison = cur.fetchone()
             cur.execute(
@@ -1814,19 +1832,26 @@ def get_ai_progress():
             )
             training_history = cur.fetchall()
 
+    promotion_evaluation = _promotion_decision(
+        comparison,
+        active["id"] if active else None,
+        candidate["id"] if candidate else None,
+    )
+    if comparison:
+        comparison["promotion_evaluation"] = promotion_evaluation
+
     return {
         "active_model": active,
         "latest_candidate": candidate,
         "comparison": comparison,
+        "promotion_evaluation": promotion_evaluation,
         "archived_models": archived_models,
         "contributions": contributions,
         "training_history": training_history,
         "actions": {
             "can_train": contributions["approved_waiting"] > 0,
             "can_compare": candidate is not None,
-            "can_promote": bool(
-                comparison and comparison["candidate_outperforms_active"]
-            ),
+            "can_promote": promotion_evaluation["eligible"],
             "can_rollback": bool(archived_models),
         },
     }

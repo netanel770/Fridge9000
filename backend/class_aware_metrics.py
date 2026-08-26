@@ -63,6 +63,24 @@ def class_set_analysis(active_classes: Any, candidate_classes: Any) -> dict[str,
     }
 
 
+def missing_required_classes(required_classes: Any, available_classes: Any) -> list[str]:
+    """Return required semantic classes absent from an available class mapping."""
+    required = normalized_class_names(required_classes, "required")
+    available = normalized_class_names(available_classes, "available")
+    available_identities = {name.casefold() for name in available}
+    return [name for name in required if name.casefold() not in available_identities]
+
+
+def require_class_preservation(
+    required_classes: Any, available_classes: Any, context: str
+) -> None:
+    missing = missing_required_classes(required_classes, available_classes)
+    if missing:
+        raise ValueError(
+            f"{context} is missing active detector classes: {', '.join(missing)}"
+        )
+
+
 def validated_per_class(raw: Any, classes: list[str], field: str) -> dict[str, dict[str, Any]]:
     if not isinstance(raw, list):
         raise ValueError(f"{field}.per_class must be a list")

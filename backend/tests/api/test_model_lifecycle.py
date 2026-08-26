@@ -51,6 +51,7 @@ class FakeYolo:
     def __init__(self, path):
         self.path = Path(path)
         self.task = "detect"
+        self.names = {0: "Milk"}
         self.trainer = None
 
     def train(self, **kwargs):
@@ -103,6 +104,11 @@ def lifecycle_context(
     monkeypatch.setattr(runtime.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(providers, "DATABASE_URL", test_database_url)
     monkeypatch.setattr(providers, "BACKEND_DIR", root)
+    monkeypatch.setattr(
+        providers,
+        "_prepare_local_combined_dataset",
+        lambda correction_dir, dataset_version: correction_dir,
+    )
     monkeypatch.setattr(trainer, "YOLO", FakeYolo)
 
     with runtime._LIFECYCLE_JOB_LOCK:
@@ -282,6 +288,61 @@ def _run_comparison(
         )
     assert response.status_code == 200
     return response.json()
+
+
+def _run_policy_comparison(
+    test_client,
+    lifecycle_context,
+    submission_factory,
+    *,
+    candidate_classes,
+    shared_candidate_map50_95=0.79,
+    added_map50_95=None,
+    candidate_overall_map50_95=0.72,
+):
+    submission_factory("assisted", "approved", "Apple")
+    submission_factory("manual", "approved", "Milk")
+    trained = _run_successful_training(test_client, lifecycle_context)
+    candidate_version = trained["result"]["model_version"]
+    active_classes = ["Apple", "Banana", "Milk"]
+    active_overall = {
+        "precision": 0.84, "recall": 0.82, "map50": 0.86, "map50_95": 0.80
+    }
+    candidate_overall = {
+        "precision": 0.77, "recall": 0.75, "map50": 0.79,
+        "map50_95": candidate_overall_map50_95,
+    }
+    active_per_class = {
+        name: {"precision": 0.84, "recall": 0.82, "map50": 0.86, "map50_95": 0.80}
+        for name in active_classes
+    }
+    active_identities = {name.casefold() for name in active_classes}
+    added_map50_95 = added_map50_95 or {}
+    candidate_per_class = {}
+    for name in candidate_classes:
+        if name.casefold() in active_identities:
+            candidate_per_class[name] = {
+                "precision": 0.83, "recall": 0.81, "map50": 0.85,
+                "map50_95": shared_candidate_map50_95,
+            }
+        else:
+            score = added_map50_95[name]
+            candidate_per_class[name] = {
+                "precision": score, "recall": score, "map50": score,
+                "map50_95": score,
+            }
+    compared = _run_comparison(
+        test_client,
+        lifecycle_context,
+        candidate_version,
+        active_overall,
+        candidate_overall,
+        active_classes=active_classes,
+        candidate_classes=candidate_classes,
+        active_per_class=active_per_class,
+        candidate_per_class=candidate_per_class,
+    )
+    return candidate_version, compared
 
 
 def test_ultralytics_per_class_rows_follow_model_class_ids(
@@ -476,6 +537,8 @@ def test_successful_training_records_eligibility_provenance_and_candidate(
     assert body["actions"]["can_train"] is False
     assert body["actions"]["can_compare"] is True
     assert body["actions"]["can_promote"] is False
+    assert body["promotion_evaluation"]["eligible"] is False
+    assert body["promotion_evaluation"]["reasons"][0]["code"] == "comparison_missing"
 
 
 def test_failed_training_preserves_active_model_and_has_no_usage(
@@ -640,6 +703,11 @@ def test_comparison_persists_fingerprints_metrics_and_decision(
     progress = test_client.get("/ai-progress").json()
     assert progress["comparison"]["id"] == comparison_id
     assert progress["comparison"]["candidate_outperforms_active"] is outperforms
+    assert progress["promotion_evaluation"]["mode"] == "same_classes"
+    assert progress["promotion_evaluation"]["eligible"] is outperforms
+    assert [reason["code"] for reason in progress["promotion_evaluation"]["reasons"]] == (
+        [] if outperforms else ["candidate_lost"]
+    )
     assert progress["actions"]["can_promote"] is outperforms
 
 
@@ -1018,9 +1086,247 @@ def test_stale_comparison_cannot_promote_against_a_new_active_model(
     )
     assert response.status_code == 409
     assert "current active model" in response.json()["detail"]
+    progress = test_client.get("/ai-progress").json()
+    assert progress["comparison"]["id"] == comparison_id
+    assert progress["promotion_evaluation"]["stale"] is True
+    assert progress["promotion_evaluation"]["reasons"][0]["code"] == "stale_comparison"
+    assert progress["actions"]["can_promote"] is False
     assert _active_count(db_connection) == 1
     with db_connection.cursor() as cursor:
         cursor.execute("SELECT version FROM model_versions WHERE status = 'active';")
         assert cursor.fetchone()[0] == "replacement-active"
         cursor.execute("SELECT COUNT(*) FROM model_activation_history;")
         assert cursor.fetchone()[0] == 0
+
+
+def test_reordered_same_classes_use_global_rule_and_can_promote(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    candidate_version, compared = _run_policy_comparison(
+        test_client,
+        lifecycle_context,
+        submission_factory,
+        candidate_classes=["Milk", "Apple", "Banana"],
+        candidate_overall_map50_95=0.81,
+    )
+    comparison_id = compared["result"]["comparison_id"]
+    progress = test_client.get("/ai-progress").json()
+    decision = progress["promotion_evaluation"]
+    assert decision["mode"] == "same_classes"
+    assert decision["eligible"] is True
+    assert decision["reasons"] == []
+    assert progress["actions"]["can_promote"] is True
+
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (SimpleNamespace(task="detect"), str(Path(record["model_path"]).resolve())),
+    )
+    promoted = test_client.post(
+        f"/models/{candidate_version}/promote", json={"comparison_id": comparison_id}
+    )
+    assert promoted.status_code == 200
+    assert _active_count(db_connection) == 1
+
+
+def test_expanded_candidate_can_promote_despite_lower_global_map(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    candidate_version, compared = _run_policy_comparison(
+        test_client,
+        lifecycle_context,
+        submission_factory,
+        candidate_classes=["Apple", "Banana", "Milk", "Cheese", "Orange"],
+        shared_candidate_map50_95=0.79,
+        added_map50_95={"Cheese": 0.61, "Orange": 0.65},
+    )
+    comparison_id = compared["result"]["comparison_id"]
+    assert compared["result"]["candidate_outperforms_active"] is False
+    progress = test_client.get("/ai-progress").json()
+    decision = progress["promotion_evaluation"]
+    assert decision["mode"] == "expanded_classes"
+    assert decision["eligible"] is True
+    assert decision["reasons"] == []
+    assert decision["thresholds"] == {
+        "max_shared_map50_95_regression": 0.02,
+        "min_added_class_map50_95": 0.50,
+        "min_added_class_per_class_map50_95": 0.30,
+    }
+    assert {
+        key: decision["metrics"][key]
+        for key in (
+            "shared_active_map50_95",
+            "shared_candidate_map50_95",
+            "shared_map50_95_difference",
+            "added_map50_95",
+        )
+    } == pytest.approx(
+        {
+            "shared_active_map50_95": 0.80,
+            "shared_candidate_map50_95": 0.79,
+            "shared_map50_95_difference": -0.01,
+            "added_map50_95": 0.63,
+        }
+    )
+    assert decision["metrics"]["added_per_class_map50_95"] == pytest.approx(
+        {"Cheese": 0.61, "Orange": 0.65}
+    )
+    assert progress["actions"]["can_promote"] is True
+    assert progress["comparison"]["promotion_evaluation"] == decision
+
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (SimpleNamespace(task="detect"), str(Path(record["model_path"]).resolve())),
+    )
+    promoted = test_client.post(
+        f"/models/{candidate_version}/promote", json={"comparison_id": comparison_id}
+    )
+    assert promoted.status_code == 200
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, status FROM model_versions WHERE version = %s;",
+            (candidate_version,),
+        )
+        candidate_id, candidate_status = cursor.fetchone()
+        cursor.execute(
+            "SELECT action, from_model_id, to_model_id, comparison_id FROM model_activation_history;"
+        )
+        history = cursor.fetchone()
+    assert candidate_status == "active"
+    assert history == (
+        "PROMOTE", lifecycle_context.active_id, candidate_id, comparison_id
+    )
+    assert _active_count(db_connection) == 1
+
+
+@pytest.mark.parametrize(
+    ("candidate_classes", "shared_score", "added_scores", "reason_code"),
+    [
+        (["Apple", "Banana", "Milk", "Cheese", "Orange"], 0.77, {"Cheese": 0.61, "Orange": 0.65}, "shared_class_regression"),
+        (["Apple", "Banana", "Milk", "Cheese", "Orange"], 0.79, {"Cheese": 0.49, "Orange": 0.49}, "added_class_quality"),
+        (["Apple", "Banana", "Milk", "Cheese", "Orange"], 0.79, {"Cheese": 0.80, "Orange": 0.20}, "added_class_below_minimum"),
+        (["Apple", "Milk", "Cheese"], 0.79, {"Cheese": 0.61}, "removed_classes"),
+        (["Apple", "Milk"], 0.79, {}, "removed_classes"),
+    ],
+)
+def test_expansion_policy_blocks_regression_low_quality_and_removed_classes(
+    test_client,
+    db_connection,
+    lifecycle_context,
+    submission_factory,
+    monkeypatch,
+    candidate_classes,
+    shared_score,
+    added_scores,
+    reason_code,
+):
+    candidate_version, compared = _run_policy_comparison(
+        test_client,
+        lifecycle_context,
+        submission_factory,
+        candidate_classes=candidate_classes,
+        shared_candidate_map50_95=shared_score,
+        added_map50_95=added_scores,
+    )
+    comparison_id = compared["result"]["comparison_id"]
+    progress = test_client.get("/ai-progress").json()
+    decision = progress["promotion_evaluation"]
+    assert decision["mode"] == "expanded_classes"
+    assert decision["eligible"] is False
+    assert reason_code in {reason["code"] for reason in decision["reasons"]}
+    assert progress["actions"]["can_promote"] is decision["eligible"]
+
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (SimpleNamespace(task="detect"), str(Path(record["model_path"]).resolve())),
+    )
+    rejected = test_client.post(
+        f"/models/{candidate_version}/promote", json={"comparison_id": comparison_id}
+    )
+    assert rejected.status_code == 409
+    assert _active_count(db_connection) == 1
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT version FROM model_versions WHERE status = 'active';")
+        assert cursor.fetchone()[0] == lifecycle_context.active_version
+        cursor.execute("SELECT COUNT(*) FROM model_activation_history;")
+        assert cursor.fetchone()[0] == 0
+
+
+def test_malformed_expansion_metrics_fail_closed_everywhere(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    candidate_version, compared = _run_policy_comparison(
+        test_client,
+        lifecycle_context,
+        submission_factory,
+        candidate_classes=["Apple", "Banana", "Milk", "Cheese"],
+        added_map50_95={"Cheese": 0.65},
+    )
+    comparison_id = compared["result"]["comparison_id"]
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE model_comparisons SET added_class_metrics = %s WHERE id = %s;",
+            (json.dumps({"available": True, "classes": ["Cheese"], "unavailable_classes": [], "per_class": {}}), comparison_id),
+        )
+    db_connection.commit()
+
+    progress = test_client.get("/ai-progress").json()
+    assert progress["promotion_evaluation"]["eligible"] is False
+    assert progress["promotion_evaluation"]["reasons"][0]["code"] == "malformed_class_metrics"
+    assert progress["actions"]["can_promote"] is False
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (SimpleNamespace(task="detect"), str(Path(record["model_path"]).resolve())),
+    )
+    rejected = test_client.post(
+        f"/models/{candidate_version}/promote", json={"comparison_id": comparison_id}
+    )
+    assert rejected.status_code == 409
+    assert _active_count(db_connection) == 1
+
+
+def test_invalid_candidate_file_blocks_eligible_promotion_without_history(
+    test_client, db_connection, lifecycle_context, submission_factory
+):
+    submission_factory("assisted", "approved", "Apple")
+    submission_factory("manual", "approved", "Milk")
+    trained = _run_successful_training(test_client, lifecycle_context)
+    candidate_version = trained["result"]["model_version"]
+    active = {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.5}
+    candidate = {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.6}
+    compared = _run_comparison(
+        test_client, lifecycle_context, candidate_version, active, candidate
+    )
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT model_path FROM model_versions WHERE version = %s;",
+            (candidate_version,),
+        )
+        candidate_path = Path(cursor.fetchone()[0])
+    candidate_path.unlink()
+
+    rejected = test_client.post(
+        f"/models/{candidate_version}/promote",
+        json={"comparison_id": compared["result"]["comparison_id"]},
+    )
+    assert rejected.status_code == 409
+    assert "missing" in rejected.json()["detail"].lower()
+    assert _active_count(db_connection) == 1
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT version FROM model_versions WHERE status = 'active';")
+        assert cursor.fetchone()[0] == lifecycle_context.active_version
+        cursor.execute("SELECT COUNT(*) FROM model_activation_history;")
+        assert cursor.fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-0.1", "1.1"])
+def test_promotion_threshold_configuration_rejects_non_finite_or_out_of_range(
+    monkeypatch, value
+):
+    config = importlib.import_module("backend.core.config")
+    monkeypatch.setenv("PROMOTION_TEST_THRESHOLD", value)
+    with pytest.raises(ValueError):
+        config._probability_setting("PROMOTION_TEST_THRESHOLD", "0.5")

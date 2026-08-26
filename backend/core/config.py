@@ -1,9 +1,20 @@
 import os
+import math
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _probability_setting(name: str, default: str) -> float:
+    try:
+        value = float(os.getenv(name, default))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number between 0 and 1") from exc
+    if not math.isfinite(value) or not 0 <= value <= 1:
+        raise ValueError(f"{name} must be finite and between 0 and 1")
+    return value
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
@@ -31,6 +42,10 @@ KAGGLE_CLI_PATH = os.getenv("KAGGLE_CLI_PATH", "kaggle").strip()
 KAGGLE_POLL_INTERVAL_SECONDS = int(os.getenv("KAGGLE_POLL_INTERVAL_SECONDS", "30"))
 KAGGLE_TIMEOUT_SECONDS = int(os.getenv("KAGGLE_TIMEOUT_SECONDS", "14400"))
 KAGGLE_COMMAND_TIMEOUT_SECONDS = int(os.getenv("KAGGLE_COMMAND_TIMEOUT_SECONDS", "300"))
+LOCAL_BASE_DATASET_PATH = Path(os.getenv("LOCAL_BASE_DATASET_PATH", str(BACKEND_DIR / "base_dataset")))
+MAX_SHARED_MAP50_95_REGRESSION = _probability_setting("MAX_SHARED_MAP50_95_REGRESSION", "0.02")
+MIN_ADDED_CLASS_MAP50_95 = _probability_setting("MIN_ADDED_CLASS_MAP50_95", "0.50")
+MIN_ADDED_CLASS_PER_CLASS_MAP50_95 = _probability_setting("MIN_ADDED_CLASS_PER_CLASS_MAP50_95", "0.30")
 
 for directory in (UPLOAD_DIR, FRESHNESS_UPLOAD_DIR, OUTLINE_DIR):
     directory.mkdir(parents=True, exist_ok=True)

@@ -29,6 +29,14 @@ export default function ManualAnnotationScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
+  function applySelectedImage(selectedAsset: ImagePicker.ImagePickerAsset) {
+    setAsset(selectedAsset);
+    setUploaded(null);
+    setProducts([]);
+    resetEditor();
+    setError("");
+  }
+
   async function chooseImage() {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ["images"],
@@ -36,11 +44,32 @@ export default function ManualAnnotationScreen() {
       quality: 0.9,
     });
     if (result.canceled) return;
-    setAsset(result.assets[0]);
-    setUploaded(null);
-    setProducts([]);
-    resetEditor();
-    setError("");
+    applySelectedImage(result.assets[0]);
+  }
+
+  async function takePhoto() {
+    try {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert(
+          "Camera permission needed",
+          permission.canAskAgain
+            ? "Allow camera access to take a photo for annotation."
+            : "Camera access is disabled. Enable it in your device settings to take a photo.",
+        );
+        return;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ["images"],
+        allowsEditing: false,
+        quality: 0.9,
+      });
+      if (result.canceled) return;
+      applySelectedImage(result.assets[0]);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not open the camera.");
+    }
   }
 
   async function uploadImage() {
@@ -137,7 +166,10 @@ export default function ManualAnnotationScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>1. Choose an image</Text>
           <Text style={styles.help}>The image is stored for annotation only and is never sent through product detection.</Text>
-          <AppButton label={asset ? "Choose another image" : "Choose image"} icon="images-outline" variant="secondary" onPress={chooseImage} />
+          <View style={styles.imageSourceActions}>
+            <View style={styles.imageSourceAction}><AppButton label="Gallery" icon="images-outline" variant="secondary" onPress={chooseImage} /></View>
+            <View style={styles.imageSourceAction}><AppButton label="Take Photo" icon="camera-outline" variant="secondary" onPress={takePhoto} /></View>
+          </View>
           {asset ? <Text style={styles.selected}>{asset.fileName || "Image selected"}</Text> : null}
           {asset && !uploaded ? <AppButton label="Upload for annotation" icon="cloud-upload-outline" loading={uploading} onPress={uploadImage} /> : null}
           {uploaded ? <StatusBadge label="Ready to annotate" tone="success" /> : null}
@@ -198,6 +230,8 @@ const styles = StyleSheet.create({
   section: { gap: spacing.md },
   sectionTitle: { ...typography.section, color: colors.navy },
   help: { ...typography.body, color: colors.textMuted, lineHeight: 21 },
+  imageSourceActions: { flexDirection: "row", gap: spacing.sm },
+  imageSourceAction: { flex: 1 },
   selected: { color: colors.textSecondary, fontWeight: "700", textAlign: "center" },
   input: { minHeight: 48, borderWidth: 1, borderColor: colors.borderStrong, borderRadius: radius.lg, backgroundColor: colors.surface, color: colors.textPrimary, paddingHorizontal: spacing.md, fontSize: 16 },
   productRow: { flexDirection: "row", alignItems: "center", gap: spacing.md },

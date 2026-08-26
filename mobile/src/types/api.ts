@@ -176,6 +176,72 @@ export type ModelMetrics = {
   map50_95: number | null;
 };
 
+export type ClassComparison = {
+  active_classes: string[];
+  candidate_classes: string[];
+  shared_classes: string[];
+  added_classes: string[];
+  removed_classes: string[];
+};
+
+export type SharedClassComparison = {
+  available: boolean;
+  classes: string[];
+  class_count: number;
+  class_names: string[];
+  unavailable_classes: string[];
+  active_metrics?: ModelMetrics;
+  candidate_metrics?: ModelMetrics;
+  metric_differences?: ModelMetrics;
+  candidate_outperforms_active?: boolean;
+  note?: string;
+};
+
+export type AddedClassMetrics = {
+  available: boolean;
+  classes: string[];
+  unavailable_classes: string[];
+  aggregate?: ModelMetrics;
+  per_class: Record<string, ModelMetrics>;
+  note?: string;
+};
+
+export type PromotionReason = {
+  code: "comparison_missing" | "stale_comparison" | "candidate_lost" | "removed_classes" | "missing_shared_classes" | "shared_class_regression" | "added_class_quality" | "added_class_below_minimum" | "malformed_class_metrics";
+  message: string;
+  difference?: number;
+  maximum_regression?: number;
+  value?: number;
+  minimum?: number;
+  classes?: string[] | Record<string, number>;
+  missing_classes?: string[];
+  detail?: string;
+};
+
+export type PromotionEvaluation = {
+  policy: string;
+  eligible: boolean;
+  mode: "same_classes" | "expanded_classes" | null;
+  stale: boolean;
+  thresholds: {
+    max_shared_map50_95_regression: number;
+    min_added_class_map50_95: number;
+    min_added_class_per_class_map50_95: number;
+  };
+  metrics: {
+    active_map50_95?: number;
+    candidate_map50_95?: number;
+    active_map50?: number;
+    candidate_map50?: number;
+    shared_active_map50_95?: number;
+    shared_candidate_map50_95?: number;
+    shared_map50_95_difference?: number;
+    added_map50_95?: number;
+    added_per_class_map50_95?: Record<string, number>;
+  };
+  reasons: PromotionReason[];
+};
+
 export type LifecycleModel = ModelMetrics & {
   id: number;
   version: string;
@@ -194,20 +260,13 @@ export type ModelComparisonSummary = {
   metric_differences: ModelMetrics;
   comparison_rule: string;
   candidate_outperforms_active: boolean;
+  class_comparison: ClassComparison;
+  shared_class_comparison: SharedClassComparison;
+  added_class_metrics: AddedClassMetrics;
+  promotion_evaluation: PromotionEvaluation;
   evaluation_parameters?: {
     provider?: string;
     split?: string;
-    shared_class_comparison?: {
-      available: boolean;
-      class_count: number;
-      class_ids: number[];
-      class_names: string[];
-      active_metrics?: ModelMetrics;
-      candidate_metrics?: ModelMetrics;
-      metric_differences?: ModelMetrics;
-      candidate_outperforms_active?: boolean;
-      note?: string;
-    };
   };
 };
 
@@ -215,6 +274,7 @@ export type AIProgressResponse = {
   active_model: LifecycleModel;
   latest_candidate?: LifecycleModel | null;
   comparison?: ModelComparisonSummary | null;
+  promotion_evaluation: PromotionEvaluation;
   archived_models: LifecycleModel[];
   contributions: {
     total_approved: number;

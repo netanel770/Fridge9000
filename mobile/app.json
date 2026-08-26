@@ -40,6 +40,12 @@
         }
       ],
       "expo-font",
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Allow Fridge9000 to use your camera to take photos for manual annotations."
+        }
+      ],
       "expo-web-browser"
     ],
     "experiments": {

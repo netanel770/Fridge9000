@@ -19,6 +19,11 @@ import psycopg2
 from psycopg2.extras import Json, RealDictCursor
 from ultralytics import YOLO
 
+try:
+    from class_aware_metrics import normalized_class_names, require_class_preservation
+except ModuleNotFoundError:
+    from backend.class_aware_metrics import normalized_class_names, require_class_preservation
+
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
@@ -204,8 +209,18 @@ def validate_dataset(dataset_dir: Path, requested_version: str):
         raise ValueError("Training datasets must contain approved submissions only")
 
     config = yaml.safe_load(data_yaml.read_text(encoding="utf-8")) or {}
+    training_classes = normalized_class_names(config.get("names"), "training dataset")
     class_count = int(config.get("nc", 0))
-    if class_count <= 0 or len(manifest.get("class_mapping", [])) != class_count:
+    mapping = manifest.get("class_mapping")
+    expected_mapping = [
+        (index, name) for index, name in enumerate(training_classes)
+    ]
+    actual_mapping = [
+        (item.get("id"), item.get("name"))
+        for item in mapping
+        if isinstance(item, dict)
+    ] if isinstance(mapping, list) else []
+    if class_count != len(training_classes) or actual_mapping != expected_mapping:
         raise ValueError("data.yaml and manifest class mappings are inconsistent or empty")
     yaml_root = (data_yaml.parent / str(config.get("path", "."))).resolve()
     train_path = (yaml_root / str(config.get("train", ""))).resolve()
@@ -219,10 +234,18 @@ def validate_dataset(dataset_dir: Path, requested_version: str):
         raise ValueError("Training split contains no images")
     if not val_images:
         raise ValueError("Validation split contains no images; export at least two distinct source images")
-    train_scans = {sample["scan_id"] for sample in manifest.get("samples", []) if sample.get("split") == "train"}
-    val_scans = {sample["scan_id"] for sample in manifest.get("samples", []) if sample.get("split") == "val"}
-    if train_scans & val_scans:
-        raise ValueError("A source scan appears in both train and validation")
+    train_sources = {
+        sample.get("source_image_sha256", sample.get("scan_id"))
+        for sample in manifest.get("samples", [])
+        if sample.get("split") == "train"
+    }
+    val_sources = {
+        sample.get("source_image_sha256", sample.get("scan_id"))
+        for sample in manifest.get("samples", [])
+        if sample.get("split") == "val"
+    }
+    if None in train_sources | val_sources or train_sources & val_sources:
+        raise ValueError("A source image appears in both train and validation")
     return manifest, data_yaml
 
 
@@ -283,6 +306,16 @@ def train_candidate(args):
         model = YOLO(str(active_model))
         if model.task != "detect":
             raise ValueError(f"Starting weights must be an object-detection model, got task={model.task!r}")
+        active_classes = normalized_class_names(model.names, "active model")
+        training_config = yaml.safe_load(data_yaml.read_text(encoding="utf-8")) or {}
+        training_classes = normalized_class_names(
+            training_config.get("names"), "combined training dataset"
+        )
+        require_class_preservation(
+            active_classes, training_classes, "Combined training dataset"
+        )
+        summary["active_classes"] = active_classes
+        summary["training_classes"] = training_classes
 
         model.train(
             data=str(data_yaml),
@@ -310,6 +343,11 @@ def train_candidate(args):
         candidate = YOLO(str(candidate_path))
         if candidate.task != "detect":
             raise RuntimeError("Trained candidate is not an object-detection model")
+        candidate_classes = normalized_class_names(candidate.names, "candidate model")
+        require_class_preservation(
+            active_classes, candidate_classes, "Trained candidate"
+        )
+        summary["candidate_classes"] = candidate_classes
         metrics = candidate.val(
             data=str(data_yaml),
             split="val",

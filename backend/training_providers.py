@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import math
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import zipfile
@@ -18,18 +20,18 @@ from typing import Any, Callable
 import psycopg2
 from psycopg2.extras import Json, RealDictCursor
 
-from class_aware_metrics import build_class_aware_comparison
+from class_aware_metrics import build_class_aware_comparison, require_class_preservation
 
 try:
     from core.config import (
-        BACKEND_DIR, DATABASE_URL, KAGGLE_API_TOKEN, KAGGLE_CLI_PATH, KAGGLE_COMMAND_TIMEOUT_SECONDS,
+        BACKEND_DIR, DATABASE_URL, KAGGLE_API_TOKEN, KAGGLE_CLI_PATH, KAGGLE_COMMAND_TIMEOUT_SECONDS, LOCAL_BASE_DATASET_PATH,
         KAGGLE_DATASET_SLUG_PREFIX, KAGGLE_KERNEL_SLUG, KAGGLE_KEY,
         KAGGLE_POLL_INTERVAL_SECONDS, KAGGLE_STARTING_MODEL_VERSION, KAGGLE_STARTING_WEIGHTS_PATH,
         KAGGLE_TIMEOUT_SECONDS, KAGGLE_USERNAME,
     )
 except ModuleNotFoundError:
     from backend.core.config import (
-        BACKEND_DIR, DATABASE_URL, KAGGLE_API_TOKEN, KAGGLE_CLI_PATH, KAGGLE_COMMAND_TIMEOUT_SECONDS,
+        BACKEND_DIR, DATABASE_URL, KAGGLE_API_TOKEN, KAGGLE_CLI_PATH, KAGGLE_COMMAND_TIMEOUT_SECONDS, LOCAL_BASE_DATASET_PATH,
         KAGGLE_DATASET_SLUG_PREFIX, KAGGLE_KERNEL_SLUG, KAGGLE_KEY,
         KAGGLE_POLL_INTERVAL_SECONDS, KAGGLE_STARTING_MODEL_VERSION, KAGGLE_STARTING_WEIGHTS_PATH,
         KAGGLE_TIMEOUT_SECONDS, KAGGLE_USERNAME,
@@ -95,6 +97,9 @@ def _remote_class_aware_comparison(comparison: dict[str, Any]) -> dict[str, Any]
             {"classes": active.get("classes"), "per_class": active.get("per_class")},
             {"classes": candidate.get("classes"), "per_class": candidate.get("per_class")},
         )
+        require_class_preservation(
+            active.get("classes"), candidate.get("classes"), "Remote candidate"
+        )
     except ValueError as exc:
         raise ProviderError(f"Remote class-aware metrics are invalid: {exc}") from exc
     for field, expected_value in expected.items():
@@ -136,10 +141,68 @@ def _export(job_id: str) -> tuple[Path, dict[str, Any]]:
     return target, summary
 
 
+def _load_kaggle_dataset_builder():
+    trainer_path = BACKEND_DIR.parent / "kaggle_trainer" / "train.py"
+    if not trainer_path.is_file():
+        raise ProviderError(f"Combined-dataset builder is unavailable: {trainer_path}")
+    spec = importlib.util.spec_from_file_location("fridge9000_kaggle_dataset_builder", trainer_path)
+    if spec is None or spec.loader is None:
+        raise ProviderError("Could not load the combined-dataset builder")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _prepare_local_combined_dataset(
+    correction_dir: Path, dataset_version: str
+) -> Path:
+    base_root = LOCAL_BASE_DATASET_PATH.resolve()
+    required = (base_root / "classes.txt", base_root / "images", base_root / "labels")
+    if not required[0].is_file() or not all(path.is_dir() for path in required[1:]):
+        raise ProviderError(
+            "Local incremental training requires a real base dataset at "
+            f"{base_root} containing classes.txt, images/, and labels/. "
+            "Configure LOCAL_BASE_DATASET_PATH or use TRAINING_PROVIDER=kaggle."
+        )
+
+    builder = _load_kaggle_dataset_builder()
+    correction_archive = correction_dir.with_name(f"{correction_dir.name}-corrections")
+    if correction_archive.exists():
+        raise ProviderError(f"Correction dataset archive already exists: {correction_archive}")
+    job = SimpleNamespace(
+        dataset_version=dataset_version,
+        base_dataset_slug=f"local/{base_root.name}",
+        train_fraction=0.70,
+        val_fraction=0.15,
+        test_fraction=0.15,
+    )
+    correction_dir.rename(correction_archive)
+    try:
+        corrections = builder.validate_dataset(
+            correction_archive, job, require_evaluation=False
+        )
+        builder.build_combined_dataset(
+            base_root, correction_archive, corrections, correction_dir, job
+        )
+    except BaseException as exc:
+        if correction_dir.exists():
+            shutil.rmtree(correction_dir, ignore_errors=True)
+        correction_archive.rename(correction_dir)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise ProviderError(f"Could not build the local combined dataset: {exc}") from exc
+    return correction_dir
+
+
 def local_training(job_id: str, progress: Progress) -> dict[str, Any]:
     from train_yolo_candidate import train_candidate
     dataset_dir, export_summary = _export(job_id)
     active = _active_model()
+    progress(phase="combining_local_dataset", dataset_version=export_summary["dataset_version"])
+    dataset_dir = _prepare_local_combined_dataset(
+        dataset_dir, export_summary["dataset_version"]
+    )
     progress(phase="training_local", dataset_version=export_summary["dataset_version"])
     args = SimpleNamespace(
         dataset_dir=dataset_dir, dataset_version=export_summary["dataset_version"], starting_weights=active["resolved_path"],
@@ -309,6 +372,18 @@ def _register_remote(
     combined = manifest.get("combined_dataset") or {}
     if not combined.get("source_counts", {}).get("base") or not combined.get("source_counts", {}).get("correction"):
         raise ProviderError("Remote run did not include both base and approved correction images")
+    combined_mapping = combined.get("class_mapping")
+    combined_classes = [
+        item.get("name") for item in combined_mapping if isinstance(item, dict)
+    ] if isinstance(combined_mapping, list) else []
+    try:
+        require_class_preservation(
+            comparison.get("active_model", {}).get("classes"),
+            combined_classes,
+            "Remote combined training dataset",
+        )
+    except ValueError as exc:
+        raise ProviderError(str(exc)) from exc
     candidate_metrics = {key: _metric(comparison["candidate_model"].get(key), key) for key in METRICS}
     active_metrics = {key: _metric(comparison["active_model"].get(key), key) for key in METRICS}
     delta = {key: _metric(comparison.get("delta", {}).get(key), f"delta.{key}") for key in METRICS}

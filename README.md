@@ -89,6 +89,8 @@ The system tracks:
 
 Only one detector can be active at a time.
 
+Promotion is always explicit. A same-class candidate must outperform the active model on the stored overall comparison. A candidate that adds products may tolerate up to a small configured regression on existing classes only when its aggregate and per-product results for every new class meet the configured quality thresholds. Removing a supported class always blocks promotion.
+
 ### Inventory Management
 
 * Add or remove products using refrigerator scans.

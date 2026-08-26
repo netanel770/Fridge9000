@@ -43,6 +43,7 @@ services:
       - ./backend/dataset_exports:/app/dataset_exports
       - ./backend/candidate_models:/app/candidate_models
       - ./backend/model_comparisons:/app/model_comparisons
+      - ./backend/base_dataset:/app/base_dataset:ro
 
 volumes:
   fridge9000_pgdata:
