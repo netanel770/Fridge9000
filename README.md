@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/fridge9000-banner.png" alt="Fridge9000" width="100%">
+</p>
+
 # Fridge 9000
 
 Fridge 9000 is a smart refrigerator management system that combines **computer vision, inventory tracking, OCR, freshness analysis, and a human-in-the-loop ML pipeline** to help users understand what is in their fridge and reduce food waste.
