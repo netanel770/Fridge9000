@@ -1078,17 +1078,39 @@ async def analyze_freshness(file: UploadFile = File(...)):
     }
 
 async def door_closed_upload(file: UploadFile = File(...)):
+    extensions = {
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+    }
+    extension = extensions.get(file.content_type)
+    if not extension:
+        raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP image")
+
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded image is empty")
+
+    file_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.{extension}")
     try:
-        ext = file.filename.split(".")[-1]
-        filename = f"{uuid.uuid4()}.{ext}"
-        file_path = os.path.join(UPLOAD_DIR, filename)
-
         with open(file_path, "wb") as f:
-            f.write(await file.read())
+            f.write(contents)
 
-        return door_closed({"image_ref": file_path, "conf": 0.25})
+        result = door_closed({"image_ref": file_path, "conf": 0.25})
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail=result.get("error") or "Image inference failed",
+            )
+        return result
 
+    except HTTPException:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise
     except Exception as e:
+        if os.path.exists(file_path):
+            os.remove(file_path)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -2010,6 +2032,8 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
     included_items_map = {}
 
     for it in items:
+        if not isinstance(it, dict):
+            raise HTTPException(status_code=400, detail="Each review item must be an object")
         included = bool(it.get("included", True))
         if not included:
             continue
@@ -2075,6 +2099,48 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT id FROM scans WHERE id = %s FOR UPDATE;", (scan_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Scan not found")
+            cur.execute(
+                """
+                SELECT 1 FROM events
+                WHERE scan_id = %s AND action IN ('Added', 'Removed')
+                LIMIT 1;
+                """,
+                (scan_id,),
+            )
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="Scan has already been reviewed")
+
+            for it in items:
+                try:
+                    detection_id = int(it.get("id"))
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Each review item must identify a detection",
+                    )
+                cur.execute(
+                    """
+                    SELECT label FROM scan_detections
+                    WHERE id = %s AND scan_id = %s;
+                    """,
+                    (detection_id, scan_id),
+                )
+                detection = cur.fetchone()
+                if not detection:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Review detection does not belong to this scan",
+                    )
+                original_label = (it.get("original_label") or "").strip()
+                if original_label.casefold() != detection["label"].strip().casefold():
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Review original label does not match the detection",
+                    )
+
             for it in items:
                 orig = it.get("original_label")
                 final = (it.get("final_label") or orig or "").strip().capitalize()
