@@ -3,8 +3,6 @@ import {
   View,
   Text,
   StyleSheet,
-  Pressable,
-  ActivityIndicator,
   Alert,
 } from "react-native";
 
@@ -13,6 +11,8 @@ import * as ImagePicker from "expo-image-picker";
 import { router } from "expo-router";
 
 import { uploadReceiptPdf } from "../src/services/api";
+import { AppButton, Card, ScreenHeader } from "../src/components/ui";
+import { colors, spacing, typography } from "../src/theme";
 
 export default function ReceiptUploadScreen() {
   const [selectedFile, setSelectedFile] = useState<any>(null);
@@ -84,34 +84,17 @@ export default function ReceiptUploadScreen() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Upload Receipt</Text>
-      <Text style={styles.subtitle}>Upload a supermarket receipt PDF or image</Text>
-
-      <Pressable style={styles.secondaryButton} onPress={takePhoto}>
-        <Text style={styles.secondaryButtonText}>Take Photo</Text>
-      </Pressable>
-
-      <Pressable style={styles.secondaryButton} onPress={pickReceipt}>
-        <Text style={styles.secondaryButtonText}>
-          {selectedFile ? "Choose Another File" : "Pick Receipt"}
-        </Text>
-      </Pressable>
-
-      <Text style={styles.fileText}>
-        {selectedFile ? `Selected: ${selectedFile.name}` : "No receipt selected yet"}
-      </Text>
-
-      <Pressable
-        style={[styles.primaryButton, (!selectedFile || loading) && styles.disabledButton]}
-        onPress={uploadReceipt}
-        disabled={!selectedFile || loading}
-      >
-        {loading ? (
-          <ActivityIndicator color="#fff" />
-        ) : (
-          <Text style={styles.primaryButtonText}>Upload Receipt</Text>
-        )}
-      </Pressable>
+      <ScreenHeader title="Upload receipt" subtitle="Choose a receipt photo, image, or PDF." />
+      <Card>
+        <View style={styles.actions}>
+          <AppButton label="Take photo" icon="camera-outline" variant="secondary" onPress={takePhoto} />
+          <AppButton label={selectedFile ? "Choose another file" : "Choose receipt"} icon="document-attach-outline" variant="secondary" onPress={pickReceipt} />
+          <Text style={styles.fileText} numberOfLines={2}>
+            {selectedFile ? `Selected: ${selectedFile.name}` : "No receipt selected"}
+          </Text>
+          <AppButton label="Upload receipt" icon="cloud-upload-outline" loading={loading} disabled={!selectedFile} onPress={uploadReceipt} />
+        </View>
+      </Card>
     </View>
   );
 }
@@ -119,46 +102,14 @@ export default function ReceiptUploadScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 20,
-    gap: 16,
-    backgroundColor: "#f8fafc",
+    padding: spacing.lg,
+    gap: spacing.lg,
+    backgroundColor: colors.background,
   },
-  title: {
-    fontSize: 28,
-    fontWeight: "700",
-    color: "#111827",
-  },
-  subtitle: {
-    fontSize: 15,
-    color: "#6b7280",
-  },
+  actions: { gap: spacing.md },
   fileText: {
-    fontSize: 14,
-    color: "#374151",
-  },
-  primaryButton: {
-    backgroundColor: "#2563eb",
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: "center",
-  },
-  disabledButton: {
-    opacity: 0.5,
-  },
-  primaryButtonText: {
-    color: "#fff",
-    fontSize: 16,
-    fontWeight: "700",
-  },
-  secondaryButton: {
-    backgroundColor: "#e5e7eb",
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: "center",
-  },
-  secondaryButtonText: {
-    color: "#111827",
-    fontSize: 16,
-    fontWeight: "700",
+    ...typography.caption,
+    color: colors.textSecondary,
+    textAlign: "center",
   },
 });

@@ -1,12 +1,14 @@
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { LifecycleJobProvider } from "../src/components/LifecycleJobProvider";
 import { colors } from "../src/theme";
 
 export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <StatusBar style="dark" />
+      <LifecycleJobProvider>
+      <StatusBar hidden />
       <Stack
         screenOptions={{
           headerStyle: { backgroundColor: colors.surface },
@@ -33,6 +35,7 @@ export default function RootLayout() {
         <Stack.Screen name="expired-items" options={{ title: "Expired Products" }} />
         <Stack.Screen name="manual-confirm" options={{ title: "Confirm Update" }} />
       </Stack>
+      </LifecycleJobProvider>
     </GestureHandlerRootView>
   );
 }

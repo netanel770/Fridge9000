@@ -293,10 +293,10 @@ const styles = StyleSheet.create({
   quantityButton: { width: 48, height: 48, borderRadius: 24, backgroundColor: colors.primary, alignItems: "center", justifyContent: "center" },
   quantityValueBox: { minWidth: 82, alignItems: "center" },
   quantityValue: { fontSize: 30, fontWeight: "800", color: colors.navy },
-  quantityCaption: { color: colors.textMuted, fontSize: 12 },
+  quantityCaption: { color: colors.textMuted, fontSize: 13 },
   remainingPreview: { color: colors.textSecondary, textAlign: "center", fontWeight: "600" },
   modalActions: { gap: spacing.sm, marginTop: spacing.sm },
   confidence: { fontSize: 13, color: colors.textMuted },
   safetyNote: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: spacing.xs, paddingHorizontal: spacing.md, marginTop: spacing.sm },
-  safetyText: { color: colors.textMuted, fontSize: 12, flexShrink: 1 },
+  safetyText: { color: colors.textMuted, fontSize: 13, lineHeight: 18, flexShrink: 1 },
 });

@@ -12,6 +12,7 @@ type EditorResponders = { draw: Responder; move: Responder; handles: Record<BoxC
 
 export function BoundingBoxEditor({ imageUri, imageWidth, imageHeight, box, label, onBoxChange }: Props) {
   const [viewSize, setViewSize] = useState({ width: 0, height: 0 });
+  const [imageStatus, setImageStatus] = useState("WAITING");
   const [activeControl, setActiveControl] = useState<BoxCorner | "move" | "draw" | null>(null);
   const latest = useRef({ box, imageWidth, imageHeight, viewSize, onBoxChange });
   const snapshot = useRef<Snapshot>({ box: null, scale: 1 });
@@ -115,7 +116,17 @@ export function BoundingBoxEditor({ imageUri, imageWidth, imageHeight, box, labe
 
   const editor = (
       <View collapsable={false} {...(!box ? editorResponders.draw.panHandlers : {})} style={styles.container} onLayout={(event) => setViewSize(event.nativeEvent.layout)}>
-        <Image source={{ uri: imageUri }} style={[StyleSheet.absoluteFillObject, styles.image]} resizeMode="contain" />
+        <Image
+          source={{ uri: imageUri }}
+          style={[StyleSheet.absoluteFillObject, styles.image]}
+          resizeMode="contain"
+          onLoadStart={() => setImageStatus("LOADING")}
+          onLoad={() => setImageStatus("LOADED")}
+          onError={(event) => setImageStatus(`ERROR: ${event.nativeEvent.error || "unknown image error"}`)}
+        />
+        <View pointerEvents="none" style={styles.debugBadge}>
+          <Text style={styles.debugText}>{imageStatus}</Text>
+        </View>
         {!box ? <View pointerEvents="none" style={styles.drawPrompt}><Text style={styles.drawPromptText}>Tap or drag on the product to create a box</Text></View> : null}
         <View pointerEvents="box-none" style={styles.overlayLayer}>
           {projected ? <View collapsable={false} style={[styles.box, projected, activeControl && styles.activeBox]}>
@@ -137,16 +148,28 @@ export function BoundingBoxEditor({ imageUri, imageWidth, imageHeight, box, labe
 
 const HANDLE_TOUCH_SIZE = 48;
 const styles = StyleSheet.create({
-  container: { width: "100%", height: 430, overflow: "hidden", backgroundColor: colors.surfaceMuted, borderRadius: radius.lg },
+  container: { position: "relative", width: "100%", height: 430, overflow: "hidden", backgroundColor: colors.surfaceMuted, borderRadius: radius.lg },
   image: { zIndex: 0 },
-  overlayLayer: { ...StyleSheet.absoluteFillObject, zIndex: 10, elevation: 10 },
-  box: { position: "absolute", zIndex: 11, elevation: 11, borderWidth: 4, borderColor: "#f59e0b", backgroundColor: "rgba(245, 158, 11, 0.10)" },
+  overlayLayer: { ...StyleSheet.absoluteFillObject, zIndex: 10 },
+  box: { position: "absolute", zIndex: 11, borderWidth: 4, borderColor: "#f59e0b", backgroundColor: "rgba(245, 158, 11, 0.10)" },
   activeBox: { borderColor: "#fbbf24", borderWidth: 5, backgroundColor: "rgba(245, 158, 11, 0.18)" },
-  label: { position: "absolute", zIndex: 14, elevation: 14, left: -4, top: -29, maxWidth: 180, backgroundColor: "#f59e0b", paddingHorizontal: 8, paddingVertical: 5, borderRadius: 5 },
-  labelText: { color: colors.primaryText, fontSize: 11, fontWeight: "800" },
-  drawPrompt: { position: "absolute", zIndex: 20, elevation: 20, alignSelf: "center", top: 16, backgroundColor: "rgba(15, 23, 42, 0.82)", borderRadius: radius.pill, paddingHorizontal: 12, paddingVertical: 7 },
-  drawPromptText: { color: colors.primaryText, fontSize: 12, fontWeight: "700" },
-  handle: { position: "absolute", zIndex: 15, elevation: 15, width: HANDLE_TOUCH_SIZE, height: HANDLE_TOUCH_SIZE, borderRadius: HANDLE_TOUCH_SIZE / 2, alignItems: "center", justifyContent: "center" },
+  label: { position: "absolute", zIndex: 14, left: -4, top: -29, maxWidth: 180, backgroundColor: "#f59e0b", paddingHorizontal: 8, paddingVertical: 5, borderRadius: 5 },
+  labelText: { color: colors.primaryText, fontSize: 12, fontWeight: "800" },
+  drawPrompt: { position: "absolute", zIndex: 20, alignSelf: "center", top: 16, backgroundColor: "rgba(15, 23, 42, 0.82)", borderRadius: radius.pill, paddingHorizontal: 12, paddingVertical: 7 },
+  drawPromptText: { color: colors.primaryText, fontSize: 13, fontWeight: "700" },
+  handle: { position: "absolute", zIndex: 15, width: HANDLE_TOUCH_SIZE, height: HANDLE_TOUCH_SIZE, borderRadius: HANDLE_TOUCH_SIZE / 2, alignItems: "center", justifyContent: "center" },
   handleDot: { width: 22, height: 22, borderRadius: 11, backgroundColor: colors.surface, borderWidth: 4, borderColor: "#f59e0b" },
   activeHandleDot: { width: 26, height: 26, borderRadius: 13, backgroundColor: colors.amber, borderColor: colors.surface },
+  debugBadge: {
+    position: "absolute",
+    left: 10,
+    bottom: 10,
+    zIndex: 100,
+    maxWidth: "95%",
+    backgroundColor: "rgba(0, 0, 0, 0.82)",
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  debugText: { color: "#ffffff", fontSize: 12, fontWeight: "800" },
 });

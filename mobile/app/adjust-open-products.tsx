@@ -15,6 +15,8 @@ import {
 import { getInventory, getInventoryBatches } from "../src/services/api";
 import { API_BASE_URL } from "../src/services/config";
 import type { InventoryBatchItem, InventoryItem } from "../src/types/api";
+import { EmptyState, ScreenHeader } from "../src/components/ui";
+import { colors, radius, spacing } from "../src/theme";
 
 function ProductThumbnail({ itemId }: { itemId: number }) {
   const [available, setAvailable] = useState(true);
@@ -74,12 +76,12 @@ export default function AdjustOpenProductsScreen() {
   return (
     <View style={styles.screen}>
       <View style={styles.header}>
-        <Text style={styles.title}>Adjust Open Products</Text>
-        <Text style={styles.subtitle}>Choose a product, then select its expiry batch.</Text>
+        <ScreenHeader title="Adjust open products" subtitle="Choose a product and expiry batch." />
         <TextInput
           value={search}
           onChangeText={setSearch}
           placeholder="Search products"
+          placeholderTextColor={colors.textMuted}
           style={styles.search}
         />
       </View>
@@ -88,12 +90,17 @@ export default function AdjustOpenProductsScreen() {
         data={visibleItems}
         keyExtractor={(item) => String(item.id)}
         contentContainerStyle={styles.list}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        automaticallyAdjustKeyboardInsets
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadData(true)} />}
         renderItem={({ item }) => {
           const itemBatches = batches.filter((batch) => batch.item_id === item.id);
           const openBatches = itemBatches.filter((batch) => batch.open_unit_remaining_percent != null);
           return (
             <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Adjust ${item.name}`}
               style={styles.card}
               onPress={() => router.push({
                 pathname: "/adjust-open-product",
@@ -114,29 +121,26 @@ export default function AdjustOpenProductsScreen() {
             </Pressable>
           );
         }}
-        ListEmptyComponent={<Text style={styles.empty}>No products found.</Text>}
+        ListEmptyComponent={<EmptyState icon="search-outline" title="No products found" message="Try a different product name." />}
       />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#f8fafc" },
-  header: { padding: 16, paddingBottom: 8 },
-  title: { fontSize: 26, fontWeight: "700", color: "#111827" },
-  subtitle: { color: "#6b7280", marginTop: 5 },
-  search: { height: 46, borderWidth: 1, borderColor: "#d1d5db", borderRadius: 12, backgroundColor: "#fff", paddingHorizontal: 12, marginTop: 14 },
-  list: { padding: 16, paddingTop: 8, gap: 10, paddingBottom: 36 },
-  card: { backgroundColor: "#fff", borderRadius: 14, padding: 12, borderWidth: 1, borderColor: "#e5e7eb", flexDirection: "row", alignItems: "center", gap: 12 },
-  thumbnailBox: { width: 64, height: 64, borderRadius: 12, backgroundColor: "#f3f4f6", overflow: "hidden" },
+  screen: { flex: 1, backgroundColor: colors.background },
+  header: { padding: spacing.lg, paddingBottom: spacing.sm },
+  search: { height: 48, borderWidth: 1, borderColor: colors.borderStrong, borderRadius: radius.lg, backgroundColor: colors.surface, color: colors.textPrimary, paddingHorizontal: spacing.md, fontSize: 16, marginTop: spacing.sm },
+  list: { padding: spacing.lg, paddingTop: spacing.sm, gap: spacing.sm, paddingBottom: 44 },
+  card: { backgroundColor: colors.surface, borderRadius: radius.xl, padding: spacing.md, borderWidth: 1, borderColor: colors.border, flexDirection: "row", alignItems: "center", gap: spacing.md },
+  thumbnailBox: { width: 64, height: 64, borderRadius: radius.lg, backgroundColor: colors.surfaceMuted, overflow: "hidden" },
   thumbnail: { width: "100%", height: "100%" },
-  thumbnailFallback: { color: "#9ca3af", fontSize: 26, textAlign: "center", marginTop: 16 },
-  cardContent: { flex: 1 },
-  name: { color: "#111827", fontWeight: "700", fontSize: 17 },
-  meta: { color: "#6b7280", marginTop: 4 },
+  thumbnailFallback: { color: colors.textMuted, fontSize: 26, textAlign: "center", marginTop: 16 },
+  cardContent: { flex: 1, minWidth: 0 },
+  name: { color: colors.navy, fontWeight: "700", fontSize: 17, flexShrink: 1 },
+  meta: { color: colors.textMuted, marginTop: 4, flexShrink: 1 },
   openStatus: { color: "#047857", fontWeight: "600", marginTop: 5, fontSize: 13 },
   closedStatus: { color: "#6b7280", marginTop: 5, fontSize: 13 },
-  arrow: { color: "#2563eb", fontSize: 22, fontWeight: "700" },
+  arrow: { color: colors.primary, fontSize: 22, fontWeight: "700" },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
-  empty: { textAlign: "center", color: "#6b7280", marginTop: 30 },
 });

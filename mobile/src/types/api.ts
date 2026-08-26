@@ -85,6 +85,8 @@ export type ReviewItem = {
 export type UploadScanResponse = {
   ok: boolean;
   scan_id?: number;
+  image_width?: number;
+  image_height?: number;
   prev_scan_id?: number | null;
   added?: string[];
   removed?: string[];

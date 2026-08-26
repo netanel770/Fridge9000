@@ -18,9 +18,11 @@ import { router, useLocalSearchParams } from "expo-router";
 
 import {
   getScanDetections,
+  getAllInventory,
   getInventoryBatches,
   submitReview,
 } from "../src/services/api";
+import { ProductLabelInput } from "../src/components/ProductLabelInput";
 
 import { API_BASE_URL } from "../src/services/config";
 
@@ -72,6 +74,7 @@ export default function ReviewScreen() {
   const isReceiptReview = source === "receipt";
   const [items, setItems] = useState<ReviewItem[]>([]);
   const [inventoryBatches, setInventoryBatches] = useState<InventoryBatchItem[]>([]);
+  const [labelSuggestions, setLabelSuggestions] = useState<string[]>([]);
   const [openExpiryPicker, setOpenExpiryPicker] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -87,12 +90,14 @@ export default function ReviewScreen() {
         return;
       }
 
-      const [detections, batches] = await Promise.all([
+      const [detections, batches, inventory] = await Promise.all([
         getScanDetections(scanId),
         mode === "Removed" ? getInventoryBatches() : Promise.resolve([]),
+        getAllInventory(),
       ]);
 
       setInventoryBatches(batches);
+      setLabelSuggestions(inventory.map((item) => item.name));
 
       const removalAvailability = new Map<string, { key: string; date: string | null; remaining: number }[]>();
       if (mode === "Removed") {
@@ -324,7 +329,7 @@ export default function ReviewScreen() {
         ListHeaderComponent={isReceiptReview ? (
           <View style={styles.reviewHeader}>
             <Text style={styles.reviewTitle}>Receipt review</Text>
-            <Text style={styles.reviewSubtitle}>Matching products are combined. Confirm the quantity before submitting.</Text>
+            <Text style={styles.reviewSubtitle}>Confirm each product and quantity before submitting.</Text>
           </View>
         ) : null}
         renderItem={({ item, index }) => (
@@ -379,14 +384,12 @@ export default function ReviewScreen() {
             )}
 
             <Text style={styles.label}>Final label</Text>
-            <TextInput
+            <ProductLabelInput
               value={item.final_label}
               onChangeText={(text) => updateItem(index, "final_label", text)}
-              style={[
-                styles.input,
-                item.included ? styles.disabledInput : styles.enabledInput,
-              ]}
-              editable={!item.included}
+              suggestions={labelSuggestions}
+              disabled={item.included}
+              accessibilityLabel={`Final product label for ${item.original_label}`}
             />
 
             <Text style={styles.label}>
@@ -506,7 +509,7 @@ const styles = StyleSheet.create({
     color: "#1e3a8a",
   },
   reviewSubtitle: {
-    fontSize: 13,
+    fontSize: 14,
     color: "#1e40af",
     lineHeight: 18,
     marginTop: 4,
@@ -594,6 +597,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     backgroundColor: "#fff",
+    color: "#111827",
+    fontSize: 16,
     marginBottom: 12,
   },
   disabledInput: {
@@ -641,10 +646,13 @@ const styles = StyleSheet.create({
     borderBottomColor: "#e5e7eb",
     flexDirection: "row",
     justifyContent: "space-between",
+    gap: 10,
   },
   expiryOptionDate: {
     color: "#111827",
     fontWeight: "600",
+    flex: 1,
+    flexShrink: 1,
   },
   expiryOptionQuantity: {
     color: "#6b7280",
@@ -658,7 +666,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
   },
-  excludedHint: { color: "#64748b", fontSize: 12, lineHeight: 17, maxWidth: 250 },
+  excludedHint: { color: "#64748b", fontSize: 13, lineHeight: 18, maxWidth: 250, flexShrink: 1 },
   itemTeachButton: { minHeight: 46, borderRadius: 11, backgroundColor: "#eff6ff", borderWidth: 1, borderColor: "#93c5fd", alignItems: "center", justifyContent: "center", marginTop: 12, paddingHorizontal: 14 },
   itemTeachButtonText: { color: "#1d4ed8", fontSize: 14, fontWeight: "800" },
   submitButton: {

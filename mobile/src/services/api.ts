@@ -263,6 +263,11 @@ export async function getRecentScans(limit = 10): Promise<RecentScan[]> {
   return handleJsonResponse<RecentScan[]>(res);
 }
 
+export async function getScan(scanId: number): Promise<RecentScan> {
+  const res = await fetch(`${API_BASE_URL}/scans/${encodeURIComponent(scanId)}`);
+  return handleJsonResponse<RecentScan>(res);
+}
+
 export function getScanImageUrl(scanId: number) {
   return `${API_BASE_URL}/scans/${scanId}/image`;
 }

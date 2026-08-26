@@ -1,12 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { router } from "expo-router";
 import * as ImagePicker from "expo-image-picker";
-import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 
 import { BoundingBoxEditor } from "../src/components/BoundingBoxEditor";
+import { ProductLabelInput } from "../src/components/ProductLabelInput";
 import { AppButton, Card, ScreenHeader, StatusBadge } from "../src/components/ui";
-import { createAnnotationSubmission, uploadManualAnnotationImage } from "../src/services/api";
+import { createAnnotationSubmission, getAllInventory, uploadManualAnnotationImage } from "../src/services/api";
 import type { ManualAnnotationImageUpload } from "../src/types/api";
 import { getMinimumAnnotationBoxSize } from "../src/utils/imageCoordinates";
 import type { ImageBoundingBox } from "../src/utils/imageCoordinates";
@@ -28,6 +29,13 @@ export default function ManualAnnotationScreen() {
   const [uploading, setUploading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [labelSuggestions, setLabelSuggestions] = useState<string[]>([]);
+
+  useEffect(() => {
+    getAllInventory()
+      .then((items) => setLabelSuggestions(items.map((item) => item.name)))
+      .catch(() => setLabelSuggestions([]));
+  }, []);
 
   function applySelectedImage(selectedAsset: ImagePicker.ImagePickerAsset) {
     setAsset(selectedAsset);
@@ -155,17 +163,18 @@ export default function ManualAnnotationScreen() {
   }
 
   return (
-    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
+    <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={Platform.OS === "ios" ? 72 : 0}>
+    <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
       <ScreenHeader
         eyebrow="Teach Fridge 9000"
         title="Annotate a new image"
-        subtitle="Upload an image and label products yourself. No AI scan required."
+        subtitle="Choose an image, draw boxes, and label each product."
       />
 
       <Card>
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>1. Choose an image</Text>
-          <Text style={styles.help}>The image is stored for annotation only and is never sent through product detection.</Text>
+          <Text style={styles.help}>This image is used only for your annotation.</Text>
           <View style={styles.imageSourceActions}>
             <View style={styles.imageSourceAction}><AppButton label="Gallery" icon="images-outline" variant="secondary" onPress={chooseImage} /></View>
             <View style={styles.imageSourceAction}><AppButton label="Take Photo" icon="camera-outline" variant="secondary" onPress={takePhoto} /></View>
@@ -180,12 +189,11 @@ export default function ManualAnnotationScreen() {
         <Card>
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>2. Label a product</Text>
-            <TextInput
+            <ProductLabelInput
               value={label}
               onChangeText={setLabel}
+              suggestions={labelSuggestions}
               placeholder="Product label"
-              autoCapitalize="words"
-              style={styles.input}
             />
             <BoundingBoxEditor
               imageUri={asset.uri}
@@ -211,8 +219,8 @@ export default function ManualAnnotationScreen() {
                   <Text style={styles.productLabel}>{product.label}</Text>
                   <Text style={styles.coordinates}>{Math.round(product.box.x1)}, {Math.round(product.box.y1)} → {Math.round(product.box.x2)}, {Math.round(product.box.y2)}</Text>
                 </View>
-                <Pressable accessibilityLabel={`Edit ${product.label}`} onPress={() => editProduct(product)} hitSlop={8}><Ionicons name="pencil" size={21} color={colors.primary} /></Pressable>
-                <Pressable accessibilityLabel={`Remove ${product.label}`} onPress={() => removeProduct(product.id)} hitSlop={8}><Ionicons name="trash-outline" size={21} color={colors.danger} /></Pressable>
+                <Pressable accessibilityRole="button" accessibilityLabel={`Edit ${product.label}`} onPress={() => editProduct(product)} hitSlop={12}><Ionicons name="pencil" size={21} color={colors.primary} /></Pressable>
+                <Pressable accessibilityRole="button" accessibilityLabel={`Remove ${product.label}`} onPress={() => removeProduct(product.id)} hitSlop={12}><Ionicons name="trash-outline" size={21} color={colors.danger} /></Pressable>
               </View>
             </Card>
           ))}
@@ -222,10 +230,12 @@ export default function ManualAnnotationScreen() {
 
       {error ? <View style={styles.error}><Text style={styles.errorText}>{error}</Text></View> : null}
     </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
+  screen: { flex: 1, backgroundColor: colors.background },
   container: { padding: spacing.lg, paddingBottom: 48, gap: spacing.lg, backgroundColor: colors.background },
   section: { gap: spacing.md },
   sectionTitle: { ...typography.section, color: colors.navy },
@@ -233,13 +243,12 @@ const styles = StyleSheet.create({
   imageSourceActions: { flexDirection: "row", gap: spacing.sm },
   imageSourceAction: { flex: 1 },
   selected: { color: colors.textSecondary, fontWeight: "700", textAlign: "center" },
-  input: { minHeight: 48, borderWidth: 1, borderColor: colors.borderStrong, borderRadius: radius.lg, backgroundColor: colors.surface, color: colors.textPrimary, paddingHorizontal: spacing.md, fontSize: 16 },
   productRow: { flexDirection: "row", alignItems: "center", gap: spacing.md },
   productNumber: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: colors.primarySoft },
   productNumberText: { color: colors.primary, fontWeight: "800" },
   productCopy: { flex: 1, gap: 3 },
   productLabel: { color: colors.navy, fontSize: 16, fontWeight: "800" },
-  coordinates: { color: colors.textMuted, fontSize: 12 },
+  coordinates: { color: colors.textMuted, fontSize: 13, lineHeight: 18 },
   error: { padding: spacing.md, borderRadius: radius.lg, backgroundColor: colors.dangerBg },
   errorText: { color: colors.danger, fontWeight: "700", textAlign: "center" },
 });

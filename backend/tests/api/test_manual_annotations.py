@@ -67,14 +67,17 @@ def test_annotation_image_upload_never_invokes_detector(
 
     stored_image = Path(image_ref)
     assert stored_image.parent == Path(test_environment["UPLOAD_DIR"])
-    assert stored_image.read_bytes() == contents
+    original_pixels = cv2.imdecode(np.frombuffer(contents, dtype=np.uint8), cv2.IMREAD_COLOR)
+    stored_pixels = cv2.imread(str(stored_image), cv2.IMREAD_COLOR)
+    assert np.array_equal(stored_pixels, original_pixels)
     assert (width, height, source) == (120, 80, "manual_annotation")
     assert detection_count == 0
 
     image_response = test_client.get(uploaded["image_url"])
     assert image_response.status_code == 200
     assert image_response.headers["content-type"] == "image/png"
-    assert image_response.content == contents
+    served_pixels = cv2.imdecode(np.frombuffer(image_response.content, dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert np.array_equal(served_pixels, original_pixels)
 
 
 def test_manual_adds_use_normal_moderation_and_training_provenance(

@@ -79,5 +79,5 @@ const styles = StyleSheet.create({
   highlightedBox: { borderColor: colors.amber, borderWidth: 3 },
   label: { position: "absolute", top: 0, left: 0, maxWidth: "100%", backgroundColor: colors.primary, paddingHorizontal: 5, paddingVertical: 2 },
   highlightedLabel: { backgroundColor: colors.amber },
-  labelText: { color: colors.primaryText, fontSize: 10, fontWeight: "800" },
+  labelText: { color: colors.primaryText, fontSize: 12, fontWeight: "800" },
 });

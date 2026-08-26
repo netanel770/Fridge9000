@@ -16,8 +16,10 @@ import pytesseract
 from pdf2image import convert_from_path
 import re
 import logging
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from PIL import Image, ImageOps, UnidentifiedImageError
 try:
     from core.config import BACKEND_DIR, DATABASE_URL, FRESHNESS_MAX_UPLOAD_BYTES, FRESHNESS_MODEL_PATH, FRESHNESS_UPLOAD_DIR, MAX_SHARED_MAP50_95_REGRESSION, MIN_ADDED_CLASS_MAP50_95, MIN_ADDED_CLASS_PER_CLASS_MAP50_95, OUTLINE_DIR, RULES_PATH, SEGMENTATION_MODEL_PATH, UPLOAD_DIR
     from db.connection import get_conn
@@ -47,6 +49,36 @@ _ACTIVE_OUTLINE_JOB_ID = None
 _LIFECYCLE_JOB_LOCK = threading.Lock()
 _LIFECYCLE_JOBS = {}
 _ACTIVE_LIFECYCLE_JOB_ID = None
+
+
+def _normalize_uploaded_image(contents: bytes, content_type: str):
+    formats = {
+        "image/jpeg": ("JPEG", "jpg"),
+        "image/png": ("PNG", "png"),
+        "image/webp": ("WEBP", "webp"),
+    }
+    image_format = formats.get(content_type)
+    if not image_format:
+        raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP image")
+    try:
+        with Image.open(BytesIO(contents)) as source:
+            normalized = ImageOps.exif_transpose(source)
+            normalized.load()
+            if image_format[0] == "JPEG":
+                normalized = normalized.convert("RGB")
+            elif normalized.mode not in ("RGB", "RGBA"):
+                normalized = normalized.convert("RGBA" if "transparency" in source.info else "RGB")
+            output = BytesIO()
+            save_options = {"quality": 95} if image_format[0] in ("JPEG", "WEBP") else {}
+            normalized.save(output, format=image_format[0], **save_options)
+            width, height = normalized.size
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Uploaded image could not be decoded") from exc
+    if width <= 0 or height <= 0:
+        raise HTTPException(status_code=400, detail="Uploaded image has invalid dimensions")
+    return output.getvalue(), image_format[1], width, height
+
+
 def load_rules():
     global _RULES_CACHE
     if _RULES_CACHE is None:
@@ -1125,29 +1157,28 @@ async def analyze_freshness(file: UploadFile = File(...)):
     }
 
 async def door_closed_upload(file: UploadFile = File(...)):
-    extensions = {
-        "image/jpeg": "jpg",
-        "image/png": "png",
-        "image/webp": "webp",
-    }
-    extension = extensions.get(file.content_type)
-    if not extension:
-        raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP image")
-
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Uploaded image is empty")
+    normalized_contents, extension, image_width, image_height = _normalize_uploaded_image(
+        contents, file.content_type or ""
+    )
 
     file_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.{extension}")
     try:
         with open(file_path, "wb") as f:
-            f.write(contents)
+            f.write(normalized_contents)
 
         result = door_closed({"image_ref": file_path, "conf": 0.25})
         if not result.get("ok"):
             raise HTTPException(
                 status_code=400,
                 detail=result.get("error") or "Image inference failed",
+            )
+        if result.get("image_width") != image_width or result.get("image_height") != image_height:
+            raise HTTPException(
+                status_code=500,
+                detail="Detector image dimensions do not match the canonical uploaded image",
             )
         return result
 
@@ -1472,27 +1503,16 @@ ANNOTATION_STATUSES = {"pending", "approved", "rejected", "used"}
 
 
 async def upload_annotation_image(file: UploadFile = File(...)):
-    extensions = {
-        "image/jpeg": "jpg",
-        "image/png": "png",
-        "image/webp": "webp",
-    }
-    extension = extensions.get(file.content_type)
-    if not extension:
-        raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP image")
-
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Uploaded image is empty")
-    image = cv2.imdecode(np.frombuffer(contents, dtype=np.uint8), cv2.IMREAD_COLOR)
-    if image is None:
-        raise HTTPException(status_code=400, detail="Uploaded image could not be decoded")
-
-    image_height, image_width = image.shape[:2]
+    normalized_contents, extension, image_width, image_height = _normalize_uploaded_image(
+        contents, file.content_type or ""
+    )
     file_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.{extension}")
     try:
         with open(file_path, "wb") as destination:
-            destination.write(contents)
+            destination.write(normalized_contents)
         with get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
@@ -2719,6 +2739,28 @@ def recent_scans(limit: int = 10):
             return cur.fetchall()
 
 
+def get_scan(scan_id: int):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT s.id, s.created_at, s.image_width, s.image_height,
+                       COUNT(d.id) AS detection_count
+                FROM scans s
+                LEFT JOIN scan_detections d ON d.scan_id = s.id
+                WHERE s.id = %s
+                  AND s.image_width IS NOT NULL
+                  AND s.image_height IS NOT NULL
+                GROUP BY s.id;
+                """,
+                (scan_id,),
+            )
+            scan = cur.fetchone()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return scan
+
+
 def get_scan_image(scan_id: int):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -2869,6 +2911,8 @@ def door_closed(payload: Dict[str, Any]):
         "scan_id": scan_id,
         "detections_count": len(filtered_dets),
         "detections": filtered_dets,
+        "image_width": infer_res["image_width"],
+        "image_height": infer_res["image_height"],
     }
 
 async def update_inventory_by_image(

@@ -264,7 +264,7 @@ export default function ManualInventoryScreen() {
           <View style={styles.adjustOpenText}>
             <Text style={styles.adjustOpenTitle}>Adjust Open Products</Text>
             <Text style={styles.adjustOpenSubtitle}>
-              Creates clear outlines from your scans, then lets you track how much remains. Preparation may take a moment.
+              Track how much remains in products you have opened.
             </Text>
           </View>
           <Text style={styles.adjustOpenArrow}>{">"}</Text>
@@ -330,7 +330,7 @@ export default function ManualInventoryScreen() {
                       style={[styles.inventoryRow, isSelected && styles.selectedProductRow]}
                       onPress={() => toggleRemovalItem(item)}
                     >
-                      <View>
+                      <View style={styles.inventoryCopy}>
                         <Text style={styles.itemName}>{item.name}</Text>
                         <Text style={styles.itemMeta}>{item.category}</Text>
                       </View>
@@ -420,7 +420,7 @@ const styles = StyleSheet.create({
   adjustOpenCard: { backgroundColor: "#ecfdf5", borderWidth: 1, borderColor: "#6ee7b7", borderRadius: 14, padding: 14, flexDirection: "row", alignItems: "center", gap: 10 },
   adjustOpenText: { flex: 1 },
   adjustOpenTitle: { color: "#047857", fontSize: 17, fontWeight: "700" },
-  adjustOpenSubtitle: { color: "#4b5563", marginTop: 4, fontSize: 13 },
+  adjustOpenSubtitle: { color: "#4b5563", marginTop: 4, fontSize: 14, lineHeight: 19 },
   adjustOpenArrow: { color: "#047857", fontSize: 22, fontWeight: "700" },
   preparationBackdrop: { flex: 1, backgroundColor: "rgba(15, 23, 42, 0.72)", alignItems: "center", justifyContent: "center", padding: 24 },
   preparationCard: { width: "100%", maxWidth: 430, backgroundColor: "#fff", borderRadius: 18, padding: 20, alignItems: "center" },
@@ -431,8 +431,8 @@ const styles = StyleSheet.create({
   progressFill: { height: 12, backgroundColor: "#2563eb" },
   progressText: { color: "#374151", fontWeight: "700", marginTop: 8 },
   progressStats: { width: "100%", flexDirection: "row", justifyContent: "space-between", gap: 6, marginTop: 12 },
-  statText: { color: "#6b7280", fontSize: 12, fontWeight: "600" },
-  preparationHint: { color: "#6b7280", fontSize: 12, textAlign: "center", lineHeight: 17, marginTop: 14 },
+  statText: { color: "#6b7280", fontSize: 13, fontWeight: "600" },
+  preparationHint: { color: "#6b7280", fontSize: 13, textAlign: "center", lineHeight: 18, marginTop: 14 },
   modeBox: { backgroundColor: "#fff", borderRadius: 14, padding: 14, gap: 14, borderWidth: 1, borderColor: "#e5e7eb" },
   modeRow: { flexDirection: "row", alignItems: "center", gap: 10 },
   radioOuter: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: "#2563eb", alignItems: "center", justifyContent: "center" },
@@ -447,6 +447,7 @@ const styles = StyleSheet.create({
   listBox: { gap: 8 },
   inventoryItemGroup: { gap: 0 },
   inventoryRow: { backgroundColor: "#fff", padding: 12, borderRadius: 10, borderWidth: 1, borderColor: "#e5e7eb", flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  inventoryCopy: { flex: 1, minWidth: 0, paddingRight: 8 },
   selectedProductRow: { borderColor: "#2563eb", borderBottomLeftRadius: 0, borderBottomRightRadius: 0, backgroundColor: "#eff6ff" },
   expiryOptionsBox: { backgroundColor: "#f8fafc", borderWidth: 1, borderTopWidth: 0, borderColor: "#bfdbfe", borderBottomLeftRadius: 10, borderBottomRightRadius: 10, padding: 10, gap: 8 },
   expiryOptionsTitle: { color: "#374151", fontWeight: "700", fontSize: 13, marginBottom: 2 },

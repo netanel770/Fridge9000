@@ -42,7 +42,7 @@ export function AppButton({ label, icon, onPress, variant = "primary", disabled 
         ? styles.dangerText
         : styles.ghostText;
   return (
-    <Pressable accessibilityRole="button" disabled={disabled || loading} onPress={onPress} style={({ pressed }) => [
+    <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled: disabled || loading, busy: loading }} disabled={disabled || loading} onPress={onPress} style={({ pressed }) => [
       styles.button, buttonVariantStyle, (pressed || disabled) && styles.buttonPressed,
     ]}>
       {loading ? <ActivityIndicator color={variant === "primary" || variant === "danger" ? colors.primaryText : colors.primary} /> : icon ? <Ionicons name={icon} size={19} color={variant === "primary" || variant === "danger" ? colors.primaryText : variant === "ghost" ? colors.textSecondary : colors.primary} /> : null}
@@ -86,10 +86,10 @@ const styles = StyleSheet.create({
   dangerButton: { backgroundColor: colors.danger, borderColor: colors.danger },
   ghostButton: { backgroundColor: "transparent", borderColor: colors.border },
   buttonPressed: { opacity: 0.72, transform: [{ scale: 0.99 }] },
-  buttonText: { ...typography.button },
+  buttonText: { ...typography.button, textAlign: "center", flexShrink: 1 },
   primaryText: { color: colors.primaryText }, secondaryText: { color: colors.primary }, dangerText: { color: colors.primaryText }, ghostText: { color: colors.textSecondary },
-  badge: { alignSelf: "flex-start", paddingHorizontal: 9, paddingVertical: 5, borderRadius: radius.pill },
-  badgeText: { ...typography.badge },
+  badge: { alignSelf: "flex-start", maxWidth: "100%", paddingHorizontal: 9, paddingVertical: 5, borderRadius: radius.pill },
+  badgeText: { ...typography.badge, flexShrink: 1 },
   infoBadge: { backgroundColor: colors.infoBg }, infoBadgeText: { color: colors.infoFg },
   successBadge: { backgroundColor: colors.successBg }, successBadgeText: { color: colors.successFg },
   warningBadge: { backgroundColor: colors.warningBg }, warningBadgeText: { color: colors.warningFg },

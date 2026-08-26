@@ -122,25 +122,98 @@ def _metric(value: Any, name: str) -> float:
         raise ProviderError(f"Remote metric {name} is not finite")
     return number
 
+def _remote_value_matches(remote: Any, expected: Any) -> bool:
+    """Compare remote derived data strictly, except for harmless float rounding."""
+
+    # Booleans must remain booleans and match exactly.
+    if isinstance(expected, bool):
+        return isinstance(remote, bool) and remote == expected
+
+    # Only expected floating-point metric values receive tolerance.
+    # Integers such as class_count remain strict.
+    if isinstance(expected, float):
+        if isinstance(remote, bool) or not isinstance(remote, (int, float)):
+            return False
+
+        remote_number = float(remote)
+        expected_number = float(expected)
+
+        if not math.isfinite(remote_number) or not math.isfinite(expected_number):
+            return False
+
+        return math.isclose(
+            remote_number,
+            expected_number,
+            rel_tol=1e-9,
+            abs_tol=1e-12,
+        )
+
+    # Dictionary structure and keys must match exactly.
+    if isinstance(expected, dict):
+        if not isinstance(remote, dict):
+            return False
+
+        if remote.keys() != expected.keys():
+            return False
+
+        return all(
+            _remote_value_matches(remote[key], expected[key])
+            for key in expected
+        )
+
+    # Lists must have the same length/order and recursively matching values.
+    if isinstance(expected, list):
+        if not isinstance(remote, list) or len(remote) != len(expected):
+            return False
+
+        return all(
+            _remote_value_matches(remote_item, expected_item)
+            for remote_item, expected_item in zip(remote, expected)
+        )
+
+    # Everything else remains strict, including strings, ints and None.
+    return type(remote) is type(expected) and remote == expected
+
 
 def _remote_class_aware_comparison(comparison: dict[str, Any]) -> dict[str, Any]:
     active = comparison.get("active_model")
     candidate = comparison.get("candidate_model")
+
     if not isinstance(active, dict) or not isinstance(candidate, dict):
         raise ProviderError("Remote comparison is missing model metadata")
+
     try:
         expected = build_class_aware_comparison(
-            {"classes": active.get("classes"), "per_class": active.get("per_class")},
-            {"classes": candidate.get("classes"), "per_class": candidate.get("per_class")},
+            {
+                "classes": active.get("classes"),
+                "per_class": active.get("per_class"),
+            },
+            {
+                "classes": candidate.get("classes"),
+                "per_class": candidate.get("per_class"),
+            },
         )
+
         require_class_preservation(
-            active.get("classes"), candidate.get("classes"), "Remote candidate"
+            active.get("classes"),
+            candidate.get("classes"),
+            "Remote candidate",
         )
     except ValueError as exc:
-        raise ProviderError(f"Remote class-aware metrics are invalid: {exc}") from exc
+        raise ProviderError(
+            f"Remote class-aware metrics are invalid: {exc}"
+        ) from exc
+
     for field, expected_value in expected.items():
-        if comparison.get(field) != expected_value:
-            raise ProviderError(f"Remote {field} disagrees with model class metadata or metrics")
+        if field not in comparison or not _remote_value_matches(
+            comparison[field],
+            expected_value,
+        ):
+            raise ProviderError(
+                f"Remote {field} disagrees with model class metadata or metrics"
+            )
+
+    # Always return the backend-recomputed canonical values.
     return expected
 
 

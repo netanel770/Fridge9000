@@ -22,6 +22,31 @@ export type ProjectedBoundingBox = {
 
 export type BoxCorner = "topLeft" | "topRight" | "bottomLeft" | "bottomRight";
 
+export function areImageDimensionsCompatible(
+  canonicalWidth: number,
+  canonicalHeight: number,
+  decodedWidth: number,
+  decodedHeight: number,
+  tolerance = 0.01,
+) {
+  if (
+    ![canonicalWidth, canonicalHeight, decodedWidth, decodedHeight, tolerance].every(Number.isFinite)
+    || canonicalWidth <= 0
+    || canonicalHeight <= 0
+    || decodedWidth <= 0
+    || decodedHeight <= 0
+    || tolerance < 0
+  ) {
+    return false;
+  }
+
+  const scaleX = decodedWidth / canonicalWidth;
+  const scaleY = decodedHeight / canonicalHeight;
+  const relativeScaleDifference = Math.abs(scaleX - scaleY) / Math.max(scaleX, scaleY);
+
+  return relativeScaleDifference <= tolerance;
+}
+
 export function getMinimumAnnotationBoxSize(imageWidth: number, imageHeight: number) {
   return Math.max(8, Math.min(imageWidth, imageHeight) * 0.02);
 }

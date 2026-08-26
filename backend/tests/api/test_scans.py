@@ -1,16 +1,28 @@
-import base64
 import importlib
 from datetime import date, timedelta
+from io import BytesIO
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.api]
 
-PNG_BYTES = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZhxkAAAAASUVORK5CYII="
-)
+def _image_bytes(image_format="PNG", width=64, height=48, orientation=None):
+    image = Image.new("RGB", (width, height), "white")
+    for x in range(width // 4):
+        for y in range(height):
+            image.putpixel((x, y), (240, 20, 20))
+    output = BytesIO()
+    exif = Image.Exif()
+    if orientation is not None:
+        exif[274] = orientation
+    image.save(output, format=image_format, quality=95, exif=exif)
+    return output.getvalue()
+
+
+PNG_BYTES = _image_bytes()
 FAKE_DETECTIONS = [
     {
         "label": "apple",
@@ -52,10 +64,10 @@ def scan_api(test_client, monkeypatch):
     return test_client, runtime, inference_calls
 
 
-def _upload_scan(client, filename="fridge.png"):
+def _upload_scan(client, filename="fridge.png", contents=PNG_BYTES, content_type="image/png"):
     response = client.post(
         "/door/closed/upload",
-        files={"file": (filename, PNG_BYTES, "image/png")},
+        files={"file": (filename, contents, content_type)},
     )
     assert response.status_code == 200
     assert response.json()["ok"] is True
@@ -158,7 +170,9 @@ def test_upload_persists_scan_detections_and_retrievable_image(
 
     stored_image = Path(image_ref)
     assert stored_image.parent == Path(test_environment["UPLOAD_DIR"])
-    assert stored_image.read_bytes() == PNG_BYTES
+    with Image.open(stored_image) as stored:
+        assert stored.size == (64, 48)
+        assert stored.getexif().get(274) is None
     assert (width, height) == (64, 48)
     assert len(persisted) == 2
     assert all(row[0] == scan_id for row in persisted)
@@ -183,7 +197,188 @@ def test_upload_persists_scan_detections_and_retrievable_image(
     image_response = client.get(f"/scans/{scan_id}/image")
     assert image_response.status_code == 200
     assert image_response.headers["content-type"] == "image/png"
-    assert image_response.content == PNG_BYTES
+    with Image.open(BytesIO(image_response.content)) as served:
+        assert served.size == (64, 48)
+        assert served.getexif().get(274) is None
+
+
+def test_zero_detection_scan_remains_retrievable_and_accepts_add_annotation(
+    scan_api, monkeypatch, db_connection
+):
+    client, runtime, _ = scan_api
+
+    def infer_without_detections(payload):
+        image_path = Path(payload["image_ref"])
+        assert image_path.is_file()
+        return {
+            "ok": True,
+            "image_ref": str(image_path),
+            "image_width": 64,
+            "image_height": 48,
+            "detections": [],
+        }
+
+    monkeypatch.setattr(runtime, "infer", infer_without_detections)
+    result = _upload_scan(client, "unknown-product.png")
+    scan_id = result["scan_id"]
+    assert result["detections_count"] == 0
+
+    metadata = client.get(f"/scans/{scan_id}")
+    assert metadata.status_code == 200
+    assert metadata.json()["id"] == scan_id
+    assert metadata.json()["detection_count"] == 0
+    assert (metadata.json()["image_width"], metadata.json()["image_height"]) == (64, 48)
+
+    recent = client.get("/scans/recent")
+    assert recent.status_code == 200
+    recent_scan = next(scan for scan in recent.json() if scan["id"] == scan_id)
+    assert recent_scan["detection_count"] == 0
+    assert (recent_scan["image_width"], recent_scan["image_height"]) == (64, 48)
+
+    image_response = client.get(f"/scans/{scan_id}/image")
+    assert image_response.status_code == 200
+    with Image.open(BytesIO(image_response.content)) as served:
+        assert served.size == (64, 48)
+        assert served.getexif().get(274) is None
+
+    submission = client.post(
+        f"/scans/{scan_id}/annotation-submissions",
+        json={
+            "annotations": [
+                {
+                    "action": "ADD",
+                    "final_label": "Lemon",
+                    "final_x1": 4,
+                    "final_y1": 5,
+                    "final_x2": 44,
+                    "final_y2": 40,
+                }
+            ]
+        },
+    )
+    assert submission.status_code == 200
+    body = submission.json()
+    assert body["submission"]["scan_id"] == scan_id
+    assert (body["submission"]["image_width"], body["submission"]["image_height"]) == (64, 48)
+    annotation = body["annotations"][0]
+    assert annotation["action"] == "ADD"
+    assert annotation["source_detection_id"] is None
+    assert annotation["final_label"] == "Lemon"
+
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM scan_detections WHERE scan_id = %s;", (scan_id,))
+        assert cursor.fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("orientation", "expected_box", "red_point", "white_point"),
+    [
+        (6, (0.0, 0.0, 20.0, 10.0), (10, 2), (10, 35)),
+        (8, (0.0, 30.0, 20.0, 40.0), (10, 37), (10, 4)),
+    ],
+)
+def test_exif_oriented_scan_uses_one_canonical_detection_space(
+    scan_api, monkeypatch, db_connection, orientation, expected_box, red_point, white_point
+):
+    client, runtime, _ = scan_api
+
+    def infer_normalized_image(payload):
+        with Image.open(payload["image_ref"]) as detector_image:
+            assert detector_image.size == (20, 40)
+            assert detector_image.getexif().get(274) is None
+            red = detector_image.convert("RGB").getpixel(red_point)
+            white = detector_image.convert("RGB").getpixel(white_point)
+            assert red[0] > 180 and red[1] < 80
+            assert min(white) > 180
+        return {
+            "ok": True,
+            "image_ref": payload["image_ref"],
+            "image_width": 20,
+            "image_height": 40,
+            "detections": [
+                {
+                    "label": "apple",
+                    "confidence": 0.9,
+                    "x1": expected_box[0],
+                    "y1": expected_box[1],
+                    "x2": expected_box[2],
+                    "y2": expected_box[3],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(runtime, "infer", infer_normalized_image)
+    uploaded = _upload_scan(
+        client,
+        f"orientation-{orientation}.jpg",
+        _image_bytes("JPEG", 40, 20, orientation),
+        "image/jpeg",
+    )
+    scan_id = uploaded["scan_id"]
+    assert (uploaded["image_width"], uploaded["image_height"]) == (20, 40)
+
+    metadata = client.get(f"/scans/{scan_id}").json()
+    assert (metadata["image_width"], metadata["image_height"]) == (20, 40)
+    image_response = client.get(f"/scans/{scan_id}/image")
+    assert image_response.status_code == 200
+    with Image.open(BytesIO(image_response.content)) as served:
+        assert served.size == (20, 40)
+        assert served.getexif().get(274) is None
+        served_rgb = served.convert("RGB")
+        assert served_rgb.getpixel(red_point)[0] > 180
+        assert min(served_rgb.getpixel(white_point)) > 180
+
+    detection = next(iter(_detections_by_label(client, scan_id).values()))
+    assert (detection["x1"], detection["y1"], detection["x2"], detection["y2"]) == pytest.approx(expected_box)
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT image_width, image_height FROM scans WHERE id = %s;", (scan_id,))
+        assert cursor.fetchone() == (20, 40)
+
+
+def test_zero_detection_exif_scan_accepts_annotation_in_normalized_space(scan_api, monkeypatch):
+    client, runtime, _ = scan_api
+
+    def infer_without_detections(payload):
+        with Image.open(payload["image_ref"]) as detector_image:
+            assert detector_image.size == (20, 40)
+            assert detector_image.getexif().get(274) is None
+        return {
+            "ok": True,
+            "image_ref": payload["image_ref"],
+            "image_width": 20,
+            "image_height": 40,
+            "detections": [],
+        }
+
+    monkeypatch.setattr(runtime, "infer", infer_without_detections)
+    uploaded = _upload_scan(
+        client,
+        "zero-orientation-6.jpg",
+        _image_bytes("JPEG", 40, 20, 6),
+        "image/jpeg",
+    )
+    assert uploaded["detections_count"] == 0
+    assert (uploaded["image_width"], uploaded["image_height"]) == (20, 40)
+
+    response = client.post(
+        f"/scans/{uploaded['scan_id']}/annotation-submissions",
+        json={
+            "annotations": [
+                {
+                    "action": "ADD",
+                    "final_label": "Lemon",
+                    "final_x1": 1,
+                    "final_y1": 1,
+                    "final_x2": 19,
+                    "final_y2": 15,
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200
+    annotation = response.json()["annotations"][0]
+    assert annotation["source_detection_id"] is None
+    assert (annotation["final_x1"], annotation["final_y1"], annotation["final_x2"], annotation["final_y2"]) == pytest.approx((1, 1, 19, 15))
 
 
 def test_added_review_applies_relabel_and_excludes_false_positive(
@@ -478,7 +673,7 @@ def test_upload_validation_does_not_persist_failed_scan(
         files={"file": ("broken.jpg", b"not an image", "image/jpeg")},
     )
     assert invalid.status_code == 400
-    assert "could not decode image" in invalid.json()["detail"]
+    assert invalid.json()["detail"] == "Uploaded image could not be decoded"
 
     with db_connection.cursor() as cursor:
         cursor.execute("SELECT COUNT(*) FROM scans;")
