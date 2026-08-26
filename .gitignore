@@ -21,9 +21,10 @@ node_modules/
 .idea/
 .vscode/
 
+# Runtime / generated data
 logs/
 db-data/
-backend/uploads/freshness/
+backend/uploads/
 backend/candidate_models/
 backend/dataset_exports/
 backend/model_comparisons/
