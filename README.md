@@ -1,210 +1,23 @@
 # Fridge 9000
 
-Fridge 9000 is a smart refrigerator management system that uses **computer vision, OCR, inventory tracking, expiration management, and a human-in-the-loop model lifecycle** to help users understand what is inside their fridge and reduce food waste.
+Fridge 9000 is a smart refrigerator management system that combines **computer vision, inventory tracking, OCR, freshness analysis, and a human-in-the-loop ML pipeline** to help users understand what is in their fridge and reduce food waste.
 
-The system can detect products from images, track inventory changes, process shopping receipts, estimate expiration dates, generate alerts, collect reviewed detections as training data, train candidate detector models, compare them against the active model, and promote or roll back model versions.
+The system can detect products from refrigerator images, review and correct AI predictions, track inventory and expiration dates, process shopping receipts, classify product freshness, and turn approved human annotations into traceable training data for future detector versions.
 
 ## Features
 
-* **AI-powered product detection**
+### AI Product Detection
 
-  * Detects food and beverage products from refrigerator images using YOLO.
-  * Stores detection confidence and bounding boxes.
-  * Allows users to review and correct detections before updating inventory.
+- Detects food and beverage products using **YOLO**.
+- Stores detection labels, confidence scores, and bounding boxes.
+- Lets users review detections before applying inventory changes.
+- Supports correcting labels, adjusting boxes, removing false positives, and adding missed products.
 
-* **Human-in-the-loop model improvement**
+### Human-in-the-Loop Learning
 
-  * Stores confirmed, relabeled, adjusted, added, and removed detections as structured annotations.
-  * Tracks which annotation submissions and individual annotations were used in each training run.
-  * Exports reviewed annotations into versioned YOLO datasets.
-  * Trains candidate detector models from the current active model.
-  * Compares candidate and active models on a traceable validation split.
-  * Supports explicit model promotion and rollback while preserving activation history.
+Fridge 9000 includes a complete annotation and model-improvement workflow.
 
-* **Smart inventory management**
-
-  * Add and remove products using images.
-  * Manually adjust inventory.
-  * Track quantities across separate inventory batches.
-  * Track partially consumed/open products.
-
-* **Expiration tracking**
-
-  * Store manually entered expiration dates.
-  * Estimate expiration dates when no date is available.
-  * Track expiration separately for different batches of the same product.
-  * Automatically identify expired and soon-to-expire products.
-
-* **Smart alerts**
-
-  * Low-stock alerts.
-  * Missing-product alerts.
-  * Expiring-soon alerts.
-  * Expired-product alerts.
-
-* **Receipt OCR**
-
-  * Upload grocery receipts as PDF or image files.
-  * Extract purchased products using Tesseract OCR.
-  * Review extracted products before adding them to inventory.
-
-* **Product segmentation with SAM2**
-
-  * Uses SAM2 to isolate detected products from refrigerator images.
-  * Cleans and scores segmentation masks before accepting them.
-  * Generates representative product outlines for the mobile interface.
-
-* **Freshness classification**
-
-  * Uses a separate image-classification model for supported freshness or rot checks.
-  * Keeps freshness inference separate from the YOLO detector lifecycle.
-
-* **Event history**
-
-  * Records inventory additions and removals.
-  * Stores detection confidence and associated scans.
-  * Provides a history of inventory activity.
-
-* **Mobile application**
-
-  * Built with React Native and Expo.
-  * View inventory, alerts, events, expired products, and scan results.
-  * Add or remove products manually or using images.
-  * Upload receipts directly from a phone.
-  * Review detections and submit corrections that can later improve the detector.
-
-## System Architecture
-
-```text
-                               Fridge 9000
-                                    │
-                                    │
-                              Mobile Client
-                            React Native / Expo
-                                    │
-                                   ▼
-                             FastAPI Backend
-                                   │
-          ┌────────────────────────┼────────────────────────┐
-          │                        │                        │
-          ▼                        ▼                        ▼
-   Computer Vision                OCR                   Inventory
-    YOLO + SAM2               Tesseract                Management
-          │                                                  │
-          │                        ┌───────────────────────────┘
-          │                        │
-          ▼                        ▼
-   Detection Review          PostgreSQL
-          │                        ▲
-          ▼                        │
- Human Annotations ────────────────┘
-          │
-          ▼
- Versioned Dataset Export
-          │
-          ▼
- Candidate Model Training
-          │
-          ▼
- Active vs Candidate Evaluation
-          │
-          ▼
-   Promotion / Rollback
-          │
-          └──────────────► Active YOLO Model
-```
-
-## Technology Stack
-
-### Backend
-
-* Python
-* FastAPI
-* PostgreSQL
-* psycopg2
-* OpenCV
-* Ultralytics YOLO
-* SAM2
-* Tesseract OCR
-* NumPy
-* PDF2Image
-
-### Mobile
-
-* React Native
-* Expo
-* TypeScript
-* Expo Router
-
-### Infrastructure
-
-* Docker
-* Docker Compose
-* PostgreSQL container
-
-## Repository Structure
-
-```text
-Fridge9000/
-│
-├── backend/
-│   ├── api/                  # FastAPI route definitions
-│   ├── core/                 # Application configuration
-│   ├── db/                   # Database connection helpers
-│   ├── services/             # Runtime application and ML services
-│   ├── main.py               # FastAPI entry point
-│   ├── train.py              # Detector training workflow
-│   ├── prepare_data.py       # Dataset preparation
-│   ├── export_yolo_dataset.py
-│   ├── compare_yolo_models.py
-│   ├── requirements.txt
-│   ├── rules.json
-│   ├── best.pt
-│   └── sam2_t.pt
-│
-├── db/
-│   └── init.sql
-│
-├── mobile/
-│   ├── app/
-│   ├── assets/
-│   ├── src/
-│   ├── package.json
-│   └── app.json
-│
-├── docker-compose.yml
-└── README.md
-```
-
-## How It Works
-
-### 1. Product Detection
-
-A refrigerator image is uploaded to the backend.
-
-The active YOLO model detects products and returns information such as:
-
-```json
-{
-  "label": "Milk",
-  "confidence": 0.91,
-  "x1": 120,
-  "y1": 84,
-  "x2": 315,
-  "y2": 470
-}
-```
-
-The user can review the detected products before confirming the inventory update.
-
-### 2. Detection Review and Annotation
-
-Detection review serves two purposes:
-
-1. It prevents incorrect detections from being applied blindly to inventory.
-2. It creates structured human feedback that can later be used to improve the detector.
-
-Corrections can be stored as annotation actions such as:
+Supported annotation actions:
 
 ```text
 CONFIRM
@@ -214,397 +27,230 @@ ADD
 REMOVE
 ```
 
-The database keeps the original prediction alongside the corrected label and bounding box.
+Users can teach the detector in two ways:
 
-Each set of corrections belongs to an annotation submission tied to the original scan.
+1. **AI-assisted annotation**
+   - Run a normal YOLO scan.
+   - Review the detected products.
+   - Confirm or correct the model's predictions.
 
-### 3. Inventory Tracking
+2. **Manual annotation**
+   - Upload an image without running YOLO.
+   - Draw bounding boxes and assign product labels manually.
+   - Submit annotations through the same moderation and training pipeline.
 
-Confirmed detections are converted into inventory changes.
+Manual annotations do not create fake detector predictions. They are stored as `ADD` annotations with no source detection, preserving accurate provenance.
 
-Each product can have multiple inventory batches, allowing Fridge 9000 to track different expiration dates for multiple units of the same product.
+Approved annotations can later be exported into versioned YOLO datasets and used to train candidate detector models.
 
-For example:
+### Model Lifecycle
 
-```text
-Milk
-
-Batch 1
-Quantity: 1
-Expires: 2026-08-17
-
-Batch 2
-Quantity: 2
-Expires: 2026-08-22
-```
-
-### 4. Expiration Management
-
-When an expiration date is known, it is stored directly.
-
-When one is not provided, Fridge 9000 estimates a date according to the product category.
-
-The system automatically identifies products that are:
-
-* Expired
-* Expiring soon
-* Low in stock
-* Missing
-
-### 5. Receipt Processing
-
-Users can upload grocery receipts as:
-
-* PDF
-* JPG
-* JPEG
-* PNG
-
-Tesseract OCR extracts the text and attempts to identify purchased products.
-
-The extracted products can then be reviewed before being added to inventory.
-
-### 6. SAM2 Product Segmentation
-
-Fridge 9000 uses SAM2 to generate isolated product representations from detected objects.
+Detector improvement is treated as a versioned workflow rather than simply overwriting `best.pt`.
 
 ```text
-Fridge Image
-     │
-     ▼
-YOLO Detection
-     │
-     ▼
-Bounding Box
-     │
-     ▼
-SAM2 Segmentation
-     │
-     ▼
-Mask Cleaning and Quality Scoring
-     │
-     ▼
-Representative Product Outline
-```
-
-The segmentation pipeline evaluates masks rather than accepting every SAM2 result directly.
-
-It uses:
-
-* Multiple expanded bounding-box prompts
-* Connected-component filtering
-* Minimum-area rejection
-* Component purity
-* Prompt coverage
-* Contour solidity
-* Boundary-touch penalties
-* Composite quality scoring
-
-The best reliable mask is selected and used to create a representative product outline.
-
-# Model Lifecycle Architecture
-
-One of the major components of Fridge 9000 is its model-management workflow.
-
-Instead of treating the detector as a static `.pt` file, reviewed detections can become traceable training data used to create and evaluate new model versions.
-
-## Lifecycle Overview
-
-```text
-Production Scan
-      │
-      ▼
-Active YOLO Model
-      │
-      ▼
-Predicted Detections
-      │
-      ▼
-Human Review / Correction
-      │
-      ▼
-Annotation Submission
-      │
-      ▼
+Image
+  ↓
+YOLO Detection / Manual Annotation
+  ↓
+Human Annotation
+  ↓
+Moderation
+  ↓
 Approved Training Data
-      │
-      ▼
-Versioned YOLO Dataset
-      │
-      ▼
-Training Run
-      │
-      ▼
-Candidate Model
-      │
-      ▼
-Reproducible Validation Comparison
-      │
-      ├──── Candidate does not qualify ────► Reject / Keep Active Model
-      │
-      └──── Candidate qualifies ───────────► Promote Candidate
-                                                │
-                                                ▼
-                                         New Active Model
-                                                │
-                                                ▼
-                                          Rollback Available
+  ↓
+Versioned Dataset
+  ↓
+Candidate Training
+  ↓
+Active vs Candidate Comparison
+  ↓
+Promotion or Rejection
+  ↓
+Rollback Available
 ```
 
-## Annotation Provenance
+The system tracks:
 
-Human feedback is stored in two levels.
+- Annotation submissions and individual corrections
+- Dataset versions
+- Training runs
+- Starting model and weights
+- Training parameters and metrics
+- Which annotations were consumed by training
+- Candidate and active model versions
+- Model comparisons
+- Promotion and rollback history
 
-### Annotation submissions
+Only one detector can be active at a time.
 
-An annotation submission represents a reviewed scan.
+### Inventory Management
 
-Each submission records:
+- Add or remove products using refrigerator scans.
+- Add products manually.
+- Track quantities using separate inventory batches.
+- Track multiple expiration dates for the same product.
+- Track partially consumed/open products.
+- Preserve inventory event history.
 
-* The source scan
-* Review status
-* Image dimensions
-* Creation time
-* Review time
+### Expiration and Alerts
 
-Possible statuses include:
+Fridge 9000 tracks known or estimated expiration dates and can identify:
+
+- Expired products
+- Products expiring soon
+- Low-stock products
+- Missing products
+
+### Receipt OCR
+
+Shopping receipts can be uploaded as images or PDFs.
+
+The backend uses **Tesseract OCR** to extract purchased products, which can then be reviewed before being added to inventory.
+
+### SAM2 Product Segmentation
+
+YOLO detections can be passed to **SAM2** to generate representative product outlines.
+
+The segmentation pipeline evaluates candidate masks using filtering and quality checks rather than blindly accepting the first SAM result.
+
+### Freshness Classification
+
+A separate image-classification model can evaluate supported products for freshness or rot.
+
+Freshness classification is intentionally separate from the YOLO detector lifecycle.
+
+### Mobile Application
+
+The mobile application is built with **React Native, Expo, TypeScript, and Expo Router**.
+
+It provides interfaces for:
+
+- Inventory
+- Product scans
+- Detection review
+- Manual annotation
+- AI contributions and moderation
+- Model progress
+- Alerts and expiration
+- Receipts
+- Freshness detection
+- Inventory history
+
+---
+
+## Architecture
 
 ```text
-pending
-approved
-rejected
-used
+                         Fridge 9000
+                              │
+                              ▼
+                    React Native / Expo
+                              │
+                              ▼
+                       FastAPI Backend
+                              │
+          ┌───────────────────┼───────────────────┐
+          ▼                   ▼                   ▼
+    YOLO + SAM2          Tesseract OCR       Inventory
+          │                                       │
+          ▼                                       ▼
+   Detection Review                         PostgreSQL
+          │                                       ▲
+          ▼                                       │
+ Human / Manual Annotations ──────────────────────┘
+          │
+          ▼
+     Moderation
+          │
+          ▼
+ Versioned Dataset
+          │
+          ▼
+ Candidate Training
+          │
+          ▼
+ Model Comparison
+          │
+          ▼
+ Promotion / Rollback
 ```
 
-### Individual annotations
+## Technology Stack
 
-Each correction inside a submission is stored separately.
+### Backend
 
-Annotations preserve information such as:
+- Python
+- FastAPI
+- PostgreSQL
+- psycopg2
+- OpenCV
+- Ultralytics YOLO
+- SAM2
+- Tesseract OCR
+- NumPy
 
-* Original label
-* Final label
-* Original confidence
-* Original bounding box
-* Corrected bounding box
-* Annotation action
-* Source detection
+### Mobile
 
-This allows the project to distinguish between:
+- React Native
+- Expo
+- TypeScript
+- Expo Router
+
+### Infrastructure and Testing
+
+- Docker
+- Docker Compose
+- PostgreSQL 16
+- pytest
+- FastAPI TestClient
+
+---
+
+## Repository Structure
 
 ```text
-What the model predicted
+Fridge9000/
+├── backend/
+│   ├── api/                  # FastAPI route definitions
+│   ├── core/                 # Application configuration
+│   ├── db/                   # Database helpers
+│   ├── services/             # Application and ML services
+│   ├── tests/                # Backend test suite
+│   ├── main.py               # FastAPI entry point
+│   ├── train.py              # Training workflow
+│   ├── export_yolo_dataset.py
+│   └── compare_yolo_models.py
+│
+├── db/
+│   └── init.sql              # PostgreSQL schema
+│
+├── mobile/
+│   ├── app/                  # Expo Router screens
+│   ├── assets/
+│   ├── src/
+│   └── package.json
+│
+├── kaggle_trainer/           # Remote training support
+├── docker-compose.yml        # Development DB + backend
+├── docker-compose.test.yml   # Isolated PostgreSQL test DB
+├── start-fridge.ps1          # Development launcher
+├── pytest.ini
+└── README.md
 ```
 
-and:
+---
 
-```text
-What the human reviewer accepted or corrected
-```
+# Running Fridge 9000
 
-## Dataset Versioning
-
-Approved annotation data can be exported into YOLO-compatible training datasets.
-
-Training runs reference a specific dataset version instead of an arbitrary mutable directory.
-
-The model-comparison system also records hashes for:
-
-* Dataset contents
-* Validation split
-
-This helps ensure that model comparisons are tied to the exact data used during evaluation.
-
-## Training Runs
-
-Each candidate-model training process receives a persistent training-run record.
-
-A training run can store:
-
-* Training run ID
-* Dataset version
-* Starting weights path
-* Starting model version
-* Starting weights SHA-256
-* Training parameters
-* Start timestamp
-* End timestamp
-* Training status
-* Candidate model path
-* Precision
-* Recall
-* mAP@50
-* mAP@50:95
-* Error information if training fails
-
-Possible run statuses include:
-
-```text
-running
-completed
-failed
-interrupted
-```
-
-The database also records which annotation submissions and individual annotations were actually consumed by each training run.
-
-This provides training-data provenance instead of leaving model history buried in filenames and terminal logs, where software history traditionally goes to die.
-
-## Model Registry
-
-Detector versions are stored in a model registry.
-
-Each model can have one of the following states:
-
-```text
-candidate
-active
-rejected
-archived
-```
-
-A model-version record can contain:
-
-* Version identifier
-* Model path
-* Model SHA-256
-* Dataset version
-* Source training run
-* Precision
-* Recall
-* mAP@50
-* mAP@50:95
-
-The database enforces that only one detector can have `active` status at a time.
-
-The backend can therefore determine which detector is currently considered the production model without simply assuming that whichever file is named `best.pt` deserves the throne.
-
-## Candidate vs Active Model Comparison
-
-A newly trained model is not automatically promoted.
-
-It can first be evaluated against the currently active detector.
-
-A comparison records:
-
-* Dataset version
-* Dataset-content SHA-256
-* Validation-split SHA-256
-* Active model ID
-* Candidate model ID
-* Evaluation parameters
-* Active-model metrics
-* Candidate-model metrics
-* Metric differences
-* Comparison rule
-* Whether the candidate outperformed the active model
-
-Typical metrics include:
-
-* Precision
-* Recall
-* mAP@50
-* mAP@50:95
-
-This provides a reproducible decision record for model promotion.
-
-## Model Promotion
-
-If a candidate satisfies the comparison criteria, it can be promoted to become the active detector.
-
-The previous active model is retained in the registry rather than being overwritten or forgotten.
-
-The promotion is recorded in the model activation history.
-
-## Model Rollback
-
-Because previous model versions remain registered, the system can roll back to an earlier detector.
-
-Rollback records:
-
-* The current model
-* The model being restored
-* The action type
-* Timestamp
-
-Activation actions are recorded as:
-
-```text
-PROMOTE
-ROLLBACK
-```
-
-This creates a traceable model history rather than a mysterious pile of files named:
-
-```text
-best.pt
-best2.pt
-best_final.pt
-best_final_real.pt
-```
-
-## Full Model Provenance Chain
-
-The system is designed to preserve the following chain:
-
-```text
-Production Image
-       │
-       ▼
-YOLO Prediction
-       │
-       ▼
-Human Correction
-       │
-       ▼
-Annotation
-       │
-       ▼
-Dataset Version
-       │
-       ▼
-Training Run
-       │
-       ▼
-Candidate Model
-       │
-       ▼
-Candidate vs Active Comparison
-       │
-       ▼
-Promotion
-       │
-       ▼
-Active Production Model
-```
-
-This makes it possible to trace how a production detector was created and why it became active.
-
-## Why the Model Lifecycle Matters
-
-The model lifecycle is designed to avoid common problems in smaller machine-learning projects:
-
-* Losing track of which dataset trained a model
-* Reusing annotations without knowing where they were used
-* Automatically replacing a production model after training
-* Having multiple models ambiguously treated as active
-* Comparing models on different validation data
-* Being unable to explain why a model was promoted
-* Losing the previous model after deployment
-* Being unable to roll back a bad model
-
-Fridge 9000 therefore treats model improvement as a versioned workflow rather than a one-time training script.
-
-## Running the Project
-
-### Requirements
+## Requirements
 
 Install:
 
-* Docker Desktop
-* Git
-* Node.js
-* Expo Go on your mobile device
+- Docker Desktop
+- Git
+- Node.js and npm
+- Python
+- Expo Go on the mobile device used for development
 
 Clone the repository:
 
@@ -613,7 +259,29 @@ git clone https://github.com/netanel770/Fridge9000.git
 cd Fridge9000
 ```
 
-## Start the Project
+Install the mobile dependencies once:
+
+```bash
+cd mobile
+npm install
+cd ..
+```
+
+## Start the Application
+
+The normal development architecture is:
+
+```text
+PostgreSQL  ─┐
+             ├── Docker Compose
+FastAPI      ─┘
+
+Expo / Metro ─── Windows host
+```
+
+Expo intentionally runs outside Docker so its interactive CLI and QR code work normally.
+
+### PowerShell
 
 From the project root:
 
@@ -621,233 +289,171 @@ From the project root:
 .\start-fridge.ps1
 ```
 
-The PowerShell launcher detects an active LAN IPv4 address and sets `EXPO_PUBLIC_API_BASE_URL` automatically. PostgreSQL and FastAPI run in Docker, then Expo runs directly on Windows so its tunnel status, interactive CLI, and QR code display normally.
+### Command Prompt
 
-To use a Cloudflare Tunnel, ngrok, or another public backend URL instead of LAN detection:
+From CMD:
+
+```cmd
+powershell -ExecutionPolicy Bypass -File .\start-fridge.ps1
+```
+
+The launcher:
+
+1. Detects a suitable LAN IPv4 address.
+2. Sets `EXPO_PUBLIC_API_BASE_URL`.
+3. Builds and starts PostgreSQL and FastAPI with Docker Compose.
+4. Waits for both services to become healthy.
+5. Starts Expo directly from `mobile/`.
+
+The default backend is available on:
+
+```text
+http://<your-LAN-IP>:8000
+```
+
+The phone and development PC must be able to reach each other on the local network.
+
+### Custom Backend URL
+
+A specific backend URL can be supplied with:
 
 ```powershell
 .\start-fridge.ps1 -ApiUrl "https://example.com"
 ```
 
-You can also copy the optional root environment example and start the Docker backend and database separately:
+Expo tunnel mode is also available:
 
 ```powershell
-Copy-Item .env.example .env
-docker compose up --build
+.\start-fridge.ps1 -Tunnel
 ```
 
-LAN URLs require the phone and PC to be on a mutually reachable local network. A tunnel URL can work when the devices are on different networks.
+`-Tunnel` tunnels the Expo development server. It does not automatically expose the FastAPI backend, so the configured API URL must still be reachable from the phone.
 
-To stop the application:
+---
+
+## Stopping the Application
+
+First stop Expo in the terminal where it is running:
+
+```text
+Ctrl + C
+```
+
+Then stop the backend and PostgreSQL containers:
 
 ```bash
 docker compose down
 ```
 
-## Running the Mobile Application
+This removes the development containers and network while preserving the PostgreSQL data volume.
 
-Navigate to the mobile directory:
-
-```bash
-cd mobile
-```
-
-Install dependencies:
+Do **not** use:
 
 ```bash
-npm install
+docker compose down -v
 ```
 
-The mobile application reads the backend address from `EXPO_PUBLIC_API_BASE_URL`. Set that environment variable before starting Expo directly; do not edit the source configuration for each network.
+unless you intentionally want to delete the development database volume.
 
-Start Expo in tunnel mode:
+To verify that the containers have stopped:
 
 ```bash
-npx expo start --tunnel
+docker ps
 ```
 
-Open **Expo Go** on the phone and connect to the displayed development server.
+---
 
-## Backend Tests
+# Testing
 
-Install the test dependencies:
+The backend test suite uses a **separate PostgreSQL 16 database** so tests cannot accidentally modify the development database.
 
-```powershell
+The isolated test database:
+
+- Uses database `fridge9000_test`
+- Runs on host port `5433`
+- Uses temporary storage instead of the development database volume
+- Is rejected by the fixtures if configured to use the normal development database
+
+Install test dependencies:
+
+```bash
 python -m pip install -r backend/requirements-test.txt
 ```
 
-Start the isolated PostgreSQL 16 test service:
+Start the isolated test database:
 
-```powershell
-docker compose -f docker-compose.test.yml up -d --wait
+```bash
+docker compose -f docker-compose.test.yml -p fridge9000-test up -d --wait
 ```
 
-The test service uses `fridge9000_test` on host port `5433` and does not use the development database volume. Set `TEST_DATABASE_URL` only when a different test database is needed; database fixtures reject the normal `fridge9000` database and any database name that does not end in `_test`.
+Run the full backend suite:
 
-Run fast tests:
+```bash
+pytest
+```
 
-```powershell
-pytest -m "not ml and not e2e"
+Run API tests:
+
+```bash
+pytest -m api
 ```
 
 Run integration tests:
 
-```powershell
+```bash
 pytest -m integration
 ```
 
-Run ML tests:
+Run the normal suite while excluding ML and end-to-end tests:
 
-```powershell
-pytest -m ml
+```bash
+pytest -m "not ml and not e2e"
 ```
 
-Run the full suite:
+The current automated tests cover important workflows including:
 
-```powershell
-pytest
+- Database and health checks
+- Inventory and inventory batches
+- Scan persistence and review
+- Inventory consistency and transaction rollback
+- Annotation creation and validation
+- Moderation and annotation provenance
+- Manual annotation without YOLO inference
+- Invalid and cross-scan/cross-image operations
+
+Manual-annotation tests can also be run directly:
+
+```bash
+pytest backend/tests/api/test_manual_annotations.py -v
 ```
 
-Stop and remove the isolated test database service:
+Stop the isolated test database when finished:
 
-```powershell
-docker compose -f docker-compose.test.yml down -v
+```bash
+docker compose -f docker-compose.test.yml -p fridge9000-test down
 ```
 
-## Main Application Screens
+## Mobile Validation
 
-The mobile application includes screens for:
+From `mobile/`:
 
-* Home dashboard
-* Inventory
-* Image-based inventory updates
-* Manual inventory management
-* Detection review
-* Receipt upload
-* Alerts
-* Expired products
-* Event history
-* Open-product quantity adjustment
-* Freshness / rot detection
+```bash
+npm run lint
+npx expo-doctor
+```
 
-## Machine Learning
+---
 
-### YOLO Detector
+## Development Notes
 
-Fridge 9000 uses a custom-trained YOLO model for refrigerator product detection.
+Runtime-generated uploads, model outputs, datasets, test caches, and local environment files should not be committed.
 
-The detector produces:
+The root `.env` file is optional and ignored by Git. See `.env.example` for configurable values used by model training and other development workflows.
 
-* Class label
-* Confidence score
-* Bounding box
-
-The production detector is represented by the active model in the model registry.
-
-Human corrections can feed the annotation and retraining lifecycle described above.
-
-### SAM2
-
-SAM2 is used after YOLO detection to generate more accurate product segmentation masks.
-
-This allows Fridge 9000 to create cleaner visual representations of detected products rather than relying only on rectangular bounding boxes.
-
-### Freshness Classifier
-
-Fridge 9000 also contains a separate classifier for supported freshness and rot checks.
-
-This model is separate from the object detector.
-
-The two models answer different questions:
+The mobile application receives its backend URL through:
 
 ```text
-YOLO:
-What product is present, and where is it?
-
-Freshness classifier:
-What freshness state does this supplied product image represent?
+EXPO_PUBLIC_API_BASE_URL
 ```
 
-### OCR
-
-Tesseract OCR is used to process grocery receipts.
-
-The OCR pipeline performs text extraction and filters receipt metadata such as:
-
-* Totals
-* Payment information
-* Store information
-* Prices
-* Barcodes
-
-before identifying candidate product names.
-
-## Database
-
-Fridge 9000 stores information including:
-
-* Products
-* Inventory
-* Inventory batches
-* Scans
-* Object detections
-* Detection reviews
-* Inventory events
-* Expiration information
-* Representative product images
-* Annotation submissions
-* Human annotations
-* Training runs
-* Training-data usage provenance
-* Model versions
-* Active/candidate model comparisons
-* Model activation history
-
-This allows the system to maintain both the current refrigerator state and a historical record of how the detector evolves.
-
-## Current Limitations
-
-Fridge 9000 is an academic prototype and currently has several limitations:
-
-* Product detection is limited by the classes represented in the training dataset.
-* Products hidden behind other objects may not be detected.
-* Receipt OCR accuracy depends heavily on receipt layout and image quality.
-* Estimated expiration dates are currently rule-based.
-* Some inventory operations still require user confirmation to avoid false updates.
-* Model promotion is metric-driven but is not intended to be a complete production MLOps platform.
-* Large ML model weights increase repository and deployment size.
-* The development mobile application requires the phone and backend machine to be mutually reachable when using a local backend address.
-
-## Project Goal
-
-The goal of Fridge 9000 is to demonstrate how multiple technologies can work together to create an intelligent household inventory system that can also improve its detector from reviewed real-world usage.
-
-Rather than relying on manual inventory tracking or a static one-time-trained model alone, Fridge 9000 combines:
-
-```text
-Computer Vision
-       +
-Human Review
-       +
-Versioned Model Improvement
-       +
-OCR
-       +
-Inventory History
-       +
-Expiration Tracking
-       +
-Mobile Interaction
-       =
-Adaptive Smart Fridge Management
-```
-
-The objective is to create a system capable of understanding **what is currently inside a refrigerator**, helping users manage inventory and expiration, while preserving a traceable process for improving the detector as reviewed data accumulates.
-
-## Authors
-
-Fridge 9000 was developed as a final academic project.
-
-## License
-
-This repository is currently intended for academic and educational use.
+Do not hardcode local IP addresses in the mobile source code.
