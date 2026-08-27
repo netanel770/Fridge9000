@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
+import psycopg2
 import pytest
 
 from backend.class_aware_metrics import build_class_aware_comparison
@@ -790,6 +791,56 @@ def test_comparison_persists_fingerprints_metrics_and_decision(
     progress = test_client.get("/ai-progress").json()
     assert progress["actions"]["can_promote"] is outperforms
     assert progress["comparison"] is not None
+
+
+def test_losing_candidate_blocks_training_until_explicit_rejection(
+    test_client, db_connection, lifecycle_context, submission_factory
+):
+    selected = [
+        submission_factory("assisted", "approved", "Apple"),
+        submission_factory("manual", "approved", "Milk"),
+    ]
+    trained = _run_successful_training(test_client, lifecycle_context)
+    candidate_version = trained["result"]["model_version"]
+
+    blocked = test_client.post("/model-lifecycle/train")
+    assert blocked.status_code == 409
+    assert "must be promoted or rejected" in blocked.json()["detail"]
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        with psycopg2.connect(lifecycle_context.database_url) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO model_versions(version, model_path, status) VALUES ('duplicate-candidate', 'duplicate.pt', 'candidate');"
+                )
+
+    compared = _run_comparison(
+        test_client,
+        lifecycle_context,
+        candidate_version,
+        {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.7},
+        {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.6},
+    )
+    assert compared["result"]["promotion_evaluation"]["reasons"][0]["code"] == "candidate_lost"
+    assert compared["result"]["auto_rejected"] is False
+    assert test_client.get("/ai-progress").json()["latest_candidate"]["version"] == candidate_version
+
+    rejected = test_client.post(f"/models/{candidate_version}/reject")
+    assert rejected.status_code == 200
+    assert rejected.json()["quarantined_submission_count"] == 2
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT status FROM model_versions WHERE version = %s;", (candidate_version,))
+        assert cursor.fetchone()[0] == "rejected"
+        cursor.execute(
+            "SELECT training_state FROM annotation_submissions WHERE id = ANY(%s) ORDER BY id;",
+            ([item["submission_id"] for item in selected],),
+        )
+        assert {row[0] for row in cursor.fetchall()} == {"quarantined"}
+    next_selected = [
+        submission_factory("assisted", "approved", "Lemon")["submission_id"],
+        submission_factory("manual", "approved", "Milk")["submission_id"],
+    ]
+    next_training = _run_successful_training(test_client, lifecycle_context, next_selected)
+    assert next_training["status"] == "completed"
 
 
 @pytest.mark.parametrize(

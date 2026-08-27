@@ -654,6 +654,13 @@ def _register_remote(
                      Json(class_aware["added_class_metrics"]), comparison.get("comparison_rule", "remote comparison"),
                      bool(comparison.get("candidate_outperforms_active")), str(_unique_file(output, "comparison.json"))),
                 )
+    except psycopg2.errors.UniqueViolation as exc:
+        shutil.rmtree(model_dir, ignore_errors=True)
+        if exc.diag.constraint_name != "idx_model_versions_single_candidate":
+            raise
+        raise ProviderError(
+            "Another unresolved candidate already exists; promote or reject it before registering a new candidate"
+        ) from exc
     except BaseException:
         shutil.rmtree(model_dir, ignore_errors=True)
         raise

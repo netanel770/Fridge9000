@@ -8,7 +8,7 @@ import { DetectionImageViewer } from "../src/components/DetectionImageViewer";
 import { BoundingBoxEditor } from "../src/components/BoundingBoxEditor";
 import { ProductLabelInput, uniqueProductLabels } from "../src/components/ProductLabelInput";
 import { lifecyclePhaseLabel, useLifecycleJob } from "../src/components/LifecycleJobProvider";
-import { createAnnotationSubmission, getAIProgress, getAllInventory, getAnnotationSubmission, getAnnotationSubmissions, getRecentScans, getScan, getScanDetections, getScanImageUrl, manageQuarantinedSubmission, moderateAnnotationSubmission, promoteCandidate, rollbackModel, startCandidateComparison, startCandidateTraining, updateAnnotationBox, updateAnnotationLabel } from "../src/services/api";
+import { createAnnotationSubmission, getAIProgress, getAllInventory, getAnnotationSubmission, getAnnotationSubmissions, getRecentScans, getScan, getScanDetections, getScanImageUrl, manageQuarantinedSubmission, moderateAnnotationSubmission, promoteCandidate, rejectCandidate, rollbackModel, startCandidateComparison, startCandidateTraining, updateAnnotationBox, updateAnnotationLabel } from "../src/services/api";
 import type { AIProgressResponse, AnnotationItem, AnnotationStatus, AnnotationSubmission, AnnotationSubmissionDetail, AnnotationTrainingState, DetectionItem, InventoryItem, ModelMetrics, PromotionReason, RecentScan } from "../src/types/api";
 import { areImageDimensionsCompatible, getMinimumAnnotationBoxSize } from "../src/utils/imageCoordinates";
 import type { ImageBoundingBox } from "../src/utils/imageCoordinates";
@@ -425,6 +425,27 @@ export default function TeachFridgeScreen() {
         finally { setLifecycleMutation(null); }
       } },
     ]);
+  }
+
+  function confirmCandidateRejection() {
+    if (!progressStats?.latest_candidate) return;
+    const version = progressStats.latest_candidate.version;
+    Alert.alert(
+      "Reject candidate?",
+      "This candidate will be rejected and its experimental submissions moved to Quarantine.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Reject", style: "destructive", onPress: async () => {
+          setLifecycleMutation("Reject Candidate"); setMutationError(""); setMutationMessage("");
+          try {
+            const result = await rejectCandidate(version);
+            setMutationMessage(`Candidate rejected. ${result.quarantined_submission_count} experimental submission${result.quarantined_submission_count === 1 ? " was" : "s were"} quarantined.`);
+            await Promise.all([loadProgress(), loadTrainingSelection(), loadContributions()]);
+          } catch (caught) { setMutationError(caught instanceof Error ? caught.message : "Candidate rejection failed."); }
+          finally { setLifecycleMutation(null); }
+        } },
+      ],
+    );
   }
 
   function startSelectedCandidateTraining() {
@@ -1278,6 +1299,7 @@ export default function TeachFridgeScreen() {
             <View style={styles.primaryLifecycleAction}>
               {progressStats.latest_candidate && (!progressStats.comparison || progressStats.promotion_evaluation.stale || progressStats.promotion_evaluation.reasons.some((reason) => ["comparison_missing", "missing_shared_classes", "malformed_class_metrics"].includes(reason.code))) ? <AppButton label={progressStats.comparison ? "Retry Comparison" : "Compare Candidate"} icon="analytics-outline" loading={lifecycle.action === "Compare Models"} disabled={lifecycle.busy || Boolean(lifecycleMutation) || !progressStats.actions.can_compare} onPress={() => lifecycle.runJob("Compare Models", () => startCandidateComparison(progressStats.latest_candidate!.version))} /> : null}
               {progressStats.latest_candidate && progressStats.comparison && !progressStats.promotion_evaluation.stale && progressStats.promotion_evaluation.eligible ? <AppButton label="Promote Candidate" icon="rocket-outline" loading={lifecycleMutation === "Promote Candidate"} disabled={lifecycle.busy || Boolean(lifecycleMutation) || !progressStats.actions.can_promote} onPress={confirmPromotion} /> : null}
+              {progressStats.latest_candidate && !progressStats.actions.can_promote ? <AppButton label="Reject Candidate" icon="close-circle-outline" variant="secondary" loading={lifecycleMutation === "Reject Candidate"} disabled={lifecycle.busy || Boolean(lifecycleMutation)} onPress={confirmCandidateRejection} /> : null}
               <AppButton label="Train Model" icon="school-outline" disabled={lifecycle.busy || Boolean(lifecycleMutation) || Boolean(progressStats.latest_candidate) || eligibleSubmissions.length === 0} onPress={() => setShowTrainingSelector(true)} />
               {progressStats.latest_candidate ? <Text style={styles.actionHint}>{progressStats.promotion_evaluation.stale || progressStats.promotion_evaluation.reasons.some((reason) => ["comparison_missing", "missing_shared_classes", "malformed_class_metrics"].includes(reason.code)) ? "Retry the comparison to resolve this candidate. You can manage and restore quarantined submissions now." : progressStats.comparison && !progressStats.promotion_evaluation.eligible ? "This candidate must be resolved before another training run. You can still manage Quarantine." : "Resolve the current candidate before training another model."}</Text> : eligibleSubmissions.length === 0 ? <Text style={styles.actionHint}>Restore or approve a submission to train.</Text> : null}
             </View>

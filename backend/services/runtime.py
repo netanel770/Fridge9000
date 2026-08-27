@@ -597,6 +597,8 @@ def ensure_schema():
                     ON model_versions(status);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_model_versions_single_active
                     ON model_versions(status) WHERE status = 'active';
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_model_versions_single_candidate
+                    ON model_versions(status) WHERE status = 'candidate';
 
                 INSERT INTO model_versions(version, model_path, status)
                 SELECT 'fridge9000-production-initial', 'best.pt', 'active'
@@ -2168,6 +2170,17 @@ def start_candidate_training(payload: Optional[Dict[str, Any]] = None):
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(9000, 1);")
+            cur.execute("SELECT version FROM model_versions WHERE status = 'candidate' LIMIT 1;")
+            unresolved_candidate = cur.fetchone()
+            if unresolved_candidate:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Candidate {unresolved_candidate['version']} must be promoted or rejected "
+                        "before starting another training run"
+                    ),
+                )
             if selected_submission_ids is not None:
                 cur.execute(
                     """

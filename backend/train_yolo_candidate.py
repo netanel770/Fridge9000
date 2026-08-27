@@ -401,7 +401,14 @@ def train_candidate(args):
         summary["training_completed_at"] = utc_now()
         model_version = f"fridge9000-detector-{run_id}"
         summary["model_version"] = model_version
-        complete_training_run(args.database_url, run_id, model_version, summary)
+        try:
+            complete_training_run(args.database_url, run_id, model_version, summary)
+        except psycopg2.errors.UniqueViolation as exc:
+            if exc.diag.constraint_name != "idx_model_versions_single_candidate":
+                raise
+            raise RuntimeError(
+                "Another unresolved candidate already exists; promote or reject it before registering a new candidate"
+            ) from exc
         summary["status"] = "completed"
         return summary, summary_path
     except BaseException as exc:
