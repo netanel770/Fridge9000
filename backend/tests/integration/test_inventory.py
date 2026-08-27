@@ -1,3 +1,4 @@
+import importlib
 from datetime import date, timedelta
 
 import pytest
@@ -68,6 +69,68 @@ def _assert_persisted_totals(db_connection, expected):
         name: (quantity, quantity) for name, quantity in expected.items()
     }
     assert all(batch_quantity >= 0 for batch_quantity, _ in actual.values())
+
+
+def _run_schema_initialization():
+    importlib.import_module("backend.services.runtime").ensure_schema()
+
+
+def test_schema_backfill_does_not_duplicate_existing_dated_batch(db_connection):
+    estimated_expiry = _future_date(14)
+    with db_connection.cursor() as cursor:
+        cursor.execute("INSERT INTO items(name, category) VALUES ('Lemon', 'Fruit') RETURNING id;")
+        item_id = cursor.fetchone()[0]
+        cursor.execute(
+            "INSERT INTO inventory(item_id, quantity, status) VALUES (%s, 1, 'LOW');",
+            (item_id,),
+        )
+        cursor.execute(
+            """
+            INSERT INTO inventory_batches(item_id, quantity, expiry_estimate_date, expiry_source)
+            VALUES (%s, 1, %s, 'estimated');
+            """,
+            (item_id, estimated_expiry),
+        )
+    db_connection.commit()
+
+    _run_schema_initialization()
+    _run_schema_initialization()
+
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT COUNT(*), SUM(quantity) FROM inventory_batches WHERE item_id = %s;",
+            (item_id,),
+        )
+        assert cursor.fetchone() == (1, 1)
+        cursor.execute("SELECT quantity FROM inventory WHERE item_id = %s;", (item_id,))
+        assert cursor.fetchone()[0] == 1
+
+
+def test_schema_backfill_creates_one_batch_for_genuine_legacy_inventory(db_connection):
+    with db_connection.cursor() as cursor:
+        cursor.execute("INSERT INTO items(name, category) VALUES ('Legacy Milk', 'Dairy') RETURNING id;")
+        item_id = cursor.fetchone()[0]
+        cursor.execute(
+            "INSERT INTO inventory(item_id, quantity, status) VALUES (%s, 3, 'OK');",
+            (item_id,),
+        )
+    db_connection.commit()
+
+    _run_schema_initialization()
+    _run_schema_initialization()
+
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT COUNT(*), SUM(quantity), MIN(expiry_source),
+                   BOOL_AND(expiry_date IS NULL AND expiry_estimate_date IS NULL)
+            FROM inventory_batches WHERE item_id = %s;
+            """,
+            (item_id,),
+        )
+        assert cursor.fetchone() == (1, 3, "manual", True)
+        cursor.execute("SELECT quantity FROM inventory WHERE item_id = %s;", (item_id,))
+        assert cursor.fetchone()[0] == 3
 
 
 def test_manual_add_creates_and_accumulates_inventory(test_client, db_connection):

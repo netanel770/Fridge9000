@@ -838,13 +838,11 @@ def ensure_schema():
                 INSERT INTO inventory_batches(item_id, quantity, expiry_date, expiry_estimate_date, expiry_source, created_at, last_updated)
                 SELECT inv.item_id, inv.quantity, NULL, NULL, 'manual', inv.last_updated, inv.last_updated
                 FROM inventory inv
-                LEFT JOIN inventory_batches b
-                    ON b.item_id = inv.item_id
-                   AND b.expiry_date IS NULL
-                   AND b.expiry_estimate_date IS NULL
-                   AND b.expiry_source = 'manual'
                 WHERE inv.quantity > 0
-                  AND b.id IS NULL;
+                  AND NOT EXISTS (
+                      SELECT 1 FROM inventory_batches b
+                      WHERE b.item_id = inv.item_id
+                  );
                 """
             )
             cur.execute("SELECT id FROM items;")
