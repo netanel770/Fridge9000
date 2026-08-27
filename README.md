@@ -8,9 +8,7 @@ Fridge 9000 is a smart refrigerator management system combining **computer visio
 
 The mobile app can scan refrigerator images, review AI detections, update inventory, track expiration dates, process receipts, analyze food freshness, and turn reviewed human corrections into improved object-detection models.
 
-The project is built around one central idea:
-
-> AI predictions should be useful immediately, while human corrections can safely improve future models without silently replacing the model currently serving the application.
+The system is designed so that AI predictions are useful immediately while human corrections can improve future models without silently replacing the detector currently serving the application.
 
 ---
 
@@ -54,11 +52,9 @@ Inventory supports:
 - Inventory history
 - Low-stock and missing-product alerts
 
-#### Important design choice: batches are authoritative
+Inventory batches are the authoritative representation of stored products.
 
-Inventory is represented by individual `inventory_batches`.
-
-The aggregate inventory quantity is derived from those batches rather than maintained as an independent source of truth.
+The aggregate quantity shown by the application is derived from those batches rather than maintained as an independent source of truth.
 
 ```text
 Inventory Batches
@@ -68,9 +64,9 @@ Quantity Aggregation
 Inventory Summary
 ```
 
-This keeps expiry information, open-product state, and quantities consistent.
+This allows multiple units of the same product to keep independent expiration dates and open-product state without drifting out of sync with the displayed quantity.
 
-Schema initialization is idempotent and only performs legacy backfill when an inventory item has no batch records at all.
+Schema initialization is also idempotent. Legacy inventory is backfilled only when an item has no batch records at all, preventing application restarts from creating duplicate inventory.
 
 ---
 
@@ -86,9 +82,7 @@ The backend uses **Tesseract OCR** to extract product names, which can then be r
 
 Fridge 9000 contains a separate image-classification model for supported food freshness / rot detection.
 
-#### Important design choice: freshness is a separate ML task
-
-Freshness classification is deliberately independent from YOLO product detection.
+Freshness classification is intentionally independent from YOLO product detection because the two models answer fundamentally different questions:
 
 ```text
 YOLO
@@ -98,7 +92,7 @@ Freshness Classifier
 → What condition is this product in?
 ```
 
-Keeping these pipelines separate prevents unrelated training lifecycles from becoming coupled.
+Keeping these pipelines separate also prevents freshness training from becoming coupled to the detector model lifecycle.
 
 ---
 
@@ -108,7 +102,7 @@ YOLO detections can be passed to **SAM2** to generate representative product mas
 
 YOLO identifies the object, while SAM2 refines the detected product region.
 
-Candidate masks are evaluated instead of automatically trusting the first generated mask.
+Candidate masks are evaluated instead of automatically accepting the first generated mask.
 
 ---
 
@@ -150,7 +144,7 @@ Model Comparison
 Promotion or Rejection
 ```
 
-Raw user feedback is never automatically treated as trusted training data.
+Raw user feedback is never automatically treated as trusted training data. Corrections must first pass through moderation before they can participate in training.
 
 ---
 
@@ -181,9 +175,7 @@ Data represented by the **currently active model's training lineage**.
 
 Experimental data belonging to a rejected candidate and excluded from normal training selection.
 
-#### Important design choice: trust follows the active model
-
-An annotation is not permanently trusted merely because it was used by a model at some point.
+Trust follows the model that is currently active rather than permanently attaching itself to an annotation after its first training run.
 
 For example:
 
@@ -200,16 +192,16 @@ Lemon Model ARCHIVED
 Lemon Annotations ELIGIBLE
 ```
 
-The annotations can then be selected again for another candidate.
+Those annotations become available for future candidate training again.
 
-If the Lemon model is later reactivated:
+If the existing Lemon model is later reactivated:
 
 ```text
 Lemon Model ACTIVE
 Lemon Annotations TRUSTED
 ```
 
-Startup reconciliation uses the same lifecycle semantics, so restarting the backend does not incorrectly make archived-only annotations trusted again.
+The same reconciliation also runs during application startup, so restarting the backend does not incorrectly treat archived-model provenance as active trusted data.
 
 ---
 
@@ -231,9 +223,9 @@ Training Run
 Model Version
 ```
 
-Manual annotations remain distinguishable from corrected YOLO predictions.
+Manual annotations remain distinguishable from corrected YOLO predictions, and training provenance is preserved across promotion, rejection, and rollback.
 
-Training provenance is preserved across promotion, rejection, and rollback.
+This makes it possible to determine not only which model is active, but also which human contributions were involved in producing it.
 
 ---
 
@@ -270,17 +262,11 @@ The system stores:
 - Promotion history
 - Rollback history
 
-Only one detector can be active at a time.
+Only one detector can be active at a time, and only one unresolved candidate is allowed at a time.
 
-Only one unresolved candidate can exist at a time.
+Candidate training never modifies the active detector. The existing model continues serving predictions while another model is trained and evaluated.
 
-#### Important design choice: candidate training never replaces production
-
-Training a candidate does not modify the active detector.
-
-The current model continues serving predictions while another model is trained and evaluated.
-
-Promotion is always explicit.
+Promotion is always an explicit action.
 
 ---
 
@@ -288,13 +274,13 @@ Promotion is always explicit.
 
 Previously active models remain available as archived model versions.
 
-From **Teach Fridge → AI Progress**, `Rollback model` appears when an archived model is available.
+From **Teach Fridge → AI Progress**, `Rollback model` appears when archived models are available.
 
-The user can open Training History and explicitly choose which archived model to restore.
+The user can open Training History and explicitly choose which model to restore.
 
-#### Important design choice: rollback means reactivation, not retraining
+Rollback is implemented as **model reactivation**, not retraining.
 
-Rollback reuses the existing:
+It reuses the existing:
 
 - Model version
 - Model artifact
@@ -302,7 +288,7 @@ Rollback reuses the existing:
 - Training run
 - Training provenance
 
-No new training job or duplicate model is created.
+No new training job or duplicate model version is created.
 
 For example:
 
@@ -316,7 +302,7 @@ Initial ARCHIVED
 Lemon ACTIVE
 ```
 
-The same model can later be switched back again:
+The same models can later be switched again:
 
 ```text
 Initial
@@ -324,17 +310,17 @@ Initial
 Lemon
 ```
 
-Previously active models can therefore be reused without repeating expensive training.
+This allows a previously deployed detector to be restored immediately without paying the cost or introducing the uncertainty of training it again.
 
-Rollback also reconciles annotation lifecycle state to match the newly active model.
+Changing the active model also reconciles annotation lifecycle state so that `trusted` data continues to reflect the model actually serving predictions.
 
 ---
 
 # Incremental Training
 
-Training only on new corrections could teach the detector a new product while causing it to forget existing products.
+Training only on newly collected corrections could teach the detector a new product while causing it to forget products it already recognizes.
 
-Fridge 9000 therefore combines permanent/base training data with reviewed corrections.
+Fridge 9000 therefore combines existing training knowledge with newly approved corrections.
 
 ```text
 Permanent Base Dataset
@@ -348,9 +334,9 @@ Combined Dataset
 Candidate Training
 ```
 
-A candidate must preserve the product classes already supported by the active model.
+A candidate must also preserve the product classes already supported by the active detector.
 
-This allows the system to learn new products without casually forgetting that milk exists, a surprisingly important property for a refrigerator.
+This allows the model to learn new products without sacrificing existing capabilities.
 
 ---
 
@@ -368,7 +354,7 @@ Comparison data includes:
 - Shared-class metrics
 - Added-class metrics
 
-The backend applies:
+The backend applies the promotion policy:
 
 ```text
 class-aware-promotion-v1
@@ -390,7 +376,7 @@ mAP50-95
 
 ## Candidate Adds New Classes
 
-When the candidate introduces new products:
+When a candidate introduces new products, performance on existing products is evaluated separately from performance on the new classes.
 
 ```text
 No existing class removed
@@ -412,13 +398,9 @@ MIN_ADDED_CLASS_MAP50_95=0.50
 MIN_ADDED_CLASS_PER_CLASS_MAP50_95=0.30
 ```
 
-This prevents strong performance on newly added products from hiding a serious regression on products already supported by the active detector.
+Separating shared and newly added classes prevents strong results on a new product from hiding a serious regression on products already supported by the active detector.
 
-The backend owns the final promotion decision.
-
-Passing the policy does **not** automatically activate the model.
-
-Promotion remains an explicit action.
+The backend owns the promotion decision. Passing the policy does **not** automatically activate the model.
 
 ---
 
@@ -436,11 +418,9 @@ and:
 TRAINING_PROVIDER=kaggle
 ```
 
-Local and remote training use the same model lifecycle.
+Both providers use the same model lifecycle.
 
-#### Important design choice: remote compute is not trusted
-
-Kaggle is treated as a GPU compute provider, not as the source of truth for the model registry.
+Kaggle is treated purely as a remote GPU compute provider rather than as the authority over Fridge model state.
 
 ```text
 Kaggle Training
@@ -458,9 +438,9 @@ Promotion Policy
 
 The backend validates returned artifacts, model identity, class mappings, metrics, class preservation, and comparison results before accepting a candidate.
 
-A remotely completed job can therefore still be rejected.
+A remote training job may therefore complete successfully while its resulting model is still rejected by Fridge 9000.
 
-The Fridge backend and PostgreSQL model registry remain authoritative.
+The backend and PostgreSQL model registry remain the source of truth.
 
 ---
 
@@ -486,7 +466,7 @@ The Fridge backend and PostgreSQL model registry remain authoritative.
       Local or Remote GPU
 ```
 
-The backend exposes separate API modules for areas including:
+The backend exposes separate API modules for:
 
 - Scans
 - Inventory
@@ -612,7 +592,7 @@ npm install
 cd ..
 ```
 
-Create your local environment file:
+Create the local environment file:
 
 ```cmd
 copy .env.example .env
@@ -707,19 +687,17 @@ backend/remote_training_jobs/
 
 These directories are intentionally ignored by Git.
 
-#### Important design choice: database and model artifacts must move together
+The model registry and model artifacts should be treated as a single persistent system.
 
-The database stores model registry information and model paths.
-
-The actual trained `.pt` files live in runtime storage such as:
+PostgreSQL stores information about model versions and their artifact paths, while the actual trained `.pt` files live in directories such as:
 
 ```text
 backend/candidate_models/
 ```
 
-Restoring only PostgreSQL without restoring the corresponding model artifacts can leave the registry pointing to files that do not exist.
+Restoring only PostgreSQL without restoring those files could leave the model registry pointing to artifacts that no longer exist.
 
-Fridge therefore includes a portable backup and restore workflow.
+For that reason, Fridge includes a backup and machine-transfer workflow that captures both.
 
 ---
 
@@ -733,7 +711,7 @@ import-fridge-data.bat
 scripts/fridge-data.ps1
 ```
 
-These scripts allow a development installation to be transferred between computers while preserving both database state and generated artifacts.
+These scripts allow a development installation to be moved between computers while preserving the database and generated runtime artifacts.
 
 ---
 
@@ -754,8 +732,8 @@ scripts/fridge-data.ps1 -Mode Export
 The export process:
 
 1. Records the current Git branch and commit.
-2. Stops the Fridge backend so runtime files are not changing during the snapshot.
-3. Keeps / starts PostgreSQL.
+2. Stops the Fridge backend so runtime files do not change during the snapshot.
+3. Keeps or starts PostgreSQL.
 4. Creates a PostgreSQL custom-format dump using `pg_dump`.
 5. Copies runtime directories.
 6. Copies the local `.env` if present.
@@ -784,7 +762,7 @@ backend/
 └── remote_training_jobs/   if present
 ```
 
-The PostgreSQL dump preserves application state including:
+The PostgreSQL dump preserves application state such as:
 
 - Inventory
 - Inventory batches
@@ -792,13 +770,13 @@ The PostgreSQL dump preserves application state including:
 - Annotation submissions
 - Annotation lifecycle states
 - Training runs
-- Dataset/model provenance
+- Dataset and model provenance
 - Model versions
 - Model comparisons
 - Active / archived model registry
 - Activation history
 
-The runtime folders preserve the actual files referenced by that database state, including trained candidate-model weights.
+The accompanying runtime folders preserve the physical files referenced by that database state, including trained model weights.
 
 The backend is intentionally left stopped after export.
 
@@ -806,18 +784,18 @@ The backend is intentionally left stopped after export.
 
 ## Import Fridge Data
 
-Import is intended for restoring a backup or transferring an existing Fridge installation to another machine.
+Import can be used either to restore a backup or transfer an existing Fridge installation to another development machine.
 
-First clone the repository on the destination computer:
+First clone the repository:
 
 ```bash
 git clone https://github.com/netanel770/Fridge9000.git
 cd Fridge9000
 ```
 
-Check out the appropriate branch/version if required.
+Check out the appropriate branch or revision if necessary.
 
-Install the mobile dependencies:
+Install mobile dependencies:
 
 ```bash
 cd mobile
@@ -825,7 +803,7 @@ npm install
 cd ..
 ```
 
-Then either drag the backup ZIP onto:
+Then drag the backup ZIP onto:
 
 ```text
 import-fridge-data.bat
@@ -837,15 +815,15 @@ or run:
 import-fridge-data.bat "C:\path\to\fridge9000-backup.zip"
 ```
 
-The import script requires explicit confirmation before replacing the destination machine's development state.
+Import requires explicit confirmation because it replaces the destination machine's existing Fridge development database and matching runtime directories.
 
 The importer:
 
 1. Extracts the backup.
-2. Reads the source manifest.
+2. Reads its source manifest.
 3. Stops the backend.
 4. Starts PostgreSQL.
-5. Restores the PostgreSQL dump using `pg_restore`.
+5. Restores the database using `pg_restore`.
 6. Restores runtime directories.
 7. Restores `.env` when included.
 8. Rebuilds and starts Fridge 9000.
@@ -857,25 +835,19 @@ The restored installation includes:
 Inventory
 Scans
 Annotations
-Annotation lifecycle state
-Training runs
-Model versions
-Model comparisons
-Activation history
-Active / archived models
-Trained model files
+Annotation Lifecycle State
+Training Runs
+Model Versions
+Model Comparisons
+Activation History
+Active / Archived Models
+Trained Model Files
 Uploads
 Datasets
-Comparison artifacts
+Comparison Artifacts
 ```
 
-### Important import warning
-
-Import replaces the destination development database and matching runtime directories.
-
-It is therefore intentionally protected by explicit confirmation.
-
-A backup should be created first if the destination machine already contains Fridge data that must be preserved.
+If the destination computer already contains Fridge data that should be preserved, export it before importing another backup.
 
 ---
 
@@ -949,7 +921,7 @@ The system:
 8. Compares it against the active detector.
 9. Applies the promotion policy.
 
-The active model remains unchanged throughout candidate training.
+The active detector remains unchanged throughout candidate training.
 
 Backend lifecycle activity can be viewed with:
 
@@ -961,11 +933,9 @@ docker compose logs -f backend
 
 # Testing
 
-Fridge 9000 uses a separate PostgreSQL test environment so automated tests do not mutate normal development data.
+Fridge 9000 uses a separate PostgreSQL test environment so automated tests do not modify normal development data.
 
-#### Important design choice: tests do not use development PostgreSQL
-
-Model-lifecycle and inventory tests deliberately exercise operations such as:
+This separation is especially important because lifecycle and inventory tests deliberately exercise operations such as:
 
 - Schema initialization
 - Candidate registration
@@ -977,7 +947,7 @@ Model-lifecycle and inventory tests deliberately exercise operations such as:
 - Annotation trust reconciliation
 - Inventory batch migration
 
-These operations therefore run against isolated test state rather than the developer's real inventory, annotations, or trained models.
+Those operations run against isolated test state rather than a developer's real inventory, annotations, or trained models.
 
 ---
 
@@ -1052,10 +1022,10 @@ npx expo-doctor
 - Annotation trust follows the currently active model's lineage.
 - Archived model provenance alone does not make annotations trusted.
 - Rollback reactivates existing archived models without retraining.
-- Previously active models remain reusable as long as their registered artifacts remain valid.
+- Previously active models remain reusable as long as their registered artifacts remain available.
 - Local and Kaggle training use the same lifecycle.
-- Kaggle provides compute; the Fridge backend remains the source of truth.
-- Freshness classification remains separate from YOLO model lifecycle.
+- Kaggle provides compute while the Fridge backend remains the source of truth.
+- Freshness classification remains separate from the YOLO detector lifecycle.
 - Development and test PostgreSQL environments are separated.
 - Database backups and trained model artifacts must be transferred together.
 
@@ -1099,4 +1069,4 @@ into one end-to-end smart refrigerator system.
 
 The important part is not only that the application can make predictions.
 
-Fridge 9000 can collect corrections, preserve where those corrections came from, train candidate models without disturbing production, evaluate candidates before deployment, reject unsafe changes, reactivate previous models without retraining, and preserve the entire application and ML lifecycle when moving between development machines.
+Fridge 9000 can collect corrections, preserve where those corrections came from, train candidate models without disturbing the active detector, evaluate candidates before deployment, reject unsafe changes, reactivate previous models without retraining, and preserve the application and ML lifecycle when moving between development machines.
