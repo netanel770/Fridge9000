@@ -1,4 +1,6 @@
+import copy
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -323,6 +325,78 @@ class TrainingProviderTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(providers.ProviderError, "banana"):
             providers._remote_class_aware_comparison(comparison)
+
+    def test_remote_value_float_tolerance_accepts_only_harmless_drift(self):
+        self.assertTrue(providers._remote_value_matches(0.3 + 1e-16, 0.3))
+        self.assertTrue(providers._remote_value_matches(1.0 + 5e-10, 1.0))
+        self.assertTrue(providers._remote_value_matches(5e-13, 0.0))
+
+        self.assertFalse(providers._remote_value_matches(1.0 + 2e-9, 1.0))
+        self.assertFalse(providers._remote_value_matches(2e-12, 0.0))
+        self.assertFalse(providers._remote_value_matches(0.81, 0.8))
+
+    def test_remote_value_rejects_nonfinite_metrics_and_numeric_booleans(self):
+        for value in (math.nan, math.inf, -math.inf):
+            with self.subTest(value=value):
+                self.assertFalse(providers._remote_value_matches(value, 0.8))
+                self.assertFalse(providers._remote_value_matches(value, value))
+
+        self.assertTrue(providers._remote_value_matches(True, True))
+        self.assertFalse(providers._remote_value_matches(False, True))
+        self.assertFalse(providers._remote_value_matches(True, 1.0))
+        self.assertFalse(providers._remote_value_matches(1, True))
+
+    def test_remote_value_keeps_structures_and_non_float_values_strict(self):
+        expected_dict = {"metric": 0.8, "class_count": 2}
+        self.assertFalse(providers._remote_value_matches({"metric": 0.8}, expected_dict))
+        self.assertFalse(
+            providers._remote_value_matches(
+                {"metric": 0.8, "class_count": 2, "extra": None},
+                expected_dict,
+            )
+        )
+
+        expected_list = ["apple", "banana"]
+        self.assertFalse(providers._remote_value_matches(["banana", "apple"], expected_list))
+        self.assertFalse(providers._remote_value_matches(["apple"], expected_list))
+        self.assertFalse(providers._remote_value_matches(["apple", "milk"], expected_list))
+        self.assertFalse(providers._remote_value_matches(3, 2))
+        self.assertFalse(providers._remote_value_matches(2.0, 2))
+
+    def test_remote_class_aware_comparison_tolerates_drift_but_rejects_mismatch(self):
+        metrics = {
+            "precision": 0.8,
+            "recall": 0.7,
+            "map50": 0.6,
+            "map50_95": 0.5,
+        }
+
+        def evaluation(classes):
+            return {
+                "classes": classes,
+                "per_class": [
+                    {"class_id": index, "name": name, **metrics}
+                    for index, name in enumerate(classes)
+                ],
+            }
+
+        active = evaluation(["apple", "milk"])
+        candidate = evaluation(["milk", "apple", "lemon"])
+        expected = providers.build_class_aware_comparison(active, candidate)
+        comparison = {
+            "active_model": active,
+            "candidate_model": candidate,
+            **copy.deepcopy(expected),
+        }
+        comparison["shared_class_comparison"]["candidate_metrics"]["precision"] += 1e-16
+        comparison["added_class_metrics"]["per_class"]["lemon"]["map50_95"] += 5e-13
+
+        self.assertEqual(providers._remote_class_aware_comparison(comparison), expected)
+
+        mismatched = copy.deepcopy(comparison)
+        mismatched["shared_class_comparison"]["candidate_metrics"]["precision"] += 1e-4
+        with self.assertRaisesRegex(providers.ProviderError, "shared_class_comparison"):
+            providers._remote_class_aware_comparison(mismatched)
 
 
 if __name__ == "__main__":
