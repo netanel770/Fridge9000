@@ -21,20 +21,59 @@ import type {
   FreshnessAnalysisResponse,
 } from "../types/api";
 
-async function handleJsonResponse<T>(response: Response): Promise<T> {
-  if (!response.ok) {
-    const text = await response.text();
+export class ApiError extends Error {
+  readonly status: number;
+  readonly body: unknown;
+
+  constructor(message: string, status: number, body?: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.body = body;
+  }
+}
+
+function validationErrorMessage(value: unknown) {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.msg !== "string") return null;
+  const location = Array.isArray(record.loc)
+    ? record.loc.filter((part) => part !== "body").map(String).join(".")
+    : "";
+  return location ? `${location}: ${record.msg}` : record.msg;
+}
+
+export function normalizeApiError(value: unknown, fallback = "Request failed"): string {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (Array.isArray(value)) {
+    const messages = value.map(validationErrorMessage).filter((message): message is string => Boolean(message));
+    if (messages.length) return messages.join("; ");
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.message === "string" && record.message.trim()) return record.message.trim();
+    if (typeof record.error === "string" && record.error.trim()) return record.error.trim();
+    if ("detail" in record) return normalizeApiError(record.detail, fallback);
     try {
-      const data = JSON.parse(text);
-      throw new Error(data.detail || data.error || "Request failed");
-    } catch (error) {
-      if (error instanceof Error && error.name === "Error") {
-        throw error;
-      }
-      throw new Error(text || "Request failed");
+      const serialized = JSON.stringify(value);
+      if (serialized && serialized !== "{}") return serialized;
+    } catch {
+      // Fall through to the stable fallback for non-serializable responses.
     }
   }
-  return response.json();
+  return fallback;
+}
+
+export async function handleJsonResponse<T>(response: Response): Promise<T> {
+  const text = await response.text();
+  if (!response.ok) {
+    let body: unknown = text;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {}
+    throw new ApiError(normalizeApiError(body, `Request failed (${response.status})`), response.status, body);
+  }
+  return (text ? JSON.parse(text) : undefined) as T;
 }
 
 export async function getInventory(signal?: AbortSignal): Promise<InventoryItem[]> {
@@ -49,13 +88,7 @@ export async function getInventoryBatches(signal?: AbortSignal): Promise<Invento
 
 export async function getAllInventory(): Promise<InventoryItem[]> {
   const res = await fetch(`${API_BASE_URL}/inventory/all`);
-  const data = await res.json();
-
-  if (!res.ok) {
-    throw new Error(data.detail || data.error || "Failed to load all inventory");
-  }
-
-  return data;
+  return handleJsonResponse<InventoryItem[]>(res);
 }
 
 export async function searchInventoryItems(query: string) {
@@ -89,10 +122,9 @@ export async function manualInventoryUpdate(
     }),
   });
 
-  const data = await res.json();
-
-  if (!res.ok || data.ok === false) {
-    throw new Error(data.detail || data.error || "Manual inventory update failed");
+  const data = await handleJsonResponse<any>(res);
+  if (data.ok === false) {
+    throw new ApiError(normalizeApiError(data, "Manual inventory update failed"), res.status, data);
   }
 
   return data;
@@ -138,10 +170,9 @@ export async function submitReview(
     }),
   });
 
-  const data = await res.json();
-
-  if (!res.ok || data.ok === false) {
-    throw new Error(data.detail || data.error || "Review submit failed");
+  const data = await handleJsonResponse<any>(res);
+  if (data.ok === false) {
+    throw new ApiError(normalizeApiError(data, "Review submit failed"), res.status, data);
   }
 
   return data;
@@ -169,9 +200,9 @@ export async function addInventoryItem(
     }),
     signal,
   });
-  const data = (await res.json()) as ManualInventoryResponse;
-  if (!res.ok || !data.ok) {
-    throw new Error(data.error || `Request failed: ${res.status}`);
+  const data = await handleJsonResponse<ManualInventoryResponse>(res);
+  if (!data.ok) {
+    throw new ApiError(normalizeApiError(data, "Inventory update failed"), res.status, data);
   }
   return data;
 }
@@ -224,13 +255,7 @@ export async function updateInventoryByImage(
     body: formData,
   });
 
-  const data = await res.json();
-
-  if (!res.ok) {
-    throw new Error(data.detail || data.error || "Image update failed");
-  }
-
-  return data;
+  return handleJsonResponse<any>(res);
 }
 
 export async function uploadReceiptPdf(file: any) {
@@ -247,12 +272,9 @@ export async function uploadReceiptPdf(file: any) {
     body: formData,
   });
 
-  const data = await res.json();
-
-  if (!res.ok || data.ok === false) {
-    throw new Error(
-      data.detail || data.error || "Receipt upload failed"
-    );
+  const data = await handleJsonResponse<any>(res);
+  if (data.ok === false) {
+    throw new ApiError(normalizeApiError(data, "Receipt upload failed"), res.status, data);
   }
 
   return data;

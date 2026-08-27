@@ -3,7 +3,7 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-nati
 import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
 
-import { getLifecycleJob } from "../services/api";
+import { ApiError, getLifecycleJob } from "../services/api";
 import type { LifecycleJob } from "../types/api";
 import { colors, radius, spacing } from "../theme";
 
@@ -54,6 +54,7 @@ export function LifecycleJobProvider({ children }: { children: ReactNode }) {
     setError("");
     try {
       let current = await start();
+      let missingJob = false;
       setJob(current);
       while (current.status === "queued" || current.status === "running") {
         await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -61,10 +62,17 @@ export function LifecycleJobProvider({ children }: { children: ReactNode }) {
           current = await getLifecycleJob(current.job_id);
           setJob(current);
           setError("");
-        } catch {
+        } catch (caught) {
+          if (caught instanceof ApiError && caught.status === 404) {
+            missingJob = true;
+            setJob(null);
+            setError("This lifecycle job can no longer be found. The backend may have restarted. Refresh AI Progress to recheck the current model state.");
+            break;
+          }
           setError("Connection interrupted. Still checking the current lifecycle job.");
         }
       }
+      if (missingJob) return;
       if (current.status === "failed") throw new Error(conciseLifecycleError(current.error?.message || `${label} failed.`));
       if (current.kind === "COMPARE" && current.result?.auto_rejected === true) {
         const quarantined = Number(current.result.quarantined_submission_count || 0);
