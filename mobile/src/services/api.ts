@@ -308,8 +308,14 @@ export async function getAIProgress(): Promise<AIProgressResponse> {
   return handleJsonResponse<AIProgressResponse>(res);
 }
 
-export async function startCandidateTraining(): Promise<LifecycleJob> {
-  const res = await fetch(`${API_BASE_URL}/model-lifecycle/train`, { method: "POST" });
+export async function startCandidateTraining(submissionIds?: number[]): Promise<LifecycleJob> {
+  const res = await fetch(`${API_BASE_URL}/model-lifecycle/train`, {
+    method: "POST",
+    ...(submissionIds ? {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ submission_ids: submissionIds }),
+    } : {}),
+  });
   return handleJsonResponse<LifecycleJob>(res);
 }
 
@@ -328,6 +334,11 @@ export async function promoteCandidate(version: string, comparisonId: string) {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ comparison_id: comparisonId }),
   });
   return handleJsonResponse<{ ok: boolean; active_version: string }>(res);
+}
+
+export async function rejectCandidate(version: string) {
+  const res = await fetch(`${API_BASE_URL}/models/${encodeURIComponent(version)}/reject`, { method: "POST" });
+  return handleJsonResponse<{ ok: boolean; model_version: string; quarantined_submission_count: number }>(res);
 }
 
 export async function rollbackModel(version: string) {
@@ -350,6 +361,19 @@ export async function moderateAnnotationSubmission(
     body: JSON.stringify({ status }),
   });
   const data = await handleJsonResponse<{ ok: boolean; submission: AnnotationSubmission }>(res);
+  return data.submission;
+}
+
+export async function manageQuarantinedSubmission(
+  submissionId: number,
+  action: "restore" | "reject",
+): Promise<AnnotationSubmission> {
+  const res = await fetch(`${API_BASE_URL}/annotation-submissions/${submissionId}/quarantine`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+  const data = await handleJsonResponse<{ ok: boolean; action: string; submission: AnnotationSubmission }>(res);
   return data.submission;
 }
 

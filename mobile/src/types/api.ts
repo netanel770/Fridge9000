@@ -114,6 +114,7 @@ export type RecentScan = {
 
 export type AnnotationAction = "CONFIRM" | "RELABEL" | "ADJUST_BOX" | "ADD" | "REMOVE";
 export type AnnotationStatus = "pending" | "approved" | "rejected" | "used";
+export type AnnotationTrainingState = "eligible" | "experimental" | "trusted" | "quarantined";
 export type AnnotationTrainingUsage = {
   dataset_version: string;
   training_run_id: string;
@@ -152,6 +153,8 @@ export type AnnotationSubmission = {
   reviewed_at?: string | null;
   annotation_count?: number | string;
   training_status?: "used" | "not_used";
+  training_state?: AnnotationTrainingState;
+  training_lifecycle_state?: AnnotationTrainingState;
   training_usages?: AnnotationTrainingUsage[];
 };
 
@@ -274,6 +277,7 @@ export type ModelComparisonSummary = {
 
 export type AIProgressResponse = {
   active_model: LifecycleModel;
+  active_classes: string[];
   latest_candidate?: LifecycleModel | null;
   comparison?: ModelComparisonSummary | null;
   promotion_evaluation: PromotionEvaluation;
@@ -307,6 +311,7 @@ export type LifecycleJob = {
   provider?: string;
   training_run_id?: string;
   dataset_version?: string;
+  selected_submission_ids?: number[] | null;
   remote_dataset?: string;
   remote_kernel?: string;
   created_at: string;

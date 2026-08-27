@@ -236,10 +236,19 @@ def _active_model() -> dict[str, Any]:
     return active
 
 
-def _export(job_id: str) -> tuple[Path, dict[str, Any]]:
+def _export(
+    job_id: str, selected_submission_ids: list[int] | None = None
+) -> tuple[Path, dict[str, Any]]:
     from export_yolo_dataset import DEFAULT_SPLIT_SEED, export_dataset
     target = BACKEND_DIR / "dataset_exports" / job_id
-    summary = export_dataset(DATABASE_URL, target, BACKEND_DIR / "uploads", 0.2, DEFAULT_SPLIT_SEED)
+    summary = export_dataset(
+        DATABASE_URL,
+        target,
+        BACKEND_DIR / "uploads",
+        0.2,
+        DEFAULT_SPLIT_SEED,
+        selected_submission_ids,
+    )
     manifest = _json(target / "manifest.json")
     if manifest.get("source_submission_status") != "approved":
         raise ProviderError("Export is not restricted to approved submissions")
@@ -304,9 +313,13 @@ def _prepare_local_combined_dataset(
     return correction_dir
 
 
-def local_training(job_id: str, progress: Progress) -> dict[str, Any]:
+def local_training(
+    job_id: str,
+    progress: Progress,
+    selected_submission_ids: list[int] | None = None,
+) -> dict[str, Any]:
     from train_yolo_candidate import train_candidate
-    dataset_dir, export_summary = _export(job_id)
+    dataset_dir, export_summary = _export(job_id, selected_submission_ids)
     active = _active_model()
     progress(phase="combining_local_dataset", dataset_version=export_summary["dataset_version"])
     dataset_dir = _prepare_local_combined_dataset(
@@ -541,6 +554,12 @@ def _register_remote(
     model_path = model_dir / "candidate.pt"
     shutil.copy2(weights, model_path)
     submission_ids = dataset_manifest.get("included_submission_ids") or []
+    experimental_ids = dataset_manifest.get("experimental_submission_ids")
+    if experimental_ids is not None and any(not isinstance(value, int) or isinstance(value, bool) for value in experimental_ids):
+        raise ProviderError("Remote dataset contains invalid experimental submission IDs")
+    experimental_ids = None if experimental_ids is None else sorted(set(experimental_ids))
+    if experimental_ids is not None and not set(experimental_ids).issubset(submission_ids):
+        raise ProviderError("Remote experimental submissions are not part of its dataset")
     comparison_id = f"remote-{run_id}"
     try:
         with psycopg2.connect(DATABASE_URL) as connection:
@@ -549,10 +568,20 @@ def _register_remote(
                 current_active = cursor.fetchone()
                 if not current_active or current_active[0] != active["id"]:
                     raise ProviderError("Active model changed while remote training was running; refusing stale registration")
-                cursor.execute("SELECT id,status FROM annotation_submissions WHERE id=ANY(%s) FOR UPDATE;", (submission_ids,))
+                cursor.execute("SELECT id,status,training_state FROM annotation_submissions WHERE id=ANY(%s) FOR UPDATE;", (submission_ids,))
                 rows = cursor.fetchall()
                 if {row[0] for row in rows} != set(submission_ids) or any(row[1] not in ("approved", "used") for row in rows):
                     raise ProviderError("Remote dataset contains missing or non-approved submissions")
+                states = {row[0]: row[2] for row in rows}
+                if experimental_ids is None:
+                    experimental_ids = sorted(value for value in submission_ids if states[value] == "eligible")
+                invalid_trusted = [value for value in submission_ids if value not in experimental_ids and states[value] != "trusted"]
+                invalid_experimental = [value for value in experimental_ids if states[value] != "eligible"]
+                if invalid_trusted or invalid_experimental:
+                    raise ProviderError(
+                        "Remote training submission lifecycle changed while training was running: "
+                        f"baseline={invalid_trusted}, experimental={invalid_experimental}"
+                    )
                 cursor.execute(
                     """UPDATE training_runs SET status='completed',ended_at=NOW(),candidate_model_path=%s,
                        precision=%s,recall=%s,map50=%s,map50_95=%s,error=NULL WHERE id=%s AND status='running';""",
@@ -567,14 +596,18 @@ def _register_remote(
                 )
                 model_id = cursor.fetchone()[0]
                 cursor.execute(
-                    """INSERT INTO training_run_submission_usage(training_run_id,submission_id,dataset_version,model_version_id)
-                       SELECT %s,id,%s,%s FROM annotation_submissions WHERE id=ANY(%s);""",
-                    (run_id, dataset_version, model_id, submission_ids),
+                    """INSERT INTO training_run_submission_usage(training_run_id,submission_id,dataset_version,model_version_id,is_experimental)
+                       SELECT %s,id,%s,%s,id=ANY(%s) FROM annotation_submissions WHERE id=ANY(%s);""",
+                    (run_id, dataset_version, model_id, experimental_ids, submission_ids),
                 )
                 cursor.execute(
-                    """INSERT INTO training_run_annotation_usage(training_run_id,annotation_id,submission_id,dataset_version,model_version_id)
-                       SELECT %s,a.id,a.submission_id,%s,%s FROM annotations a WHERE a.submission_id=ANY(%s);""",
-                    (run_id, dataset_version, model_id, submission_ids),
+                    """INSERT INTO training_run_annotation_usage(training_run_id,annotation_id,submission_id,dataset_version,model_version_id,is_experimental)
+                       SELECT %s,a.id,a.submission_id,%s,%s,a.submission_id=ANY(%s) FROM annotations a WHERE a.submission_id=ANY(%s);""",
+                    (run_id, dataset_version, model_id, experimental_ids, submission_ids),
+                )
+                cursor.execute(
+                    "UPDATE annotation_submissions SET training_state='experimental' WHERE id=ANY(%s) AND training_state='eligible';",
+                    (experimental_ids,),
                 )
                 cursor.execute(
                     """INSERT INTO model_comparisons(id,dataset_version,dataset_content_sha256,validation_split_sha256,
@@ -595,7 +628,12 @@ def _register_remote(
     return {"provider": "kaggle", "training_run_id": run_id, "dataset_version": dataset_version, "model_version": candidate_version, "comparison_id": comparison_id}
 
 
-def kaggle_training(job_id: str, progress: Progress, runner: KaggleCommandRunner | None = None) -> dict[str, Any]:
+def kaggle_training(
+    job_id: str,
+    progress: Progress,
+    runner: KaggleCommandRunner | None = None,
+    selected_submission_ids: list[int] | None = None,
+) -> dict[str, Any]:
     runner = runner or KaggleCommandRunner()
     run_id = f"remote-{job_id}"
     record_created = False
@@ -607,7 +645,7 @@ def kaggle_training(job_id: str, progress: Progress, runner: KaggleCommandRunner
         missing_artifacts = [path.name for path in (trainer_script, kernel_metadata) if not path.is_file()]
         if missing_artifacts:
             raise ProviderError(f"Kaggle trainer artifacts are missing from the backend image: {', '.join(missing_artifacts)}")
-        dataset_dir, export_summary = _export(job_id)
+        dataset_dir, export_summary = _export(job_id, selected_submission_ids)
         dataset_version = export_summary["dataset_version"]
         active = _active_model()
         starting_weights = KAGGLE_STARTING_WEIGHTS_PATH.resolve()

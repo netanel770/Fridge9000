@@ -53,17 +53,25 @@ def resolve_image_path(image_ref: str, backend_root: Path, uploads_root: Path) -
     return None
 
 
-def fetch_export_rows(connection):
+def fetch_export_rows(connection, selected_submission_ids: list[int] | None = None):
     with connection.cursor(cursor_factory=RealDictCursor) as cur:
+        selection_sql = ""
+        params = []
+        if selected_submission_ids is not None:
+            selection_sql = "AND (s.training_state = 'trusted' OR s.id = ANY(%s))"
+            params.append(selected_submission_ids)
         cur.execute(
-            """
+            f"""
             SELECT s.id AS submission_id, s.scan_id, s.image_width, s.image_height,
-                   s.created_at AS submission_created_at, sc.image_ref
+                   s.created_at AS submission_created_at, s.training_state, sc.image_ref
             FROM annotation_submissions s
             JOIN scans sc ON sc.id = s.scan_id
-            WHERE s.status = 'approved'
+            WHERE s.status IN ('approved', 'used')
+              AND s.training_state IN ('eligible', 'trusted')
+              {selection_sql}
             ORDER BY s.scan_id, s.created_at, s.id;
-            """
+            """,
+            params,
         )
         submissions = cur.fetchall()
         if not submissions:
@@ -239,7 +247,14 @@ def dataset_identity(samples, classes, val_fraction: float, split_seed: str):
     return f"fridge9000-yolo-v1-{digest[:16]}", digest, content
 
 
-def export_dataset(database_url: str, output_dir: Path, uploads_root: Path, val_fraction: float = 0.2, split_seed: str = DEFAULT_SPLIT_SEED):
+def export_dataset(
+    database_url: str,
+    output_dir: Path,
+    uploads_root: Path,
+    val_fraction: float = 0.2,
+    split_seed: str = DEFAULT_SPLIT_SEED,
+    selected_submission_ids: list[int] | None = None,
+):
     if output_dir.exists():
         raise FileExistsError(f"Output path already exists: {output_dir}")
     output_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -248,7 +263,22 @@ def export_dataset(database_url: str, output_dir: Path, uploads_root: Path, val_
     connection = psycopg2.connect(database_url)
     try:
         connection.set_session(readonly=True, autocommit=False)
-        submissions, detections, annotations = fetch_export_rows(connection)
+        submissions, detections, annotations = fetch_export_rows(
+            connection, selected_submission_ids
+        )
+        if selected_submission_ids is not None:
+            selected = set(selected_submission_ids)
+            exported = {
+                int(row["submission_id"])
+                for row in submissions
+                if row["training_state"] == "eligible"
+            }
+            if exported != selected:
+                missing = sorted(selected - exported)
+                raise ValueError(
+                    "Selected annotation submissions are no longer eligible: "
+                    + ", ".join(str(value) for value in missing)
+                )
     finally:
         connection.close()
 
@@ -334,6 +364,32 @@ def export_dataset(database_url: str, output_dir: Path, uploads_root: Path, val_
         (temp_dir / "data.yaml").write_text(f"train: images/train\nval: images/val\nnc: {len(classes)}\n{names_section}", encoding="utf-8")
         (temp_dir / "classes.json").write_text(json.dumps({"classes": classes}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         included_submission_ids = sorted(submission_id for sample in samples for submission_id in sample["submission_ids"])
+        state_by_submission = {
+            int(row["submission_id"]): row["training_state"] for row in submissions
+        }
+        required_submission_ids = set(state_by_submission)
+        omitted_submission_ids = sorted(required_submission_ids - set(included_submission_ids))
+        if omitted_submission_ids:
+            reasons = {
+                int(item["submission_id"]): item["reason"] for item in skipped
+                if int(item["submission_id"]) in omitted_submission_ids
+            }
+            detail = "; ".join(
+                f"{submission_id}: {reasons.get(submission_id, 'not exported')}"
+                for submission_id in omitted_submission_ids
+            )
+            raise ValueError(
+                "Training export omitted required trusted or selected submissions: "
+                + detail
+            )
+        trusted_submission_ids = [
+            submission_id for submission_id in included_submission_ids
+            if state_by_submission[submission_id] == "trusted"
+        ]
+        experimental_submission_ids = [
+            submission_id for submission_id in included_submission_ids
+            if state_by_submission[submission_id] == "eligible"
+        ]
         manifest = {
             "dataset_id": dataset_id,
             "dataset_version": dataset_id,
@@ -342,6 +398,8 @@ def export_dataset(database_url: str, output_dir: Path, uploads_root: Path, val_
             "content_sha256": content_sha256,
             "source_submission_status": "approved",
             "included_submission_ids": included_submission_ids,
+            "trusted_submission_ids": trusted_submission_ids,
+            "experimental_submission_ids": experimental_submission_ids,
             "image_count": len(samples),
             "annotation_count": annotation_total,
             "class_mapping": classes,

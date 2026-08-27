@@ -262,6 +262,9 @@ class TrainingProviderTests(unittest.TestCase):
                         "dataset_version": "corrections-v1",
                         "source_submission_status": "approved",
                         "class_mapping": [{"id": 0, "name": "lemon"}],
+                        "included_submission_ids": [10, 11, 12],
+                        "trusted_submission_ids": [10, 11],
+                        "experimental_submission_ids": [12],
                     }
                 ),
                 encoding="utf-8",
@@ -279,6 +282,9 @@ class TrainingProviderTests(unittest.TestCase):
                 [entry["name"] for entry in manifest["class_mapping"]],
                 ["apple", "banana", "milk", "lemon"],
             )
+            self.assertEqual(manifest["included_submission_ids"], [10, 11, 12])
+            self.assertEqual(manifest["trusted_submission_ids"], [10, 11])
+            self.assertEqual(manifest["experimental_submission_ids"], [12])
             correction_manifest = json.loads(
                 (root / "job-1-corrections" / "manifest.json").read_text(
                     encoding="utf-8"

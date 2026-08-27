@@ -231,8 +231,13 @@ def _prepare_contributions(submission_factory):
     }
 
 
-def _run_successful_training(test_client, lifecycle_context):
-    response = test_client.post("/model-lifecycle/train")
+def _run_successful_training(
+    test_client, lifecycle_context, submission_ids=None
+):
+    response = test_client.post(
+        "/model-lifecycle/train",
+        json={"submission_ids": submission_ids} if submission_ids is not None else None,
+    )
     assert response.status_code == 200
     job = response.json()
     assert job["kind"] == "TRAIN"
@@ -700,15 +705,16 @@ def test_comparison_persists_fingerprints_metrics_and_decision(
     assert row["candidate_outperforms_active"] is outperforms
     assert _active_count(db_connection) == 1
 
-    progress = test_client.get("/ai-progress").json()
-    assert progress["comparison"]["id"] == comparison_id
-    assert progress["comparison"]["candidate_outperforms_active"] is outperforms
-    assert progress["promotion_evaluation"]["mode"] == "same_classes"
-    assert progress["promotion_evaluation"]["eligible"] is outperforms
-    assert [reason["code"] for reason in progress["promotion_evaluation"]["reasons"]] == (
+    decision = compared["result"]["promotion_evaluation"]
+    assert decision["mode"] == "same_classes"
+    assert decision["eligible"] is outperforms
+    assert compared["result"]["auto_rejected"] is not outperforms
+    assert [reason["code"] for reason in decision["reasons"]] == (
         [] if outperforms else ["candidate_lost"]
     )
+    progress = test_client.get("/ai-progress").json()
     assert progress["actions"]["can_promote"] is outperforms
+    assert (progress["comparison"] is not None) is outperforms
 
 
 @pytest.mark.parametrize(
@@ -837,10 +843,8 @@ def test_expanded_candidate_records_shared_regression_and_added_class_quality(
     assert added["per_class"]["Cheese"]["map50_95"] == pytest.approx(0.45)
     assert added["per_class"]["Orange"]["map50_95"] == pytest.approx(0.12)
 
-    progress = test_client.get("/ai-progress").json()
-    assert progress["comparison"]["class_comparison"] == classes
-    assert progress["comparison"]["shared_class_comparison"] == shared
-    assert progress["comparison"]["added_class_metrics"] == added
+    assert compared["result"]["auto_rejected"] is True
+    assert compared["result"]["promotion_evaluation"]["eligible"] is False
 
 
 @pytest.mark.parametrize("invalid_metric", [float("nan"), float("inf"), float("-inf"), "0.5"])
@@ -1007,6 +1011,453 @@ def test_promotion_and_rollback_preserve_single_active_and_history(
     )
 
 
+def test_rejected_candidate_quarantines_only_its_experimental_batch(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    baseline_a = submission_factory("assisted", "approved", "Apple")
+    baseline_b = submission_factory("manual", "approved", "Milk")
+    first = _run_successful_training(test_client, lifecycle_context)
+    first_version = first["result"]["model_version"]
+    compared = _run_comparison(
+        test_client,
+        lifecycle_context,
+        first_version,
+        {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.5},
+        {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.6},
+    )
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (
+            SimpleNamespace(task="detect"),
+            str(Path(record["model_path"]).resolve()),
+        ),
+    )
+    promoted = test_client.post(
+        f"/models/{first_version}/promote",
+        json={"comparison_id": compared["result"]["comparison_id"]},
+    )
+    assert promoted.status_code == 200
+
+    experimental_d = submission_factory("manual", "approved", "Lemon")
+    second = _run_successful_training(test_client, lifecycle_context)
+    second_version = second["result"]["model_version"]
+    second_run = second["result"]["training_run_id"]
+    second_manifest = json.loads(
+        (
+            lifecycle_context.root
+            / "dataset_exports"
+            / second["job_id"]
+            / "manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    baseline_ids = {baseline_a["submission_id"], baseline_b["submission_id"]}
+    assert set(second_manifest["trusted_submission_ids"]) == baseline_ids
+    assert second_manifest["experimental_submission_ids"] == [
+        experimental_d["submission_id"]
+    ]
+    assert set(second_manifest["included_submission_ids"]) == baseline_ids | {
+        experimental_d["submission_id"]
+    }
+
+    rejected = test_client.post(f"/models/{second_version}/reject")
+    assert rejected.status_code == 200
+    assert rejected.json()["quarantined_submission_count"] == 1
+
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, training_state FROM annotation_submissions ORDER BY id;"
+        )
+        states = dict(cursor.fetchall())
+        cursor.execute(
+            """
+            SELECT submission_id, is_experimental
+            FROM training_run_submission_usage
+            WHERE training_run_id = %s ORDER BY submission_id;
+            """,
+            (second_run,),
+        )
+        usage = dict(cursor.fetchall())
+        cursor.execute(
+            """
+            SELECT submission_id, is_experimental
+            FROM training_run_annotation_usage
+            WHERE training_run_id = %s ORDER BY submission_id;
+            """,
+            (second_run,),
+        )
+        annotation_usage = dict(cursor.fetchall())
+    assert {states[value] for value in baseline_ids} == {"trusted"}
+    assert states[experimental_d["submission_id"]] == "quarantined"
+    assert usage == {
+        baseline_a["submission_id"]: False,
+        baseline_b["submission_id"]: False,
+        experimental_d["submission_id"]: True,
+    }
+    assert annotation_usage == usage
+
+    experimental_e = submission_factory("manual", "approved", "Orange")
+    third = _run_successful_training(test_client, lifecycle_context)
+    third_manifest = json.loads(
+        (
+            lifecycle_context.root
+            / "dataset_exports"
+            / third["job_id"]
+            / "manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert set(third_manifest["trusted_submission_ids"]) == baseline_ids
+    assert third_manifest["experimental_submission_ids"] == [
+        experimental_e["submission_id"]
+    ]
+    assert set(third_manifest["included_submission_ids"]) == baseline_ids | {
+        experimental_e["submission_id"]
+    }
+    assert experimental_d["submission_id"] not in third_manifest[
+        "included_submission_ids"
+    ]
+
+
+def test_failed_promotion_request_does_not_quarantine_candidate_data(
+    test_client, db_connection, lifecycle_context, submission_factory
+):
+    contribution = submission_factory("manual", "approved", "Lemon")
+    submission_factory("assisted", "approved", "Milk")
+    trained = _run_successful_training(test_client, lifecycle_context)
+    candidate_version = trained["result"]["model_version"]
+
+    failed = test_client.post(f"/models/{candidate_version}/promote", json={})
+    assert failed.status_code == 400
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT training_state FROM annotation_submissions WHERE id = %s;",
+            (contribution["submission_id"],),
+        )
+        assert cursor.fetchone()[0] == "experimental"
+        cursor.execute(
+            "SELECT status FROM model_versions WHERE version = %s;",
+            (candidate_version,),
+        )
+        assert cursor.fetchone()[0] == "candidate"
+
+
+def test_failed_candidate_auto_quarantines_only_selected_experimental_submissions(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    baseline_a = submission_factory("assisted", "approved", "Apple")
+    baseline_b = submission_factory("manual", "approved", "Milk")
+    baseline = _run_successful_training(test_client, lifecycle_context)
+    baseline_version = baseline["result"]["model_version"]
+    compared = _run_comparison(
+        test_client,
+        lifecycle_context,
+        baseline_version,
+        {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.5},
+        {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.6},
+    )
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (
+            SimpleNamespace(task="detect"),
+            str(Path(record["model_path"]).resolve()),
+        ),
+    )
+    assert test_client.post(
+        f"/models/{baseline_version}/promote",
+        json={"comparison_id": compared["result"]["comparison_id"]},
+    ).status_code == 200
+
+    selected_d = submission_factory("manual", "approved", "Lemon")
+    unselected_e = submission_factory("manual", "approved", "Orange")
+    selected_f = submission_factory("manual", "approved", "Bread")
+    selected_ids = [selected_d["submission_id"], selected_f["submission_id"]]
+    candidate = _run_successful_training(
+        test_client, lifecycle_context, selected_ids
+    )
+    manifest = json.loads(
+        (
+            lifecycle_context.root
+            / "dataset_exports"
+            / candidate["job_id"]
+            / "manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    trusted_ids = {baseline_a["submission_id"], baseline_b["submission_id"]}
+    assert set(manifest["trusted_submission_ids"]) == trusted_ids
+    assert set(manifest["experimental_submission_ids"]) == set(selected_ids)
+    assert set(manifest["included_submission_ids"]) == trusted_ids | set(selected_ids)
+    assert unselected_e["submission_id"] not in manifest["included_submission_ids"]
+
+    compared = _run_comparison(
+        test_client,
+        lifecycle_context,
+        candidate["result"]["model_version"],
+        {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.7},
+        {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.6},
+    )
+    assert compared["result"]["auto_rejected"] is True
+    assert compared["result"]["quarantined_submission_count"] == 2
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, training_state FROM annotation_submissions ORDER BY id;"
+        )
+        states = dict(cursor.fetchall())
+    assert {states[value] for value in selected_ids} == {"quarantined"}
+    assert states[unselected_e["submission_id"]] == "eligible"
+
+    next_candidate = _run_successful_training(
+        test_client, lifecycle_context, [unselected_e["submission_id"]]
+    )
+    next_manifest = json.loads(
+        (
+            lifecycle_context.root
+            / "dataset_exports"
+            / next_candidate["job_id"]
+            / "manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert set(next_manifest["included_submission_ids"]) == trusted_ids | {
+        unselected_e["submission_id"]
+    }
+
+
+def test_quarantined_submissions_can_be_restored_or_permanently_rejected(
+    test_client, db_connection, lifecycle_context, submission_factory
+):
+    restore_item = submission_factory("manual", "approved", "Milk")
+    reject_item = submission_factory("manual", "approved", "Lemon")
+    selected_ids = [restore_item["submission_id"], reject_item["submission_id"]]
+    candidate = _run_successful_training(test_client, lifecycle_context, selected_ids)
+    compared = _run_comparison(
+        test_client,
+        lifecycle_context,
+        candidate["result"]["model_version"],
+        {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.7},
+        {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.6},
+    )
+    assert compared["result"]["auto_rejected"] is True
+
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT COUNT(*) FROM training_run_submission_usage WHERE submission_id = ANY(%s);",
+            (selected_ids,),
+        )
+        usage_count = cursor.fetchone()[0]
+    assert usage_count == 2
+
+    restored = test_client.post(
+        f"/annotation-submissions/{restore_item['submission_id']}/quarantine",
+        json={"action": "restore"},
+    )
+    rejected = test_client.post(
+        f"/annotation-submissions/{reject_item['submission_id']}/quarantine",
+        json={"action": "reject"},
+    )
+    assert restored.status_code == 200
+    assert restored.json()["submission"]["training_state"] == "eligible"
+    assert restored.json()["submission"]["status"] == "approved"
+    assert rejected.status_code == 200
+    assert rejected.json()["submission"]["training_state"] == "quarantined"
+    assert rejected.json()["submission"]["status"] == "rejected"
+
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT COUNT(*) FROM training_run_submission_usage WHERE submission_id = ANY(%s);",
+            (selected_ids,),
+        )
+        assert cursor.fetchone()[0] == usage_count
+
+    assert test_client.post(
+        f"/annotation-submissions/{restore_item['submission_id']}/quarantine",
+        json={"action": "restore"},
+    ).status_code == 409
+
+
+def test_selected_batch_becomes_trusted_on_promotion_and_joins_next_baseline(
+    test_client, lifecycle_context, submission_factory, monkeypatch
+):
+    baseline_a = submission_factory("assisted", "approved", "Apple")
+    baseline_b = submission_factory("manual", "approved", "Milk")
+    first = _run_successful_training(test_client, lifecycle_context)
+    first_version = first["result"]["model_version"]
+    metrics = {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.5}
+    better = {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.6}
+    first_comparison = _run_comparison(
+        test_client, lifecycle_context, first_version, metrics, better
+    )
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (
+            SimpleNamespace(task="detect"),
+            str(Path(record["model_path"]).resolve()),
+        ),
+    )
+    assert test_client.post(
+        f"/models/{first_version}/promote",
+        json={"comparison_id": first_comparison["result"]["comparison_id"]},
+    ).status_code == 200
+
+    selected_d = submission_factory("manual", "approved", "Lemon")
+    future_e = submission_factory("manual", "approved", "Orange")
+    second = _run_successful_training(
+        test_client, lifecycle_context, [selected_d["submission_id"]]
+    )
+    second_version = second["result"]["model_version"]
+    second_comparison = _run_comparison(
+        test_client, lifecycle_context, second_version, metrics, better
+    )
+    assert test_client.post(
+        f"/models/{second_version}/promote",
+        json={"comparison_id": second_comparison["result"]["comparison_id"]},
+    ).status_code == 200
+
+    third = _run_successful_training(
+        test_client, lifecycle_context, [future_e["submission_id"]]
+    )
+    manifest = json.loads(
+        (
+            lifecycle_context.root
+            / "dataset_exports"
+            / third["job_id"]
+            / "manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert set(manifest["trusted_submission_ids"]) == {
+        baseline_a["submission_id"],
+        baseline_b["submission_id"],
+        selected_d["submission_id"],
+    }
+    assert manifest["experimental_submission_ids"] == [future_e["submission_id"]]
+
+
+def test_explicit_selection_rejects_duplicates_and_ineligible_ids(
+    test_client, db_connection, lifecycle_context, submission_factory
+):
+    eligible = submission_factory("manual", "approved", "Lemon")
+    rejected = submission_factory("manual", "rejected", "Bread")
+    pending = submission_factory("manual", "pending", "Orange")
+    trusted = submission_factory("manual", "approved", "Milk")
+    experimental = submission_factory("manual", "approved", "Apple")
+    quarantined = submission_factory("manual", "approved", "Cheese")
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE annotation_submissions SET training_state='trusted' WHERE id=%s;",
+            (trusted["submission_id"],),
+        )
+        cursor.execute(
+            "UPDATE annotation_submissions SET training_state='experimental' WHERE id=%s;",
+            (experimental["submission_id"],),
+        )
+        cursor.execute(
+            "UPDATE annotation_submissions SET training_state='quarantined' WHERE id=%s;",
+            (quarantined["submission_id"],),
+        )
+    db_connection.commit()
+
+    invalid_payloads = [
+        ([], 400),
+        ([eligible["submission_id"], eligible["submission_id"]], 400),
+        ([999999], 409),
+        ([trusted["submission_id"]], 409),
+        ([experimental["submission_id"]], 409),
+        ([quarantined["submission_id"]], 409),
+        ([rejected["submission_id"]], 409),
+        ([pending["submission_id"]], 409),
+    ]
+    for submission_ids, expected_status in invalid_payloads:
+        response = test_client.post(
+            "/model-lifecycle/train", json={"submission_ids": submission_ids}
+        )
+        assert response.status_code == expected_status
+
+    with lifecycle_context.runtime._LIFECYCLE_JOB_LOCK:
+        assert lifecycle_context.runtime._LIFECYCLE_JOBS == {}
+
+
+def test_eligible_submission_details_preserve_multiple_final_labels(
+    test_client, db_connection, submission_factory
+):
+    milk = submission_factory("manual", "approved", "Whole Milk")
+    apple = submission_factory("manual", "approved", "Apple")
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO annotations(
+                submission_id, action, final_label,
+                final_x1, final_y1, final_x2, final_y2
+            ) VALUES (%s, 'ADD', 'Lemon', 20, 15, 75, 68);
+            """,
+            (milk["submission_id"],),
+        )
+    db_connection.commit()
+
+    listed = test_client.get("/annotation-submissions").json()
+    eligible_ids = {
+        row["id"] for row in listed
+        if row["status"] in {"approved", "used"}
+        and row["training_lifecycle_state"] == "eligible"
+    }
+    assert eligible_ids == {milk["submission_id"], apple["submission_id"]}
+
+    details = {
+        submission_id: test_client.get(
+            f"/annotation-submissions/{submission_id}"
+        ).json()
+        for submission_id in eligible_ids
+    }
+    assert {
+        annotation["final_label"]
+        for annotation in details[milk["submission_id"]]["annotations"]
+    } == {"Whole Milk", "Lemon"}
+    assert {
+        annotation["final_label"]
+        for annotation in details[apple["submission_id"]]["annotations"]
+    } == {"Apple"}
+
+
+def test_training_fails_if_selected_submission_is_omitted_during_export(
+    test_client, db_connection, lifecycle_context, submission_factory
+):
+    selected_a = submission_factory("manual", "approved", "Milk")
+    selected_b = submission_factory("manual", "approved", "Lemon")
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT image_ref FROM scans WHERE id = %s;",
+            (selected_b["scan_id"],),
+        )
+        Path(cursor.fetchone()[0]).unlink()
+
+    response = test_client.post(
+        "/model-lifecycle/train",
+        json={
+            "submission_ids": [
+                selected_a["submission_id"], selected_b["submission_id"]
+            ]
+        },
+    )
+    assert response.status_code == 200
+    job = response.json()
+    assert job["status"] == "failed"
+    assert "omitted required trusted or selected submissions" in job["error"]["message"]
+
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, training_state FROM annotation_submissions ORDER BY id;"
+        )
+        assert dict(cursor.fetchall()) == {
+            selected_a["submission_id"]: "eligible",
+            selected_b["submission_id"]: "eligible",
+        }
+        cursor.execute("SELECT COUNT(*) FROM training_run_submission_usage;")
+        assert cursor.fetchone()[0] == 0
+        cursor.execute("SELECT COUNT(*) FROM training_run_annotation_usage;")
+        assert cursor.fetchone()[0] == 0
+        cursor.execute("SELECT COUNT(*) FROM model_versions WHERE status='candidate';")
+        assert cursor.fetchone()[0] == 0
+
+
 def test_invalid_promotion_and_rollback_leave_active_model_unchanged(
     test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
 ):
@@ -1037,8 +1488,7 @@ def test_invalid_promotion_and_rollback_leave_active_model_unchanged(
         test_client.post("/models/unknown/rollback"),
         test_client.post(f"/models/{candidate_version}/rollback"),
     ]
-    assert [response.status_code for response in attempts] == [404, 400, 409, 409, 404, 409]
-    assert "did not outperform" in attempts[2].json()["detail"]
+    assert [response.status_code for response in attempts] == [404, 409, 409, 409, 404, 409]
     assert _active_count(db_connection) == 1
     with db_connection.cursor() as cursor:
         cursor.execute("SELECT version FROM model_versions WHERE status = 'active';")
@@ -1230,12 +1680,14 @@ def test_expansion_policy_blocks_regression_low_quality_and_removed_classes(
         added_map50_95=added_scores,
     )
     comparison_id = compared["result"]["comparison_id"]
-    progress = test_client.get("/ai-progress").json()
-    decision = progress["promotion_evaluation"]
+    decision = compared["result"]["promotion_evaluation"]
     assert decision["mode"] == "expanded_classes"
     assert decision["eligible"] is False
     assert reason_code in {reason["code"] for reason in decision["reasons"]}
-    assert progress["actions"]["can_promote"] is decision["eligible"]
+    assert compared["result"]["auto_rejected"] is True
+    progress = test_client.get("/ai-progress").json()
+    assert progress["latest_candidate"] is None
+    assert progress["actions"]["can_promote"] is False
 
     monkeypatch.setattr(
         lifecycle_context.runtime,

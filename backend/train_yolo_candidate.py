@@ -87,10 +87,16 @@ def complete_training_run(database_url: str, run_id: str, model_version: str, su
     if not submission_ids or any(not isinstance(value, int) or isinstance(value, bool) for value in submission_ids):
         raise RuntimeError("Training dataset does not contain valid included submission IDs")
     submission_ids = sorted(set(submission_ids))
+    experimental_ids = summary.get("experimental_submission_ids")
+    if experimental_ids is not None and any(not isinstance(value, int) or isinstance(value, bool) for value in experimental_ids):
+        raise RuntimeError("Training dataset does not contain valid experimental submission IDs")
+    experimental_ids = None if experimental_ids is None else sorted(set(experimental_ids))
+    if experimental_ids is not None and not set(experimental_ids).issubset(submission_ids):
+        raise RuntimeError("Experimental submissions are not a subset of the training dataset")
     with psycopg2.connect(database_url) as connection:
         with connection.cursor() as cur:
             cur.execute(
-                "SELECT id, status FROM annotation_submissions WHERE id = ANY(%s) FOR UPDATE;",
+                "SELECT id, status, training_state FROM annotation_submissions WHERE id = ANY(%s) FOR UPDATE;",
                 (submission_ids,),
             )
             submissions = cur.fetchall()
@@ -99,6 +105,16 @@ def complete_training_run(database_url: str, run_id: str, model_version: str, su
             invalid = [row[0] for row in submissions if row[1] not in ("approved", "used")]
             if invalid:
                 raise RuntimeError(f"Training dataset contains non-approved submissions: {invalid}")
+            states = {row[0]: row[2] for row in submissions}
+            if experimental_ids is None:
+                experimental_ids = sorted(value for value in submission_ids if states[value] == "eligible")
+            invalid_trusted = [value for value in submission_ids if value not in experimental_ids and states[value] != "trusted"]
+            invalid_experimental = [value for value in experimental_ids if states[value] != "eligible"]
+            if invalid_trusted or invalid_experimental:
+                raise RuntimeError(
+                    "Training submission lifecycle changed while training was running: "
+                    f"baseline={invalid_trusted}, experimental={invalid_experimental}"
+                )
             cur.execute(
                 """
                 UPDATE training_runs SET
@@ -131,27 +147,36 @@ def complete_training_run(database_url: str, run_id: str, model_version: str, su
             cur.execute(
                 """
                 INSERT INTO training_run_submission_usage(
-                    training_run_id, submission_id, dataset_version, model_version_id
+                    training_run_id, submission_id, dataset_version, model_version_id, is_experimental
                 )
-                SELECT %s, id, %s, %s
+                SELECT %s, id, %s, %s, id = ANY(%s)
                 FROM annotation_submissions
                 WHERE id = ANY(%s);
                 """,
-                (run_id, summary["dataset_version"], model_version_id, submission_ids),
+                (run_id, summary["dataset_version"], model_version_id, experimental_ids, submission_ids),
             )
             cur.execute(
                 """
                 INSERT INTO training_run_annotation_usage(
-                    training_run_id, annotation_id, submission_id, dataset_version, model_version_id
+                    training_run_id, annotation_id, submission_id, dataset_version, model_version_id, is_experimental
                 )
-                SELECT %s, a.id, a.submission_id, %s, %s
+                SELECT %s, a.id, a.submission_id, %s, %s, a.submission_id = ANY(%s)
                 FROM annotations a
                 WHERE a.submission_id = ANY(%s);
                 """,
-                (run_id, summary["dataset_version"], model_version_id, submission_ids),
+                (run_id, summary["dataset_version"], model_version_id, experimental_ids, submission_ids),
+            )
+            used_annotation_count = cur.rowcount
+            cur.execute(
+                """
+                UPDATE annotation_submissions
+                SET training_state = 'experimental'
+                WHERE id = ANY(%s) AND training_state = 'eligible';
+                """,
+                (experimental_ids,),
             )
             summary["used_submission_ids"] = submission_ids
-            summary["used_annotation_count"] = cur.rowcount
+            summary["used_annotation_count"] = used_annotation_count
 
 
 def fail_training_run(database_url: str, run_id: str, summary: dict[str, Any]):
@@ -303,6 +328,7 @@ def train_candidate(args):
         manifest, data_yaml = validate_dataset(dataset_dir, args.dataset_version)
         summary["dataset_content_sha256"] = manifest.get("content_sha256")
         summary["included_submission_ids"] = manifest.get("included_submission_ids", [])
+        summary["experimental_submission_ids"] = manifest.get("experimental_submission_ids")
         model = YOLO(str(active_model))
         if model.task != "detect":
             raise ValueError(f"Starting weights must be an object-detection model, got task={model.task!r}")

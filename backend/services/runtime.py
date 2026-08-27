@@ -499,10 +499,28 @@ def ensure_schema():
                     reviewed_at TIMESTAMP
                 );
 
+                ALTER TABLE annotation_submissions
+                    ADD COLUMN IF NOT EXISTS training_state TEXT NOT NULL DEFAULT 'eligible';
+
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'annotation_submissions_training_state_check'
+                          AND conrelid = 'annotation_submissions'::regclass
+                    ) THEN
+                        ALTER TABLE annotation_submissions
+                        ADD CONSTRAINT annotation_submissions_training_state_check
+                        CHECK (training_state IN ('eligible', 'experimental', 'trusted', 'quarantined'));
+                    END IF;
+                END $$;
+
                 CREATE INDEX IF NOT EXISTS idx_annotation_submissions_scan_id
                     ON annotation_submissions(scan_id);
                 CREATE INDEX IF NOT EXISTS idx_annotation_submissions_status
                     ON annotation_submissions(status);
+                CREATE INDEX IF NOT EXISTS idx_annotation_submissions_training_state
+                    ON annotation_submissions(training_state);
 
                 CREATE TABLE IF NOT EXISTS annotations (
                     id SERIAL PRIMARY KEY,
@@ -591,8 +609,12 @@ def ensure_schema():
                     dataset_version TEXT NOT NULL,
                     model_version_id INT NOT NULL REFERENCES model_versions(id) ON DELETE RESTRICT,
                     used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    is_experimental BOOLEAN NOT NULL DEFAULT FALSE,
                     PRIMARY KEY (training_run_id, submission_id)
                 );
+
+                ALTER TABLE training_run_submission_usage
+                    ADD COLUMN IF NOT EXISTS is_experimental BOOLEAN NOT NULL DEFAULT FALSE;
 
                 CREATE INDEX IF NOT EXISTS idx_training_submission_usage_submission
                     ON training_run_submission_usage(submission_id, used_at DESC);
@@ -606,13 +628,65 @@ def ensure_schema():
                     dataset_version TEXT NOT NULL,
                     model_version_id INT NOT NULL REFERENCES model_versions(id) ON DELETE RESTRICT,
                     used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    is_experimental BOOLEAN NOT NULL DEFAULT FALSE,
                     PRIMARY KEY (training_run_id, annotation_id)
                 );
+
+                ALTER TABLE training_run_annotation_usage
+                    ADD COLUMN IF NOT EXISTS is_experimental BOOLEAN NOT NULL DEFAULT FALSE;
 
                 CREATE INDEX IF NOT EXISTS idx_training_annotation_usage_annotation
                     ON training_run_annotation_usage(annotation_id, used_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_training_annotation_usage_submission
                     ON training_run_annotation_usage(submission_id, used_at DESC);
+
+                -- Backfill lifecycle state for databases created before explicit
+                -- training trust existed. Active/archived lineage wins over any
+                -- rejected experiment that happened to reuse the same submission.
+                UPDATE annotation_submissions s
+                SET training_state = 'trusted'
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM training_run_submission_usage u
+                    JOIN model_versions m ON m.id = u.model_version_id
+                    WHERE u.submission_id = s.id AND m.status IN ('active', 'archived')
+                );
+
+                UPDATE annotation_submissions s
+                SET training_state = 'quarantined'
+                WHERE s.training_state = 'eligible'
+                  AND EXISTS (
+                    SELECT 1
+                    FROM training_run_submission_usage u
+                    JOIN model_versions m ON m.id = u.model_version_id
+                    WHERE u.submission_id = s.id AND m.status = 'rejected'
+                );
+
+                UPDATE annotation_submissions s
+                SET training_state = 'experimental'
+                WHERE s.training_state = 'eligible'
+                  AND EXISTS (
+                    SELECT 1
+                    FROM training_run_submission_usage u
+                    JOIN model_versions m ON m.id = u.model_version_id
+                    WHERE u.submission_id = s.id AND m.status = 'candidate'
+                );
+
+                UPDATE training_run_submission_usage u
+                SET is_experimental = TRUE
+                FROM annotation_submissions s, model_versions m
+                WHERE u.submission_id = s.id
+                  AND u.model_version_id = m.id
+                  AND s.training_state IN ('experimental', 'quarantined')
+                  AND m.status IN ('candidate', 'rejected');
+
+                UPDATE training_run_annotation_usage u
+                SET is_experimental = TRUE
+                FROM annotation_submissions s, model_versions m
+                WHERE u.submission_id = s.id
+                  AND u.model_version_id = m.id
+                  AND s.training_state IN ('experimental', 'quarantined')
+                  AND m.status IN ('candidate', 'rejected');
 
                 CREATE TABLE IF NOT EXISTS model_comparisons (
                     id TEXT PRIMARY KEY,
@@ -1052,6 +1126,18 @@ def _activate_model(version: str, action: str, comparison_id: Optional[str] = No
 
                 cur.execute("UPDATE model_versions SET status = 'archived' WHERE id = %s;", (current["id"],))
                 cur.execute("UPDATE model_versions SET status = 'active' WHERE id = %s;", (target["id"],))
+                if action == "PROMOTE" and target.get("training_run_id"):
+                    cur.execute(
+                        """
+                        UPDATE annotation_submissions s
+                        SET training_state = 'trusted'
+                        FROM training_run_submission_usage u
+                        WHERE u.training_run_id = %s
+                          AND u.submission_id = s.id
+                          AND u.is_experimental;
+                        """,
+                        (target["training_run_id"],),
+                    )
                 cur.execute(
                     """
                     INSERT INTO model_activation_history(action, from_model_id, to_model_id, comparison_id)
@@ -1089,6 +1175,80 @@ def health():
 
 def promote_model(version: str, payload: Dict[str, Any]):
     return _activate_model(version, "PROMOTE", payload.get("comparison_id"))
+
+
+def reject_model(version: str):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(9000, 1);")
+            cur.execute(
+                "SELECT id, status, training_run_id FROM model_versions WHERE version = %s FOR UPDATE;",
+                (version,),
+            )
+            candidate = cur.fetchone()
+            if not candidate:
+                raise HTTPException(status_code=404, detail="Model version not found")
+            if candidate["status"] != "candidate":
+                raise HTTPException(status_code=409, detail="Reject requires a model with status 'candidate'")
+            cur.execute(
+                """
+                UPDATE annotation_submissions s
+                SET training_state = 'quarantined'
+                FROM training_run_submission_usage u
+                WHERE u.training_run_id = %s
+                  AND u.submission_id = s.id
+                  AND u.is_experimental
+                  AND s.training_state = 'experimental';
+                """,
+                (candidate["training_run_id"],),
+            )
+            quarantined_count = cur.rowcount
+            cur.execute("UPDATE model_versions SET status = 'rejected' WHERE id = %s;", (candidate["id"],))
+        conn.commit()
+    return {
+        "ok": True,
+        "action": "REJECT",
+        "model_version": version,
+        "quarantined_submission_count": quarantined_count,
+    }
+
+
+def _finalize_candidate_comparison(version: str, result: Dict[str, Any]):
+    """Reject a freshly compared candidate when the promotion policy fails."""
+    comparison_id = result.get("comparison_id")
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT id FROM model_versions WHERE status = 'active' LIMIT 1;")
+            active = cur.fetchone()
+            cur.execute(
+                "SELECT id FROM model_versions WHERE version = %s AND status = 'candidate';",
+                (version,),
+            )
+            candidate = cur.fetchone()
+            cur.execute(
+                """
+                SELECT id, active_model_id, candidate_model_id, active_metrics,
+                       candidate_metrics, candidate_outperforms_active,
+                       class_comparison, shared_class_comparison, added_class_metrics
+                FROM model_comparisons WHERE id = %s;
+                """,
+                (comparison_id,),
+            )
+            comparison = cur.fetchone()
+    if not active or not candidate or not comparison:
+        return result
+
+    decision = _promotion_decision(comparison, active["id"], candidate["id"])
+    finalized = {**result, "promotion_evaluation": decision, "auto_rejected": False}
+    if decision["eligible"] or decision["stale"]:
+        return finalized
+
+    rejection = reject_model(version)
+    return {
+        **finalized,
+        "auto_rejected": True,
+        "quarantined_submission_count": rejection["quarantined_submission_count"],
+    }
 
 
 def rollback_model(version: str):
@@ -1715,6 +1875,7 @@ def list_annotation_submissions(status: Optional[str] = None):
     sql = """
         SELECT s.*,
                (SELECT COUNT(*) FROM annotations a WHERE a.submission_id = s.id) AS annotation_count,
+               s.training_state AS training_lifecycle_state,
                CASE WHEN s.status = 'used' OR EXISTS (
                    SELECT 1 FROM training_run_submission_usage u WHERE u.submission_id = s.id
                ) THEN 'used' ELSE 'not_used' END AS training_status,
@@ -1791,6 +1952,24 @@ def get_ai_progress():
                 """
             )
             active = cur.fetchone()
+
+            active_classes = []
+            if active:
+                cur.execute(
+                    """
+                    SELECT CASE
+                        WHEN candidate_model_id = %s THEN class_comparison->'candidate_classes'
+                        ELSE class_comparison->'active_classes'
+                    END AS classes
+                    FROM model_comparisons
+                    WHERE active_model_id = %s OR candidate_model_id = %s
+                    ORDER BY created_at DESC LIMIT 1;
+                    """,
+                    (active["id"], active["id"], active["id"]),
+                )
+                class_row = cur.fetchone()
+                active_classes = (class_row or {}).get("classes") or []
+
             cur.execute(
                 """
                 SELECT id, version, status, created_at, dataset_version, training_run_id,
@@ -1817,6 +1996,7 @@ def get_ai_progress():
                     (candidate["id"],),
                 )
                 comparison = cur.fetchone()
+
             cur.execute(
                 """
                 SELECT id, version, status, created_at, dataset_version, training_run_id
@@ -1829,23 +2009,41 @@ def get_ai_progress():
             cur.execute(
                 """
                 SELECT
-                    COUNT(*) FILTER (WHERE s.status IN ('approved', 'used')) AS total_approved,
-                    COUNT(*) FILTER (WHERE s.status = 'used' OR EXISTS (
-                        SELECT 1 FROM training_run_submission_usage u WHERE u.submission_id = s.id
-                    )) AS used_in_training,
-                    COUNT(*) FILTER (WHERE s.status = 'approved' AND NOT EXISTS (
-                        SELECT 1 FROM training_run_submission_usage u WHERE u.submission_id = s.id
-                    )) AS approved_waiting
+                    COUNT(*) FILTER (
+                        WHERE s.status IN ('approved', 'used')
+                    ) AS total_approved,
+
+                    COUNT(*) FILTER (
+                        WHERE s.status = 'used'
+                           OR EXISTS (
+                               SELECT 1
+                               FROM training_run_submission_usage u
+                               WHERE u.submission_id = s.id
+                           )
+                    ) AS used_in_training,
+
+                    COUNT(*) FILTER (
+                        WHERE s.status IN ('approved', 'used')
+                          AND s.training_state = 'eligible'
+                    ) AS approved_waiting
+
                 FROM annotation_submissions s;
                 """
             )
             contributions = cur.fetchone()
+
             cur.execute(
                 """
-                SELECT tr.id AS training_run_id, tr.dataset_version, tr.started_at, tr.ended_at,
-                       tr.status, tr.training_parameters, mv.version AS model_version
+                SELECT tr.id AS training_run_id,
+                       tr.dataset_version,
+                       tr.started_at,
+                       tr.ended_at,
+                       tr.status,
+                       tr.training_parameters,
+                       mv.version AS model_version
                 FROM training_runs tr
-                LEFT JOIN model_versions mv ON mv.training_run_id = tr.id
+                LEFT JOIN model_versions mv
+                    ON mv.training_run_id = tr.id
                 ORDER BY tr.started_at DESC
                 LIMIT 8;
                 """
@@ -1857,11 +2055,67 @@ def get_ai_progress():
         active["id"] if active else None,
         candidate["id"] if candidate else None,
     )
+
+    # Reconcile legacy candidates that were compared before automatic
+    # rejection was introduced.
+    #
+    # A candidate should be auto-rejected when there is at least one
+    # definitive model-quality failure.
+    #
+    # Invalid or stale comparison states must remain non-destructive so the
+    # comparison can be inspected or retried rather than quarantining data
+    # based on unreliable evidence.
+    hard_failure_reason_codes = {
+        "removed_classes",
+        "shared_class_regression",
+        "added_class_quality",
+        "added_class_below_minimum",
+    }
+
+    invalid_comparison_reason_codes = {
+        "comparison_missing",
+        "stale_comparison",
+        "malformed_class_metrics",
+    }
+
+    reason_codes = {
+        reason.get("code")
+        for reason in promotion_evaluation.get("reasons", [])
+        if reason.get("code")
+    }
+
+    has_hard_failure = bool(reason_codes & hard_failure_reason_codes)
+    has_invalid_comparison = bool(
+        reason_codes & invalid_comparison_reason_codes
+    )
+
+    should_auto_reject = (
+        candidate is not None
+        and comparison is not None
+        and not promotion_evaluation["eligible"]
+        and not promotion_evaluation["stale"]
+        and has_hard_failure
+        and not has_invalid_comparison
+    )
+
+    if should_auto_reject:
+        reject_model(candidate["version"])
+
+        candidate = None
+        comparison = None
+
+        promotion_evaluation = _promotion_decision(
+            None,
+            active["id"] if active else None,
+            None,
+        )
+
     if comparison:
         comparison["promotion_evaluation"] = promotion_evaluation
 
     return {
         "active_model": active,
+        "active_classes": active_classes,
         "latest_candidate": candidate,
         "comparison": comparison,
         "promotion_evaluation": promotion_evaluation,
@@ -1869,13 +2123,18 @@ def get_ai_progress():
         "contributions": contributions,
         "training_history": training_history,
         "actions": {
-            "can_train": contributions["approved_waiting"] > 0,
+            "can_train": (
+                contributions["approved_waiting"] > 0
+                and candidate is None
+            ),
             "can_compare": candidate is not None,
-            "can_promote": promotion_evaluation["eligible"],
+            "can_promote": (
+                candidate is not None
+                and promotion_evaluation["eligible"]
+            ),
             "can_rollback": bool(archived_models),
         },
     }
-
 
 def _set_lifecycle_job(job_id: str, **changes):
     with _LIFECYCLE_JOB_LOCK:
@@ -1925,19 +2184,64 @@ def _dataset_directory(dataset_version: str) -> Path:
     raise RuntimeError(f"Exported dataset is unavailable for {dataset_version}")
 
 
-def start_candidate_training():
+def start_candidate_training(payload: Optional[Dict[str, Any]] = None):
+    explicit_selection = payload is not None and "submission_ids" in payload
+    selected_submission_ids = None
+    if explicit_selection:
+        raw_ids = payload.get("submission_ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            raise HTTPException(status_code=400, detail="submission_ids must be a non-empty list")
+        if any(not isinstance(value, int) or isinstance(value, bool) or value <= 0 for value in raw_ids):
+            raise HTTPException(status_code=400, detail="submission_ids must contain positive integers")
+        if len(raw_ids) != len(set(raw_ids)):
+            raise HTTPException(status_code=400, detail="submission_ids must not contain duplicates")
+        selected_submission_ids = list(raw_ids)
+
     with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT COUNT(*) FROM annotation_submissions s
-                WHERE s.status = 'approved' AND NOT EXISTS (
-                    SELECT 1 FROM training_run_submission_usage u WHERE u.submission_id = s.id
-                );
-                """
-            )
-            if cur.fetchone()[0] == 0:
-                raise HTTPException(status_code=409, detail="No approved contributions are available for training")
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if selected_submission_ids is not None:
+                cur.execute(
+                    """
+                    SELECT id, status, training_state
+                    FROM annotation_submissions
+                    WHERE id = ANY(%s);
+                    """,
+                    (selected_submission_ids,),
+                )
+                rows = {row["id"]: row for row in cur.fetchall()}
+                unknown = [value for value in selected_submission_ids if value not in rows]
+                if unknown:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Unknown annotation submission IDs: {unknown}",
+                    )
+                ineligible = [
+                    {
+                        "id": value,
+                        "moderation_status": rows[value]["status"],
+                        "training_state": rows[value]["training_state"],
+                    }
+                    for value in selected_submission_ids
+                    if rows[value]["status"] not in ("approved", "used")
+                    or rows[value]["training_state"] != "eligible"
+                ]
+                if ineligible:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "message": "Selected annotation submissions are not eligible for training",
+                            "submissions": ineligible,
+                        },
+                    )
+            else:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS eligible_count FROM annotation_submissions s
+                    WHERE s.status IN ('approved', 'used') AND s.training_state = 'eligible';
+                    """
+                )
+                if cur.fetchone()["eligible_count"] == 0:
+                    raise HTTPException(status_code=409, detail="No approved contributions are available for training")
 
     job_id = f"lifecycle-train-{uuid.uuid4().hex[:12]}"
 
@@ -1950,7 +2254,12 @@ def start_candidate_training():
             from backend.core.config import TRAINING_PROVIDER
         provider = training_provider(TRAINING_PROVIDER)
         _set_lifecycle_job(job_id, provider=TRAINING_PROVIDER, phase="preparing")
-        return provider(job_id, lambda **changes: _set_lifecycle_job(job_id, **changes))
+        progress = lambda **changes: _set_lifecycle_job(job_id, **changes)
+        if selected_submission_ids is None:
+            return provider(job_id, progress)
+        return provider(
+            job_id, progress, selected_submission_ids=selected_submission_ids
+        )
 
     # Reserve the externally visible ID as the dataset directory name.
     def wrapped_start():
@@ -1959,7 +2268,7 @@ def start_candidate_training():
     with _LIFECYCLE_JOB_LOCK:
         if _ACTIVE_LIFECYCLE_JOB_ID and _LIFECYCLE_JOBS.get(_ACTIVE_LIFECYCLE_JOB_ID, {}).get("status") in ("queued", "running"):
             raise HTTPException(status_code=409, detail="Another model lifecycle operation is already running")
-        _LIFECYCLE_JOBS[job_id] = {"job_id": job_id, "kind": "TRAIN", "status": "queued", "created_at": datetime.utcnow().isoformat(), "started_at": None, "finished_at": None, "result": None, "error": None}
+        _LIFECYCLE_JOBS[job_id] = {"job_id": job_id, "kind": "TRAIN", "status": "queued", "created_at": datetime.utcnow().isoformat(), "started_at": None, "finished_at": None, "result": None, "error": None, "selected_submission_ids": selected_submission_ids}
         _ACTIVE_LIFECYCLE_JOB_ID = job_id
     threading.Thread(target=_run_lifecycle_job, args=(job_id, wrapped_start), daemon=True).start()
     return _LIFECYCLE_JOBS[job_id]
@@ -1991,12 +2300,15 @@ def start_candidate_comparison(version: str):
                 remote_comparison = cur.fetchone()
         if not remote_comparison:
             raise HTTPException(status_code=409, detail="No verified remote comparison is available for this candidate")
-        return _start_lifecycle_job("COMPARE", lambda: {
-            "comparison_id": remote_comparison["id"],
-            "candidate_outperforms_active": remote_comparison["candidate_outperforms_active"],
-            "metric_differences": remote_comparison["metric_differences"],
-            "provider": "kaggle",
-        })
+        return _start_lifecycle_job(
+            "COMPARE",
+            lambda: _finalize_candidate_comparison(version, {
+                "comparison_id": remote_comparison["id"],
+                "candidate_outperforms_active": remote_comparison["candidate_outperforms_active"],
+                "metric_differences": remote_comparison["metric_differences"],
+                "provider": "kaggle",
+            }),
+        )
 
     def operation():
         from compare_yolo_models import compare
@@ -2009,7 +2321,11 @@ def start_candidate_comparison(version: str):
             seed=0, verbose=False,
         )
         summary = compare(args)
-        return {"comparison_id": summary["comparison_id"], "candidate_outperforms_active": summary["candidate_outperforms_active"], "metric_differences": summary["metric_differences"]}
+        return _finalize_candidate_comparison(version, {
+            "comparison_id": summary["comparison_id"],
+            "candidate_outperforms_active": summary["candidate_outperforms_active"],
+            "metric_differences": summary["metric_differences"],
+        })
 
     return _start_lifecycle_job("COMPARE", operation)
 
@@ -2028,6 +2344,7 @@ def get_annotation_submission(submission_id: int):
             cur.execute(
                 """
                 SELECT s.*,
+                       s.training_state AS training_lifecycle_state,
                        CASE WHEN s.status = 'used' OR EXISTS (
                            SELECT 1 FROM training_run_submission_usage u WHERE u.submission_id = s.id
                        ) THEN 'used' ELSE 'not_used' END AS training_status,
@@ -2091,6 +2408,42 @@ def update_annotation_submission(submission_id: int, payload: Dict[str, Any]):
             updated = cur.fetchone()
             conn.commit()
             return {"ok": True, "submission": updated}
+
+
+def update_quarantined_submission(submission_id: int, payload: Dict[str, Any]):
+    action = str(payload.get("action") or "").strip().lower()
+    if action not in {"restore", "reject"}:
+        raise HTTPException(status_code=400, detail="Action must be restore or reject")
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM annotation_submissions WHERE id = %s FOR UPDATE;",
+                (submission_id,),
+            )
+            submission = cur.fetchone()
+            if not submission:
+                raise HTTPException(status_code=404, detail="Annotation submission not found")
+            if submission["training_state"] != "quarantined":
+                raise HTTPException(status_code=409, detail="Only quarantined submissions can be managed")
+            if action == "restore":
+                if submission["status"] not in {"approved", "used"}:
+                    raise HTTPException(status_code=409, detail="Only approved quarantined submissions can be restored")
+                cur.execute(
+                    "UPDATE annotation_submissions SET training_state = 'eligible' WHERE id = %s RETURNING *;",
+                    (submission_id,),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE annotation_submissions
+                    SET status = 'rejected', reviewed_at = NOW()
+                    WHERE id = %s RETURNING *;
+                    """,
+                    (submission_id,),
+                )
+            updated = cur.fetchone()
+        conn.commit()
+    return {"ok": True, "action": action.upper(), "submission": updated}
 
 
 def update_annotation(annotation_id: int, payload: Dict[str, Any]):

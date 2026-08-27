@@ -60,7 +60,12 @@ export function LifecycleJobProvider({ children }: { children: ReactNode }) {
         }
       }
       if (current.status === "failed") throw new Error(current.error?.message || `${label} failed.`);
-      setMessage(`${label} completed successfully.`);
+      if (current.kind === "COMPARE" && current.result?.auto_rejected === true) {
+        const quarantined = Number(current.result.quarantined_submission_count || 0);
+        setMessage(`Candidate did not meet the criteria. ${quarantined} submission${quarantined === 1 ? " was" : "s were"} quarantined.`);
+      } else {
+        setMessage(`${label} completed successfully.`);
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : `${label} failed.`);
     } finally {

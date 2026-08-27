@@ -30,7 +30,14 @@ class TrainerValidationTests(unittest.TestCase):
             f"train: images/train\nval: images/val\nnc: 1\nnames:\n  0: {correction_class}\n",
             encoding="utf-8",
         )
-        manifest = {"dataset_version": "dataset-v1", "source_submission_status": "approved", "class_mapping": [{"id": 0, "name": correction_class}]}
+        manifest = {
+            "dataset_version": "dataset-v1",
+            "source_submission_status": "approved",
+            "class_mapping": [{"id": 0, "name": correction_class}],
+            "included_submission_ids": [10, 11, 12],
+            "trusted_submission_ids": [10, 11],
+            "experimental_submission_ids": [12],
+        }
         (source / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         input_root = root / "input" / "attached-dataset"
         input_root.mkdir(parents=True)
@@ -95,6 +102,9 @@ class TrainerValidationTests(unittest.TestCase):
                 [entry["name"] for entry in combined_manifest["class_mapping"]],
                 ["apple", "banana", "milk", "Lemon"],
             )
+            self.assertEqual(combined_manifest["included_submission_ids"], [10, 11, 12])
+            self.assertEqual(combined_manifest["trusted_submission_ids"], [10, 11])
+            self.assertEqual(combined_manifest["experimental_submission_ids"], [12])
 
     def test_class_preservation_is_semantic_and_order_independent(self):
         require_class_preservation(

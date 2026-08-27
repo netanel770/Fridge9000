@@ -12,4 +12,5 @@ router.add_api_route("/annotation-submissions", runtime.list_annotation_submissi
 router.add_api_route("/annotation-submissions/stats", runtime.get_annotation_submission_stats, methods=["GET"])
 router.add_api_route("/annotation-submissions/{submission_id}", runtime.get_annotation_submission, methods=["GET"])
 router.add_api_route("/annotation-submissions/{submission_id}", runtime.update_annotation_submission, methods=["PATCH"])
+router.add_api_route("/annotation-submissions/{submission_id}/quarantine", runtime.update_quarantined_submission, methods=["POST"])
 router.add_api_route("/annotations/{annotation_id}", runtime.update_annotation, methods=["PATCH"])

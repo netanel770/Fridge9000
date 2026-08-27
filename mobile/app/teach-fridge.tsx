@@ -8,8 +8,8 @@ import { DetectionImageViewer } from "../src/components/DetectionImageViewer";
 import { BoundingBoxEditor } from "../src/components/BoundingBoxEditor";
 import { ProductLabelInput, uniqueProductLabels } from "../src/components/ProductLabelInput";
 import { lifecyclePhaseLabel, useLifecycleJob } from "../src/components/LifecycleJobProvider";
-import { createAnnotationSubmission, getAIProgress, getAllInventory, getAnnotationSubmission, getAnnotationSubmissions, getRecentScans, getScan, getScanDetections, getScanImageUrl, moderateAnnotationSubmission, promoteCandidate, rollbackModel, startCandidateComparison, startCandidateTraining, updateAnnotationBox, updateAnnotationLabel } from "../src/services/api";
-import type { AIProgressResponse, AnnotationItem, AnnotationStatus, AnnotationSubmission, AnnotationSubmissionDetail, DetectionItem, InventoryItem, ModelMetrics, PromotionReason, RecentScan } from "../src/types/api";
+import { createAnnotationSubmission, getAIProgress, getAllInventory, getAnnotationSubmission, getAnnotationSubmissions, getRecentScans, getScan, getScanDetections, getScanImageUrl, manageQuarantinedSubmission, moderateAnnotationSubmission, promoteCandidate, rollbackModel, startCandidateComparison, startCandidateTraining, updateAnnotationBox, updateAnnotationLabel } from "../src/services/api";
+import type { AIProgressResponse, AnnotationItem, AnnotationStatus, AnnotationSubmission, AnnotationSubmissionDetail, AnnotationTrainingState, DetectionItem, InventoryItem, ModelMetrics, PromotionReason, RecentScan } from "../src/types/api";
 import { areImageDimensionsCompatible, getMinimumAnnotationBoxSize } from "../src/utils/imageCoordinates";
 import type { ImageBoundingBox } from "../src/utils/imageCoordinates";
 import { colors, radius, spacing, typography } from "../src/theme";
@@ -61,6 +61,17 @@ function contributionStatus(status: AnnotationStatus, used: boolean) {
   if (status === "pending") return "PENDING REVIEW";
   if (status === "approved") return "READY TO TRAIN";
   return "REJECTED";
+}
+
+function trainingState(submission: AnnotationSubmission): AnnotationTrainingState {
+  return submission.training_lifecycle_state || submission.training_state || "eligible";
+}
+
+function trainingStateCopy(state: AnnotationTrainingState) {
+  if (state === "eligible") return { label: "ELIGIBLE", tone: "success" as const, explanation: "Ready to select for the next candidate." };
+  if (state === "experimental") return { label: "EXPERIMENTAL", tone: "warning" as const, explanation: "Currently being evaluated in a candidate." };
+  if (state === "trusted") return { label: "TRUSTED", tone: "info" as const, explanation: "Part of the active model's trusted training baseline." };
+  return { label: "QUARANTINED", tone: "danger" as const, explanation: "Excluded after its candidate was rejected." };
 }
 
 function formatMetric(value: number | null | undefined) {
@@ -223,6 +234,23 @@ export default function TeachFridgeScreen() {
   const [mutationMessage, setMutationMessage] = useState("");
   const [mutationError, setMutationError] = useState("");
   const [showModelDetails, setShowModelDetails] = useState(false);
+  const [eligibleSubmissions, setEligibleSubmissions] = useState<AnnotationSubmissionDetail[]>([]);
+  const [quarantinedSubmissions, setQuarantinedSubmissions] = useState<AnnotationSubmissionDetail[]>([]);
+  const [selectedTrainingSubmissions, setSelectedTrainingSubmissions] = useState<Set<number>>(new Set());
+  const [selectedQuarantineSubmissions, setSelectedQuarantineSubmissions] = useState<Set<number>>(new Set());
+  const [loadingTrainingSelection, setLoadingTrainingSelection] = useState(false);
+  const [trainingSelectionError, setTrainingSelectionError] = useState("");
+  const [showTrainingSelector, setShowTrainingSelector] = useState(false);
+  const [expandedTrainingLabel, setExpandedTrainingLabel] = useState<string | null>(null);
+  const [expandedTrainingSubmission, setExpandedTrainingSubmission] = useState<number | null>(null);
+  const [showTrainingHistory, setShowTrainingHistory] = useState(false);
+  const [showQuarantine, setShowQuarantine] = useState(false);
+  const [expandedQuarantineLabel, setExpandedQuarantineLabel] = useState<string | null>(null);
+  const [expandedQuarantineSubmission, setExpandedQuarantineSubmission] = useState<number | null>(null);
+  const [quarantineReturnToTraining, setQuarantineReturnToTraining] = useState(false);
+  const [quarantineMutation, setQuarantineMutation] = useState<number | null>(null);
+  const [quarantineError, setQuarantineError] = useState("");
+  const [quarantineMessage, setQuarantineMessage] = useState("");
   const lifecycle = useLifecycleJob();
   const selectionRequest = useRef(0);
   const contributionsRequest = useRef(0);
@@ -293,7 +321,9 @@ export default function TeachFridgeScreen() {
       const submissions = await getAnnotationSubmissions();
       const details = await Promise.all(submissions.map((submission) => getAnnotationSubmission(submission.id)));
       if (contributionsRequest.current === requestId) {
-        setContributions(details.flatMap((detail) => detail.annotations.map((annotation) => ({ submission: detail.submission, annotation }))));
+        setContributions(details
+          .filter((detail) => trainingState(detail.submission) !== "quarantined")
+          .flatMap((detail) => detail.annotations.map((annotation) => ({ submission: detail.submission, annotation }))));
       }
     } catch (caught) {
       if (contributionsRequest.current === requestId) {
@@ -343,6 +373,34 @@ export default function TeachFridgeScreen() {
     }
   }
 
+  async function loadTrainingSelection() {
+    setLoadingTrainingSelection(true);
+    setTrainingSelectionError("");
+    try {
+      const submissions = await getAnnotationSubmissions();
+      const lifecycleSubmissions = submissions.filter((submission) =>
+        ["approved", "used"].includes(submission.status) && ["eligible", "quarantined"].includes(trainingState(submission))
+      );
+      const details = await Promise.all(lifecycleSubmissions.map((submission) => getAnnotationSubmission(submission.id)));
+      const eligible = details.filter((detail) => trainingState(detail.submission) === "eligible");
+      const quarantined = details.filter((detail) => trainingState(detail.submission) === "quarantined");
+      setEligibleSubmissions(eligible);
+      setQuarantinedSubmissions(quarantined);
+      const eligibleIds = new Set(eligible.map((detail) => detail.submission.id));
+      const quarantinedIds = new Set(quarantined.map((detail) => detail.submission.id));
+      setSelectedTrainingSubmissions((current) => new Set([...current].filter((id) => eligibleIds.has(id))));
+      setSelectedQuarantineSubmissions((current) => new Set([...current].filter((id) => quarantinedIds.has(id))));
+    } catch (caught) {
+      setEligibleSubmissions([]);
+      setQuarantinedSubmissions([]);
+      setSelectedTrainingSubmissions(new Set());
+      setSelectedQuarantineSubmissions(new Set());
+      setTrainingSelectionError(caught instanceof Error ? caught.message : "Could not load eligible annotations.");
+    } finally {
+      setLoadingTrainingSelection(false);
+    }
+  }
+
   function confirmPromotion() {
     if (!progressStats?.latest_candidate || !progressStats.comparison) return;
     Alert.alert("Promote candidate?", `Make ${progressStats.latest_candidate.version} the active production model? The current model will remain available for rollback.`, [
@@ -352,10 +410,57 @@ export default function TeachFridgeScreen() {
         try {
           await promoteCandidate(progressStats.latest_candidate!.version, progressStats.comparison!.id);
           setMutationMessage("Candidate promoted. The previous active model is available for rollback.");
-          await loadProgress();
+          await Promise.all([loadProgress(), loadTrainingSelection(), loadContributions()]);
         } catch (caught) { setMutationError(caught instanceof Error ? caught.message : "Promotion failed."); }
         finally { setLifecycleMutation(null); }
       } },
+    ]);
+  }
+
+  function startSelectedCandidateTraining() {
+    const selectedIds = [...selectedTrainingSubmissions].sort((left, right) => left - right);
+    if (!selectedIds.length) return;
+    setMutationMessage("");
+    setShowTrainingSelector(false);
+    lifecycle.runJob("Train Candidate", () => startCandidateTraining(selectedIds));
+  }
+
+  function openQuarantine(fromTraining = false) {
+    setQuarantineReturnToTraining(fromTraining);
+    if (fromTraining) setShowTrainingSelector(false);
+    setTimeout(() => setShowQuarantine(true), fromTraining ? 200 : 0);
+  }
+
+  function openQuarantineFromTraining() {
+    openQuarantine(true);
+  }
+
+  function returnToTrainingSelection() {
+    setShowQuarantine(false);
+    setQuarantineReturnToTraining(false);
+    setTimeout(() => setShowTrainingSelector(true), 200);
+  }
+
+  async function applyQuarantineAction(submissionId: number, action: "restore" | "reject") {
+    setQuarantineMutation(submissionId);
+    setQuarantineError("");
+    setQuarantineMessage("");
+    try {
+      await manageQuarantinedSubmission(submissionId, action);
+      setExpandedQuarantineSubmission(null);
+      setQuarantineMessage(action === "restore" ? "Restored to eligible training data." : "Submission permanently rejected.");
+      await Promise.all([loadTrainingSelection(), loadProgress(), loadContributions()]);
+    } catch (caught) {
+      setQuarantineError(caught instanceof Error ? caught.message : "Could not update the submission.");
+    } finally {
+      setQuarantineMutation(null);
+    }
+  }
+
+  function confirmPermanentQuarantineRejection(submissionId: number) {
+    Alert.alert("Reject submission?", "It will remain excluded from future training.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Reject", style: "destructive", onPress: () => applyQuarantineAction(submissionId, "reject") },
     ]);
   }
 
@@ -372,7 +477,10 @@ export default function TeachFridgeScreen() {
   }
 
   useEffect(() => {
-    if (activeTab === "AI Progress") loadProgress();
+    if (activeTab === "AI Progress") {
+      loadProgress();
+      loadTrainingSelection();
+    }
   }, [activeTab, lifecycle.completionCount]);
 
   useEffect(() => {
@@ -701,6 +809,87 @@ export default function TeachFridgeScreen() {
   }, [contributionSort, visibleContributions]);
 
   const hasContributionFilters = contributionFilter !== "All" || Boolean(contributionSearch.trim()) || Boolean(contributionLabelFilter.trim()) || contributionSort !== "Newest";
+  const selectedAnnotationCount = useMemo(
+    () => eligibleSubmissions.reduce(
+      (count, detail) => count + (selectedTrainingSubmissions.has(detail.submission.id) ? detail.annotations.length : 0),
+      0,
+    ),
+    [eligibleSubmissions, selectedTrainingSubmissions],
+  );
+  const trainingLabelGroups = useMemo(() => {
+    const groups = new Map<string, { label: string; submissions: AnnotationSubmissionDetail[] }>();
+    eligibleSubmissions.forEach((detail) => {
+      const labels = new Map<string, string>();
+      detail.annotations.forEach((annotation) => {
+        const label = contributionProductLabel(annotation);
+        labels.set(label.toLocaleLowerCase(), label);
+      });
+      labels.forEach((label, key) => {
+        const group = groups.get(key) || { label, submissions: [] };
+        group.submissions.push(detail);
+        groups.set(key, group);
+      });
+    });
+    return [...groups.values()].sort((left, right) => left.label.localeCompare(right.label));
+  }, [eligibleSubmissions]);
+
+  const quarantineLabelGroups = useMemo(() => {
+    const groups = new Map<string, { label: string; submissions: AnnotationSubmissionDetail[] }>();
+    quarantinedSubmissions.forEach((detail) => {
+      const labels = new Map<string, string>();
+      detail.annotations.forEach((annotation) => {
+        const label = contributionProductLabel(annotation);
+        labels.set(label.toLocaleLowerCase(), label);
+      });
+      labels.forEach((label, key) => {
+        const group = groups.get(key) || { label, submissions: [] };
+        group.submissions.push(detail);
+        groups.set(key, group);
+      });
+    });
+    return [...groups.values()].sort((left, right) => left.label.localeCompare(right.label));
+  }, [quarantinedSubmissions]);
+
+  function toggleTrainingGroup(submissions: AnnotationSubmissionDetail[]) {
+    const ids = submissions.map((detail) => detail.submission.id);
+    const allSelected = ids.every((id) => selectedTrainingSubmissions.has(id));
+    setSelectedTrainingSubmissions((current) => {
+      const next = new Set(current);
+      ids.forEach((id) => allSelected ? next.delete(id) : next.add(id));
+      return next;
+    });
+  }
+
+  function toggleQuarantineGroup(submissions: AnnotationSubmissionDetail[]) {
+    const ids = [...new Set(submissions.map((detail) => detail.submission.id))];
+    const allSelected = ids.length > 0 && ids.every((id) => selectedQuarantineSubmissions.has(id));
+    setSelectedQuarantineSubmissions((current) => {
+      const next = new Set(current);
+      ids.forEach((id) => allSelected ? next.delete(id) : next.add(id));
+      return next;
+    });
+  }
+
+  async function restoreSelectedQuarantinedSubmissions() {
+    const selectedIds = [...selectedQuarantineSubmissions].sort((left, right) => left - right);
+    if (!selectedIds.length || quarantineMutation !== null) return;
+
+    setQuarantineMutation(-1);
+    setQuarantineError("");
+    setQuarantineMessage("");
+    try {
+      for (const submissionId of selectedIds) {
+        await manageQuarantinedSubmission(submissionId, "restore");
+      }
+      setSelectedQuarantineSubmissions(new Set());
+      setQuarantineMessage(`${selectedIds.length} submission${selectedIds.length === 1 ? "" : "s"} restored and ready to select for training.`);
+      await Promise.all([loadTrainingSelection(), loadProgress(), loadContributions()]);
+    } catch (caught) {
+      setQuarantineError(caught instanceof Error ? caught.message : "Could not restore the selected submissions.");
+    } finally {
+      setQuarantineMutation(null);
+    }
+  }
 
   function contributionDetection(contribution: Contribution): DetectionItem {
     const { annotation } = contribution;
@@ -727,6 +916,8 @@ export default function TeachFridgeScreen() {
     const { annotation, submission } = contribution;
     const latestUsage = annotation.training_usages?.[0] ?? submission.training_usages?.[0];
     const displayedStatus = latestUsage ? "used" : submission.status;
+    const lifecycleState = trainingState(submission);
+    const lifecycleCopy = trainingStateCopy(lifecycleState);
     const canEdit = submission.status === "pending" && ["RELABEL", "ADD"].includes(annotation.action);
     const canEditBox = submission.status === "pending" && annotation.action === "ADJUST_BOX";
     return (
@@ -745,6 +936,7 @@ export default function TeachFridgeScreen() {
           <Ionicons name="arrow-forward" size={17} color={colors.textMuted} />
           <View style={styles.storyStep}><Text style={styles.detailCaption}>YOU</Text><Text style={styles.storyValue}>{contributionChange(annotation)}</Text></View>
         </View>
+        {submission.status === "approved" || submission.status === "used" ? <View style={styles.lifecycleStateRow}><StatusBadge label={lifecycleCopy.label} tone={lifecycleCopy.tone} /><Text style={styles.lifecycleStateText}>{lifecycleCopy.explanation}</Text></View> : null}
         <View style={styles.detectionActions}>
           <View style={styles.detectionAction}><AppButton label="View image" icon="image-outline" variant="secondary" onPress={() => setContributionImage(contribution)} /></View>
           {canEdit ? <View style={styles.detectionAction}><AppButton label="Edit label" icon="create-outline" variant="ghost" onPress={() => openContributionEditor(contribution)} /></View> : null}
@@ -997,102 +1189,224 @@ export default function TeachFridgeScreen() {
       ) : (
         <View style={styles.suggestions}>
           <View style={styles.sectionHeading}>
-            <View><Text style={styles.sectionTitle}>AI Progress</Text><Text style={styles.sectionSubtitle}>See the live model, real evaluation results, and how contributions are being used.</Text></View>
-            <Pressable accessibilityRole="button" onPress={loadProgress} hitSlop={8}><Ionicons name="refresh" size={21} color={colors.primary} /></Pressable>
+            <View><Text style={styles.sectionTitle}>AI Progress</Text><Text style={styles.sectionSubtitle}>Your active model and latest candidate.</Text></View>
+            <Pressable accessibilityRole="button" onPress={() => { loadProgress(); loadTrainingSelection(); }} hitSlop={8}><Ionicons name="refresh" size={21} color={colors.primary} /></Pressable>
           </View>
           {loadingProgress ? <View style={styles.loading}><ActivityIndicator color={colors.primary} /><Text style={styles.loadingText}>Loading model progress...</Text></View> : null}
           {progressError ? <View style={styles.errorBox}><Text style={styles.errorText}>{progressError}</Text><AppButton label="Try Again" variant="secondary" onPress={loadProgress} /></View> : null}
           {!loadingProgress && progressStats ? <>
             <Card>
-              <Text style={styles.modelRole}>ACTIVE MODEL</Text>
-              <View style={styles.heroModelRow}>
-                <View style={styles.modelIcon}><Ionicons name="radio-button-on" size={22} color={colors.successFg} /></View>
-                <View style={styles.detectionCopy}><Text style={styles.heroModelVersion}>{progressStats.active_model.version}</Text><Text style={styles.sectionSubtitle}>Currently used by Fridge9000</Text></View>
+              <View style={styles.modelCardHeader}>
+                <View style={styles.detectionCopy}>
+                  <Text style={styles.modelRole}>ACTIVE MODEL</Text>
+                  <Text style={styles.modelDisplayName}>Production model</Text>
+                  <Text style={styles.modelVersionCompact} numberOfLines={1} ellipsizeMode="middle">{progressStats.active_model.version}</Text>
+                </View>
                 <StatusBadge label="IN USE" tone="success" />
               </View>
-              {lifecycle.job && (lifecycle.job.status === "queued" || lifecycle.job.status === "running") ? <View style={styles.jobStatus}><ActivityIndicator color={colors.primary} /><View style={styles.detectionCopy}><Text style={styles.jobTitle}>{lifecycle.action || (lifecycle.job.kind === "TRAIN" ? "Training new model" : "Comparing models")}</Text><Text style={styles.jobMeta}>{lifecyclePhaseLabel(lifecycle.job)}</Text><Text style={styles.jobMeta}>Active model remains in use.</Text></View></View> : null}
-              {progressStats.latest_candidate ? <View style={styles.candidateRow}>
-                <View style={styles.modelIcon}><Ionicons name="flask-outline" size={22} color={colors.primary} /></View>
-                <View style={styles.detectionCopy}><Text style={styles.modelRole}>CANDIDATE · NOT ACTIVE</Text><Text style={styles.modelVersion}>{progressStats.latest_candidate.version}</Text><Text style={styles.sectionSubtitle}>{!progressStats.comparison || progressStats.promotion_evaluation.stale ? "Needs comparison" : progressStats.promotion_evaluation.eligible ? "Ready to promote" : "Needs improvement"}</Text></View>
-                <StatusBadge label={!progressStats.comparison || progressStats.promotion_evaluation.stale ? "COMPARE" : progressStats.promotion_evaluation.eligible ? "READY" : "NOT READY"} tone={progressStats.promotion_evaluation.eligible && !progressStats.promotion_evaluation.stale ? "success" : "warning"} />
-              </View> : <View style={styles.lifecycleEmpty}><Ionicons name="flask-outline" size={20} color={colors.textMuted} /><Text style={styles.lifecycleEmptyText}>No candidate yet. The active model remains unchanged until you explicitly promote one.</Text></View>}
+
+              {lifecycle.job && (lifecycle.job.status === "queued" || lifecycle.job.status === "running") ? <View style={styles.jobStatus}><ActivityIndicator color={colors.primary} /><View style={styles.detectionCopy}><Text style={styles.jobTitle}>{lifecycle.action || (lifecycle.job.kind === "TRAIN" ? "Training new model" : "Comparing models")}</Text><Text style={styles.jobMeta}>{lifecyclePhaseLabel(lifecycle.job)}</Text></View></View> : null}
+
+              {progressStats.latest_candidate ? <>
+                <View style={styles.compactDivider} />
+                <View style={styles.candidateCompactRow}>
+                  <View style={styles.detectionCopy}>
+                    <Text style={styles.modelRole}>CANDIDATE</Text>
+                    <Text style={styles.modelDisplayName}>Candidate model</Text>
+                    <Text style={styles.modelVersionCompact} numberOfLines={1} ellipsizeMode="middle">{progressStats.latest_candidate.version}</Text>
+                  </View>
+                  <StatusBadge
+                    label={!progressStats.comparison || progressStats.promotion_evaluation.stale ? "NEEDS COMPARISON" : progressStats.promotion_evaluation.eligible ? "READY" : "NOT READY"}
+                    tone={progressStats.promotion_evaluation.eligible && !progressStats.promotion_evaluation.stale ? "success" : "warning"}
+                  />
+                </View>
+
+                {progressStats.comparison && !progressStats.promotion_evaluation.stale ? <View style={styles.comparisonCompact}>
+                  <View style={styles.comparisonCompactHeader}>
+                    <View style={styles.detectionCopy}>
+                      <Text style={styles.comparisonCompactTitle}>Model comparison</Text>
+                      <Text style={styles.comparisonCompactText}>{progressStats.promotion_evaluation.eligible
+                        ? "Candidate passed the promotion policy."
+                        : progressStats.promotion_evaluation.stale
+                          ? "Comparison is stale. Run it again before deciding this candidate."
+                          : progressStats.promotion_evaluation.reasons.some((reason) => ["comparison_missing", "missing_shared_classes", "malformed_class_metrics"].includes(reason.code))
+                            ? "Comparison is incomplete or invalid. Retry it before deciding this candidate."
+                            : "Candidate did not meet the promotion policy."}</Text>
+                    </View>
+                    <StatusBadge
+                      label={progressStats.promotion_evaluation.eligible
+                        ? "PASS"
+                        : progressStats.promotion_evaluation.stale || progressStats.promotion_evaluation.reasons.some((reason) => ["comparison_missing", "missing_shared_classes", "malformed_class_metrics"].includes(reason.code))
+                          ? "INVALID"
+                          : "FAIL"}
+                      tone={progressStats.promotion_evaluation.eligible ? "success" : "warning"}
+                    />
+                  </View>
+                  <View style={styles.metricSummaryRow}>
+                    <View style={styles.metricSummaryItem}><Text style={styles.metricSummaryLabel}>ACTIVE mAP50–95</Text><Text style={styles.metricSummaryValue}>{formatMetric(progressStats.comparison.active_metrics.map50_95)}</Text></View>
+                    <View style={styles.metricSummaryItem}><Text style={styles.metricSummaryLabel}>CANDIDATE</Text><Text style={styles.metricSummaryValue}>{formatMetric(progressStats.comparison.candidate_metrics.map50_95)}</Text></View>
+                    <View style={styles.metricSummaryItem}><Text style={styles.metricSummaryLabel}>CHANGE</Text><Text style={[styles.metricSummaryValue, (progressStats.comparison.metric_differences.map50_95 ?? 0) > 0 ? styles.positiveDelta : (progressStats.comparison.metric_differences.map50_95 ?? 0) < 0 ? styles.negativeDelta : null]}>{formatMetricDifference(progressStats.comparison.metric_differences.map50_95)}</Text></View>
+                  </View>
+                  <Pressable accessibilityRole="button" accessibilityState={{ expanded: showModelDetails }} onPress={() => setShowModelDetails((shown) => !shown)} style={styles.comparisonDetailsToggle}><Text style={styles.comparisonDetailsText}>{showModelDetails ? "Hide comparison details" : "View comparison details"}</Text><Ionicons name={showModelDetails ? "chevron-up" : "chevron-down"} size={16} color={colors.primary} /></Pressable>
+                  {showModelDetails ? <View style={styles.comparisonDetails}>
+                    {progressStats.promotion_evaluation.reasons.length ? <View style={[styles.readinessBox, progressStats.promotion_evaluation.eligible ? styles.readinessReady : styles.readinessBlocked]}><Ionicons name={progressStats.promotion_evaluation.eligible ? "checkmark-circle" : "alert-circle"} size={20} color={progressStats.promotion_evaluation.eligible ? colors.successFg : colors.warningFg} /><View style={styles.detectionCopy}>{progressStats.promotion_evaluation.reasons.map((reason, index) => <Text key={`${reason.code}-${index}`} style={styles.readinessReason}>• {promotionReasonText(reason)}</Text>)}</View></View> : null}
+                    <View style={styles.metricCards}>
+                      {METRIC_ROWS.map(({ key, label }) => {
+                        const difference = progressStats.comparison?.metric_differences[key];
+                        return <View key={key} style={styles.metricCard}><View style={styles.metricCardHeading}><Text style={styles.metricCardName}>{label}</Text><Text style={[styles.metricVerdict, difference != null && difference > 0 ? styles.positiveDelta : difference != null && difference < 0 ? styles.negativeDelta : null]}>{metricVerdict(difference)}</Text></View><View style={styles.metricValues}><View><Text style={styles.metricValueLabel}>ACTIVE</Text><Text style={styles.metricValue}>{formatMetric(progressStats.comparison?.active_metrics[key])}</Text></View><View><Text style={styles.metricValueLabel}>CANDIDATE</Text><Text style={styles.metricValue}>{formatMetric(progressStats.comparison?.candidate_metrics[key])}</Text></View><Text style={[styles.metricCardDelta, difference != null && difference > 0 ? styles.positiveDelta : difference != null && difference < 0 ? styles.negativeDelta : null]}>{formatMetricDifference(difference)}</Text></View></View>;
+                      })}
+                    </View>
+                    {progressStats.promotion_evaluation.mode === "expanded_classes" ? <View style={styles.sharedComparison}><Text style={styles.sectionTitle}>Added products ({progressStats.comparison.class_comparison.added_classes.length})</Text><View style={styles.classList}>{progressStats.comparison.class_comparison.added_classes.map((name) => <View key={name} style={styles.classRow}><Text style={styles.className}>{name}</Text><Text style={styles.classMetric}>mAP50–95 {formatMetric(progressStats.comparison!.added_class_metrics.per_class[name]?.map50_95)}</Text></View>)}</View></View> : null}
+                  </View> : null}
+                </View> : null}
+              </> : <View style={styles.lifecycleEmpty}><Ionicons name="flask-outline" size={19} color={colors.textMuted} /><Text style={styles.lifecycleEmptyText}>No candidate waiting for a decision.</Text></View>}
 
               {lifecycle.message || mutationMessage ? <View style={styles.successBox}><Ionicons name="checkmark-circle" size={20} color={colors.successFg} /><Text style={styles.successText}>{mutationMessage || lifecycle.message}</Text></View> : null}
               {lifecycle.error || mutationError ? <View style={styles.errorBox}><Text style={styles.errorText}>{mutationError || lifecycle.error}</Text></View> : null}
-              <View style={styles.lifecycleActions}>
-                {!progressStats.latest_candidate ? <AppButton label="Train Candidate" icon="school-outline" loading={lifecycle.action === "Train Candidate"} disabled={lifecycle.busy || Boolean(lifecycleMutation) || !progressStats.actions.can_train} onPress={() => lifecycle.runJob("Train Candidate", startCandidateTraining)} /> : !progressStats.comparison || progressStats.promotion_evaluation.stale ? <AppButton label="Compare Models" icon="analytics-outline" loading={lifecycle.action === "Compare Models"} disabled={lifecycle.busy || Boolean(lifecycleMutation) || !progressStats.actions.can_compare} onPress={() => lifecycle.runJob("Compare Models", () => startCandidateComparison(progressStats.latest_candidate!.version))} /> : <AppButton label={`Promote ${progressStats.latest_candidate.version}`} icon="rocket-outline" loading={lifecycleMutation === "Promote Candidate"} disabled={lifecycle.busy || Boolean(lifecycleMutation) || !progressStats.actions.can_promote} onPress={confirmPromotion} />}
-                {progressStats.latest_candidate ? <AppButton label="Train Another Candidate" icon="school-outline" variant="ghost" disabled={lifecycle.busy || Boolean(lifecycleMutation) || !progressStats.actions.can_train} onPress={() => lifecycle.runJob("Train Candidate", startCandidateTraining)} /> : null}
-              </View>
-              {lifecycle.busy ? <Text style={styles.actionHint}>A model lifecycle job is already in progress.</Text> : !progressStats.actions.can_train && !progressStats.latest_candidate ? <Text style={styles.actionHint}>Approve at least one contribution before training.</Text> : progressStats.latest_candidate && progressStats.comparison && !progressStats.promotion_evaluation.eligible ? <Text style={styles.actionHint}>Promotion stays locked until the backend policy passes.</Text> : null}
             </Card>
 
-            {progressStats.comparison && progressStats.latest_candidate ? <Card>
-              <View style={styles.comparisonHeading}>
-                <View style={styles.detectionCopy}><Text style={styles.sectionTitle}>Model comparison</Text><Text style={styles.sectionSubtitle}>{progressStats.promotion_evaluation.mode === "expanded_classes" ? "Candidate adds products while preserving existing support." : "Both models support the same products."}</Text></View>
-                <StatusBadge label={progressStats.promotion_evaluation.eligible ? "READY TO PROMOTE" : "NOT READY"} tone={progressStats.promotion_evaluation.eligible ? "success" : "warning"} />
-              </View>
-              <View style={[styles.readinessBox, progressStats.promotion_evaluation.eligible ? styles.readinessReady : styles.readinessBlocked]}><Ionicons name={progressStats.promotion_evaluation.eligible ? "checkmark-circle" : "alert-circle"} size={22} color={progressStats.promotion_evaluation.eligible ? colors.successFg : colors.warningFg} /><View style={styles.detectionCopy}><Text style={styles.readinessTitle}>{progressStats.promotion_evaluation.eligible ? "Ready to promote" : "Promotion blocked"}</Text>{progressStats.promotion_evaluation.reasons.length ? progressStats.promotion_evaluation.reasons.map((reason, index) => <Text key={`${reason.code}-${index}`} style={styles.readinessReason}>• {promotionReasonText(reason)}</Text>) : <Text style={styles.readinessReason}>Candidate meets the backend promotion policy.</Text>}</View></View>
-
-              <View style={styles.metricCards}>
-                {METRIC_ROWS.map(({ key, label }) => {
-                  const difference = progressStats.comparison?.metric_differences[key];
-                  const verdict = metricVerdict(difference);
-                  return <View key={key} style={styles.metricCard}><View style={styles.metricCardHeading}><Text style={styles.metricCardName}>{label}</Text><Text style={[styles.metricVerdict, difference != null && difference > 0 ? styles.positiveDelta : difference != null && difference < 0 ? styles.negativeDelta : null]}>{verdict}</Text></View><View style={styles.metricValues}><View><Text style={styles.metricValueLabel}>ACTIVE</Text><Text style={styles.metricValue}>{formatMetric(progressStats.comparison?.active_metrics[key])}</Text></View><View><Text style={styles.metricValueLabel}>CANDIDATE</Text><Text style={styles.metricValue}>{formatMetric(progressStats.comparison?.candidate_metrics[key])}</Text></View><Text style={[styles.metricCardDelta, difference != null && difference > 0 ? styles.positiveDelta : difference != null && difference < 0 ? styles.negativeDelta : null]}>{formatMetricDifference(difference)}</Text></View></View>;
-                })}
-              </View>
-
-              {progressStats.promotion_evaluation.mode === "expanded_classes" ? <>
-                <View style={styles.sharedComparison}>
-                  <Text style={styles.sectionTitle}>Existing products</Text>
-                  <Text style={styles.sectionSubtitle}>Shared-class mAP50–95 changed {formatMetricDifference(sharedMap50_95Difference(progressStats))}.</Text>
-                  {(() => {
-                    const badge = sharedRegressionBadge(progressStats);
-                    return <StatusBadge label={badge.label} tone={badge.tone} />;
-                  })()}
-                </View>
-                <View style={styles.sharedComparison}>
-                  <Text style={styles.sectionTitle}>Added products ({progressStats.comparison.class_comparison.added_classes.length})</Text>
-                  <Text style={styles.sectionSubtitle}>Average mAP50–95 {formatMetric(progressStats.comparison.added_class_metrics.aggregate?.map50_95)}</Text>
-                  <View style={styles.classList}>{progressStats.comparison.class_comparison.added_classes.map((name) => <View key={name} style={styles.classRow}><Text style={styles.className}>{name}</Text><Text style={styles.classMetric}>mAP50–95 {formatMetric(progressStats.comparison!.added_class_metrics.per_class[name]?.map50_95)}</Text></View>)}</View>
-                </View>
-                {progressStats.comparison.class_comparison.removed_classes.length ? <View style={styles.removedClasses}><Ionicons name="warning-outline" size={21} color={colors.danger} /><View style={styles.detectionCopy}><Text style={styles.removedTitle}>Removed support</Text><Text style={styles.removedText}>{progressStats.comparison.class_comparison.removed_classes.join(", ")}</Text></View></View> : null}
-              </> : null}
-
-              <Pressable accessibilityRole="button" accessibilityState={{ expanded: showModelDetails }} onPress={() => setShowModelDetails((shown) => !shown)} style={styles.detailsToggle}><Text style={styles.detailsToggleText}>{showModelDetails ? "Hide technical details" : "Technical details"}</Text><Ionicons name={showModelDetails ? "chevron-up" : "chevron-down"} size={16} color={colors.primary} /></Pressable>
-              {showModelDetails ? <View style={styles.technicalDetails}><Text style={styles.annotationDetail}>Dataset: <Text style={styles.annotationValue}>{progressStats.comparison.dataset_version}</Text></Text><Text style={styles.annotationDetail}>Comparison: <Text style={styles.annotationValue}>{progressStats.comparison.id}</Text></Text>{progressStats.latest_candidate.training_run_id ? <Text style={styles.annotationDetail}>Training run: <Text style={styles.annotationValue}>{progressStats.latest_candidate.training_run_id}</Text></Text> : null}<Text style={styles.annotationDetail}>Allowed shared regression: <Text style={styles.annotationValue}>{formatMetricDifference(-progressStats.promotion_evaluation.thresholds.max_shared_map50_95_regression)}</Text></Text><Text style={styles.annotationDetail}>Minimum new-product average: <Text style={styles.annotationValue}>{formatMetric(progressStats.promotion_evaluation.thresholds.min_added_class_map50_95)}</Text></Text><Text style={styles.annotationDetail}>Minimum per new product: <Text style={styles.annotationValue}>{formatMetric(progressStats.promotion_evaluation.thresholds.min_added_class_per_class_map50_95)}</Text></Text></View> : null}
-            </Card> : progressStats.latest_candidate ? <Card><EmptyState icon="analytics-outline" title="Comparison needed" message="Compare the new model with the current model on the same test images before using it." /></Card> : null}
-
-            <View style={styles.progressGrid}>
-              {[
-                { label: "Approved contributions", value: progressStats.contributions.total_approved, tone: colors.successFg, background: colors.successBg },
-                { label: "Used in training", value: progressStats.contributions.used_in_training, tone: colors.infoFg, background: colors.infoBg },
-                { label: "Ready for next training", value: progressStats.contributions.approved_waiting, tone: colors.primary, background: colors.primarySoft },
-              ].map((item) => <View key={item.label} style={[styles.progressMetric, { backgroundColor: item.background }]}><Text style={[styles.progressValue, { color: item.tone }]}>{item.value}</Text><Text style={styles.progressLabel}>{item.label}</Text></View>)}
+            <View style={styles.primaryLifecycleAction}>
+              {progressStats.latest_candidate && (!progressStats.comparison || progressStats.promotion_evaluation.stale || progressStats.promotion_evaluation.reasons.some((reason) => ["comparison_missing", "missing_shared_classes", "malformed_class_metrics"].includes(reason.code))) ? <AppButton label={progressStats.comparison ? "Retry Comparison" : "Compare Candidate"} icon="analytics-outline" loading={lifecycle.action === "Compare Models"} disabled={lifecycle.busy || Boolean(lifecycleMutation) || !progressStats.actions.can_compare} onPress={() => lifecycle.runJob("Compare Models", () => startCandidateComparison(progressStats.latest_candidate!.version))} /> : null}
+              {progressStats.latest_candidate && progressStats.comparison && !progressStats.promotion_evaluation.stale && progressStats.promotion_evaluation.eligible ? <AppButton label="Promote Candidate" icon="rocket-outline" loading={lifecycleMutation === "Promote Candidate"} disabled={lifecycle.busy || Boolean(lifecycleMutation) || !progressStats.actions.can_promote} onPress={confirmPromotion} /> : null}
+              <AppButton label="Train Model" icon="school-outline" disabled={lifecycle.busy || Boolean(lifecycleMutation) || Boolean(progressStats.latest_candidate) || eligibleSubmissions.length === 0} onPress={() => setShowTrainingSelector(true)} />
+              {progressStats.latest_candidate ? <Text style={styles.actionHint}>{progressStats.promotion_evaluation.stale || progressStats.promotion_evaluation.reasons.some((reason) => ["comparison_missing", "missing_shared_classes", "malformed_class_metrics"].includes(reason.code)) ? "Retry the comparison to resolve this candidate. You can manage and restore quarantined submissions now." : progressStats.comparison && !progressStats.promotion_evaluation.eligible ? "This candidate must be resolved before another training run. You can still manage Quarantine." : "Resolve the current candidate before training another model."}</Text> : eligibleSubmissions.length === 0 ? <Text style={styles.actionHint}>Restore or approve a submission to train.</Text> : null}
             </View>
+
+            <View style={styles.quickActions}>
+              <Pressable accessibilityRole="button" onPress={() => setShowTrainingHistory(true)} style={styles.quickAction}>
+                <View style={styles.quickActionIcon}><Ionicons name="time-outline" size={20} color={colors.primary} /></View>
+                <View style={styles.detectionCopy}><Text style={styles.quickActionTitle}>Training History</Text><Text style={styles.quickActionMeta}>{progressStats.training_history.length} recent runs</Text></View>
+                <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+              </Pressable>
+              <Pressable accessibilityRole="button" onPress={() => openQuarantine(false)} style={[styles.quickAction, quarantinedSubmissions.length > 0 && styles.quickActionDanger]}>
+                <View style={[styles.quickActionIcon, quarantinedSubmissions.length > 0 && styles.quickActionIconDanger]}><Ionicons name="archive-outline" size={20} color={quarantinedSubmissions.length > 0 ? colors.danger : colors.textMuted} /></View>
+                <View style={styles.detectionCopy}><Text style={[styles.quickActionTitle, quarantinedSubmissions.length > 0 && styles.quickActionTitleDanger]}>Quarantine</Text><Text style={styles.quickActionMeta}>{quarantinedSubmissions.length} submission{quarantinedSubmissions.length === 1 ? "" : "s"}</Text></View>
+                <Ionicons name="chevron-forward" size={18} color={quarantinedSubmissions.length > 0 ? colors.danger : colors.textMuted} />
+              </Pressable>
+            </View>
+
             <Card>
-              <Text style={styles.sectionTitle}>Recent training</Text>
-              {progressStats.training_history.length ? <View style={styles.trainingHistory}>{progressStats.training_history.map((run) => <View key={run.training_run_id} style={styles.trainingRow}>
-                <View style={styles.trainingMarker}><Ionicons name={run.status === "completed" ? "checkmark" : run.status === "running" ? "hourglass-outline" : "close"} size={18} color={run.status === "completed" ? colors.successFg : run.status === "running" ? colors.warningFg : colors.danger} /></View>
-                <View style={styles.detectionCopy}>
-                  <Text style={styles.trainingModel}>{run.model_version || "No model produced"}</Text>
-                  <Text style={styles.trainingMeta}>{new Date(run.ended_at || run.started_at).toLocaleString("en-GB")}</Text>
-                </View>
-                <StatusBadge label={run.status.toUpperCase()} tone={run.status === "completed" ? "success" : run.status === "running" ? "warning" : "danger"} />
-              </View>)}</View> : <View style={styles.lifecycleEmpty}><Ionicons name="time-outline" size={20} color={colors.textMuted} /><Text style={styles.lifecycleEmptyText}>No training runs have been recorded yet.</Text></View>}
-              <View style={styles.rollbackSection}>
-                <Text style={styles.modelRole}>ROLLBACK</Text>
-                <Text style={styles.actionHint}>Restore a previous model if needed.</Text>
-                {progressStats.archived_models.length ? progressStats.archived_models.map((model) => <View key={model.id} style={styles.rollbackRow}><View style={styles.detectionCopy}><Text style={styles.modelVersion}>{model.version}</Text><Text style={styles.trainingMeta}>Archived · {new Date(model.created_at).toLocaleDateString("en-GB")}</Text></View><AppButton label="Rollback" icon="arrow-undo-outline" variant="danger" disabled={lifecycle.busy || Boolean(lifecycleMutation)} onPress={() => confirmRollback(model.version)} /></View>) : <Text style={styles.actionHint}>No archived model is available.</Text>}
-              </View>
+              <View style={styles.sectionHeading}><View><Text style={styles.sectionTitle}>Existing products</Text><Text style={styles.sectionSubtitle}>{progressStats.active_classes.length} classes in the active model</Text></View><Ionicons name="pricetags-outline" size={22} color={colors.primary} /></View>
+              {progressStats.active_classes.length ? <View style={styles.classChips}>{progressStats.active_classes.map((name) => <View key={name} style={styles.classChip}><Text style={styles.classChipText}>{name}</Text></View>)}</View> : <Text style={styles.actionHint}>Class names will appear after the first model comparison.</Text>}
             </Card>
           </> : null}
         </View>
       )}
 
-      <View style={styles.note}>
+      {activeTab !== "AI Progress" ? <View style={styles.note}>
         <Ionicons name="information-circle-outline" size={19} color={colors.infoFg} />
         <Text style={styles.noteText}>Contributions are stored separately for review. Original YOLO detections remain unchanged.</Text>
-      </View>
+      </View> : null}
+
+      <Modal visible={showTrainingSelector} transparent animationType="slide" statusBarTranslucent onRequestClose={() => setShowTrainingSelector(false)}>
+        <View style={styles.sheetBackdrop}>
+          <View style={styles.sheet}>
+            <View style={styles.imageHeader}><View><Text style={styles.imageTitle}>Select training data</Text><Text style={styles.imageSubtitle}>{selectedTrainingSubmissions.size} submissions · {selectedAnnotationCount} annotations selected</Text></View><Pressable accessibilityLabel="Close training selection" onPress={() => setShowTrainingSelector(false)} hitSlop={10}><Ionicons name="close" size={27} color={colors.navy} /></Pressable></View>
+            <View style={styles.selectionControls}><Text style={styles.selectionAvailable}>{eligibleSubmissions.length} eligible submissions</Text><View style={styles.selectionControlButtons}><Pressable accessibilityRole="button" onPress={() => setSelectedTrainingSubmissions(new Set(eligibleSubmissions.map((detail) => detail.submission.id)))} style={styles.selectionControl}><Text style={styles.selectionControlText}>Select all</Text></Pressable><Pressable accessibilityRole="button" disabled={selectedTrainingSubmissions.size === 0} onPress={() => setSelectedTrainingSubmissions(new Set())} style={styles.selectionControl}><Text style={[styles.selectionControlText, selectedTrainingSubmissions.size === 0 && styles.selectionControlDisabled]}>Clear</Text></Pressable></View></View>
+            <Text style={styles.sheetHelper}>Select whole submissions. Trusted data is included automatically.</Text>
+            {quarantinedSubmissions.length ? <Pressable accessibilityRole="button" onPress={openQuarantineFromTraining} style={styles.sheetQuarantineLink}><Ionicons name="archive-outline" size={18} color={colors.danger} /><Text style={styles.sheetQuarantineText}>Manage Quarantine ({quarantinedSubmissions.length})</Text><Ionicons name="chevron-forward" size={17} color={colors.danger} /></Pressable> : null}
+            <ScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
+              {loadingTrainingSelection ? <View style={styles.loading}><ActivityIndicator color={colors.primary} /><Text style={styles.loadingText}>Loading annotations...</Text></View> : null}
+              {trainingSelectionError ? <View style={styles.errorBox}><Text style={styles.errorText}>{trainingSelectionError}</Text><AppButton label="Try Again" variant="secondary" onPress={loadTrainingSelection} /></View> : null}
+              {!loadingTrainingSelection && !trainingSelectionError && trainingLabelGroups.length === 0 ? <EmptyState icon="checkmark-done-outline" title="Nothing ready to train" message="Approve a contribution first." /> : null}
+              {trainingLabelGroups.map((group) => {
+                const ids = group.submissions.map((detail) => detail.submission.id);
+                const selectedCount = ids.filter((id) => selectedTrainingSubmissions.has(id)).length;
+                const expanded = expandedTrainingLabel === group.label;
+                return <View key={group.label} style={styles.trainingGroup}>
+                  <View style={styles.trainingGroupRow}><Pressable accessibilityRole="checkbox" accessibilityState={{ checked: selectedCount === ids.length }} accessibilityLabel={`Select all ${group.label} submissions`} onPress={() => toggleTrainingGroup(group.submissions)} hitSlop={8}><Ionicons name={selectedCount === ids.length ? "checkbox" : selectedCount ? "remove-circle" : "square-outline"} size={25} color={selectedCount ? colors.primary : colors.textMuted} /></Pressable><Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpandedTrainingLabel(expanded ? null : group.label)} style={styles.trainingGroupOpen}><View style={styles.detectionCopy}><Text style={styles.trainingGroupTitle}>{group.label}</Text><Text style={styles.trainingGroupMeta}>{group.submissions.length} submission{group.submissions.length === 1 ? "" : "s"} · {selectedCount} selected</Text></View><Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={20} color={colors.textMuted} /></Pressable></View>
+                  {expanded ? <View style={styles.trainingDrilldown}>{group.submissions.map((detail) => {
+                    const selected = selectedTrainingSubmissions.has(detail.submission.id);
+                    const labels = [...new Set(detail.annotations.map(contributionProductLabel))];
+                    const detailExpanded = expandedTrainingSubmission === detail.submission.id;
+                    return <View key={detail.submission.id} style={[styles.trainingSubmissionDetail, selected && styles.trainingSelectionRowSelected]}>
+                      <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: selected }} onPress={() => toggleTrainingGroup([detail])} hitSlop={8}><Ionicons name={selected ? "checkbox" : "square-outline"} size={23} color={selected ? colors.primary : colors.textMuted} /></Pressable>
+                      <Pressable accessibilityRole="button" accessibilityState={{ expanded: detailExpanded }} onPress={() => setExpandedTrainingSubmission(detailExpanded ? null : detail.submission.id)} style={styles.trainingSubmissionOpen}>
+                        <View style={styles.detectionCopy}><Text style={styles.trainingSelectionTitle}>{labels.join(" · ")}</Text><Text style={styles.detectionMeta}>Submission #{detail.submission.id} · {detail.annotations.length} annotation{detail.annotations.length === 1 ? "" : "s"}</Text></View>
+                        <Ionicons name={detailExpanded ? "chevron-up" : "chevron-down"} size={18} color={colors.textMuted} />
+                      </Pressable>
+                      {detailExpanded ? <View style={styles.trainingSubmissionPreview}><Image source={{ uri: getScanImageUrl(detail.submission.scan_id) }} style={[styles.trainingPreviewImage, { aspectRatio: detail.submission.image_width / detail.submission.image_height }]} resizeMode="contain" />{detail.annotations.map((annotation) => <View key={annotation.id} style={styles.quarantineAnnotation}><Text style={styles.annotationTitle}>{contributionProductLabel(annotation)}</Text><Text style={styles.annotationDetail}>{actionTitle(annotation.action)}</Text></View>)}</View> : null}
+                    </View>;
+                  })}</View> : null}
+                </View>;
+              })}
+            </ScrollView>
+            <AppButton label={`Train with ${selectedTrainingSubmissions.size} submission${selectedTrainingSubmissions.size === 1 ? "" : "s"}`} icon="school-outline" loading={lifecycle.action === "Train Candidate"} disabled={lifecycle.busy || selectedTrainingSubmissions.size === 0} onPress={startSelectedCandidateTraining} />
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={showTrainingHistory} transparent animationType="slide" statusBarTranslucent onRequestClose={() => setShowTrainingHistory(false)}>
+        <View style={styles.sheetBackdrop}><View style={styles.sheet}><View style={styles.imageHeader}><View><Text style={styles.imageTitle}>Training History</Text><Text style={styles.imageSubtitle}>Recent model runs and rollback options</Text></View><Pressable accessibilityLabel="Close training history" onPress={() => setShowTrainingHistory(false)} hitSlop={10}><Ionicons name="close" size={27} color={colors.navy} /></Pressable></View><ScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
+          {progressStats?.training_history.length ? <View style={styles.trainingHistory}>{progressStats.training_history.map((run) => <View key={run.training_run_id} style={styles.trainingRow}><View style={styles.trainingMarker}><Ionicons name={run.status === "completed" ? "checkmark" : run.status === "running" ? "hourglass-outline" : "close"} size={18} color={run.status === "completed" ? colors.successFg : run.status === "running" ? colors.warningFg : colors.danger} /></View><View style={styles.detectionCopy}><Text style={styles.trainingModel}>{run.model_version || "No model produced"}</Text><Text style={styles.trainingMeta}>{new Date(run.ended_at || run.started_at).toLocaleString("en-GB")}</Text></View><StatusBadge label={run.status.toUpperCase()} tone={run.status === "completed" ? "success" : run.status === "running" ? "warning" : "danger"} /></View>)}</View> : <EmptyState icon="time-outline" title="No training history" message="Completed runs will appear here." />}
+          {progressStats?.archived_models.length ? <View style={styles.rollbackSection}><Text style={styles.modelRole}>ROLLBACK</Text>{progressStats.archived_models.map((model) => <View key={model.id} style={styles.rollbackRow}><View style={styles.detectionCopy}><Text style={styles.modelVersion}>{model.version}</Text><Text style={styles.trainingMeta}>{new Date(model.created_at).toLocaleDateString("en-GB")}</Text></View><AppButton label="Rollback" icon="arrow-undo-outline" variant="danger" disabled={lifecycle.busy || Boolean(lifecycleMutation)} onPress={() => confirmRollback(model.version)} /></View>)}</View> : null}
+        </ScrollView></View></View>
+      </Modal>
+
+      <Modal visible={showQuarantine} transparent animationType="slide" statusBarTranslucent onRequestClose={() => setShowQuarantine(false)}>
+        <View style={styles.sheetBackdrop}>
+          <View style={styles.sheet}>
+            <View style={styles.imageHeader}>
+              <View><Text style={styles.imageTitle}>Quarantine</Text><Text style={styles.imageSubtitle}>{quarantinedSubmissions.length} submission{quarantinedSubmissions.length === 1 ? "" : "s"} excluded · {selectedQuarantineSubmissions.size} selected</Text></View>
+              <Pressable accessibilityLabel="Close quarantine" onPress={() => setShowQuarantine(false)} hitSlop={10}><Ionicons name="close" size={27} color={colors.navy} /></Pressable>
+            </View>
+
+            {quarantinedSubmissions.length ? <View style={styles.selectionControls}>
+              <Text style={styles.selectionAvailable}>Select submissions to restore for the next training run</Text>
+              <View style={styles.selectionControlButtons}>
+                <Pressable accessibilityRole="button" onPress={() => setSelectedQuarantineSubmissions(new Set(quarantinedSubmissions.map((detail) => detail.submission.id)))} style={styles.selectionControl}><Text style={styles.selectionControlText}>Select all</Text></Pressable>
+                <Pressable accessibilityRole="button" disabled={selectedQuarantineSubmissions.size === 0} onPress={() => setSelectedQuarantineSubmissions(new Set())} style={styles.selectionControl}><Text style={[styles.selectionControlText, selectedQuarantineSubmissions.size === 0 && styles.selectionControlDisabled]}>Clear</Text></Pressable>
+              </View>
+            </View> : null}
+
+            <ScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
+              {quarantineMessage ? <View style={styles.successBox}><Ionicons name="checkmark-circle" size={20} color={colors.successFg} /><Text style={styles.successText}>{quarantineMessage}</Text></View> : null}
+              {quarantineError ? <View style={styles.errorBox}><Text style={styles.errorText}>{quarantineError}</Text></View> : null}
+              {quarantineLabelGroups.length ? quarantineLabelGroups.map((group) => {
+                const expanded = expandedQuarantineLabel === group.label;
+                const groupIds = [...new Set(group.submissions.map((detail) => detail.submission.id))];
+                const selectedCount = groupIds.filter((id) => selectedQuarantineSubmissions.has(id)).length;
+                const allSelected = groupIds.length > 0 && selectedCount === groupIds.length;
+                return <View key={group.label} style={styles.trainingGroup}>
+                  <View style={styles.trainingGroupRow}>
+                    <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: allSelected }} accessibilityLabel={`Select all quarantined ${group.label} submissions`} onPress={() => toggleQuarantineGroup(group.submissions)} hitSlop={8}>
+                      <Ionicons name={allSelected ? "checkbox" : selectedCount ? "remove-circle" : "square-outline"} size={25} color={selectedCount ? colors.primary : colors.textMuted} />
+                    </Pressable>
+                    <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpandedQuarantineLabel(expanded ? null : group.label)} style={styles.trainingGroupOpen}>
+                      <View style={styles.quarantineGroupIcon}><Ionicons name="archive-outline" size={19} color={colors.danger} /></View>
+                      <View style={styles.detectionCopy}><Text style={styles.trainingGroupTitle}>{group.label}</Text><Text style={styles.trainingGroupMeta}>{groupIds.length} submission{groupIds.length === 1 ? "" : "s"} · {selectedCount} selected</Text></View>
+                      <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={20} color={colors.textMuted} />
+                    </Pressable>
+                  </View>
+
+                  {expanded ? <View style={styles.trainingDrilldown}>{group.submissions.map((detail) => {
+                    const submissionExpanded = expandedQuarantineSubmission === detail.submission.id;
+                    const selected = selectedQuarantineSubmissions.has(detail.submission.id);
+                    const labels = [...new Set(detail.annotations.map(contributionProductLabel))];
+                    return <View key={detail.submission.id} style={[styles.quarantineSubmission, selected && styles.trainingSelectionRowSelected]}>
+                      <View style={styles.quarantineSubmissionRow}>
+                        <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: selected }} accessibilityLabel={`Select submission ${detail.submission.id}`} onPress={() => toggleQuarantineGroup([detail])} hitSlop={8}>
+                          <Ionicons name={selected ? "checkbox" : "square-outline"} size={23} color={selected ? colors.primary : colors.textMuted} />
+                        </Pressable>
+                        <Pressable accessibilityRole="button" accessibilityState={{ expanded: submissionExpanded }} onPress={() => setExpandedQuarantineSubmission(submissionExpanded ? null : detail.submission.id)} style={styles.trainingGroupOpen}>
+                          <View style={styles.detectionCopy}><Text style={styles.trainingSelectionTitle}>Submission #{detail.submission.id}</Text><Text style={styles.detectionMeta}>{labels.join(" · ")} · {detail.annotations.length} annotation{detail.annotations.length === 1 ? "" : "s"}</Text></View>
+                          <Ionicons name={submissionExpanded ? "chevron-up" : "chevron-down"} size={18} color={colors.textMuted} />
+                        </Pressable>
+                      </View>
+
+                      {submissionExpanded ? <View style={styles.quarantineDetails}><Image source={{ uri: getScanImageUrl(detail.submission.scan_id) }} style={[styles.quarantineImage, { aspectRatio: detail.submission.image_width / detail.submission.image_height }]} resizeMode="contain" />{detail.annotations.map((annotation) => <View key={annotation.id} style={styles.quarantineAnnotation}><Text style={styles.annotationTitle}>{contributionProductLabel(annotation)}</Text><Text style={styles.annotationDetail}>{actionTitle(annotation.action)} · Annotation #{annotation.id}</Text></View>)}<View style={styles.quarantineActions}><View style={styles.detectionAction}><AppButton label="Reject permanently" variant="danger" icon="close-circle-outline" disabled={quarantineMutation !== null} onPress={() => confirmPermanentQuarantineRejection(detail.submission.id)} /></View><View style={styles.detectionAction}><AppButton label="Restore this" icon="refresh-outline" loading={quarantineMutation === detail.submission.id} disabled={quarantineMutation !== null} onPress={() => applyQuarantineAction(detail.submission.id, "restore")} /></View></View></View> : null}
+                    </View>;
+                  })}</View> : null}
+                </View>;
+              }) : <EmptyState icon="shield-checkmark-outline" title="Nothing quarantined" message="Rejected candidate data will appear here." />}
+            </ScrollView>
+
+            {quarantinedSubmissions.length ? <AppButton label={`Restore ${selectedQuarantineSubmissions.size} selected`} icon="refresh-outline" loading={quarantineMutation === -1} disabled={quarantineMutation !== null || selectedQuarantineSubmissions.size === 0} onPress={restoreSelectedQuarantinedSubmissions} /> : null}
+            <AppButton label="Continue to Train Model" icon="school-outline" variant="secondary" disabled={Boolean(progressStats?.latest_candidate)} onPress={returnToTrainingSelection} />
+            {progressStats?.latest_candidate ? <Text style={styles.actionHint}>Training will unlock after the current candidate is resolved. Your quarantine selections can be restored now.</Text> : null}
+          </View>
+        </View>
+      </Modal>
 
       <Modal visible={imageDetection !== null} transparent animationType="fade" statusBarTranslucent onRequestClose={() => setImageDetection(null)}>
         <View style={styles.imageBackdrop}>
@@ -1376,6 +1690,8 @@ const styles = StyleSheet.create({
   usedModelBox: { marginTop: spacing.md, flexDirection: "row", alignItems: "center", gap: spacing.sm, backgroundColor: colors.successBg, borderRadius: radius.lg, padding: spacing.md },
   usedModelTitle: { color: colors.successFg, fontSize: 13, fontWeight: "800" },
   usedModelMeta: { color: colors.successFg, fontSize: 12, lineHeight: 17 },
+  lifecycleStateRow: { marginTop: spacing.md, flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.sm, borderRadius: radius.lg, backgroundColor: colors.surfaceMuted },
+  lifecycleStateText: { flex: 1, color: colors.textSecondary, fontSize: 12, lineHeight: 17, fontWeight: "600" },
   readOnlyText: { marginTop: spacing.sm, color: colors.textMuted, fontSize: 13, fontWeight: "600", textAlign: "center" },
   moderationDivider: { marginTop: spacing.xl, paddingTop: spacing.xl, borderTopWidth: 2, borderTopColor: colors.border, flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: spacing.md },
   queueTitleRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: spacing.sm },
@@ -1396,6 +1712,16 @@ const styles = StyleSheet.create({
   progressMetric: { width: "48%", minHeight: 112, borderRadius: radius.xl, padding: spacing.lg, justifyContent: "center", gap: spacing.xs },
   progressValue: { fontSize: 32, fontWeight: "900" },
   progressLabel: { color: colors.textSecondary, fontSize: 13, fontWeight: "700", lineHeight: 18 },
+  classChips: { flexDirection: "row", flexWrap: "wrap", gap: spacing.xs, marginTop: spacing.md },
+  classChip: { paddingHorizontal: spacing.sm, paddingVertical: spacing.xs, borderRadius: radius.pill, backgroundColor: colors.primarySoft },
+  classChipText: { color: colors.primary, fontSize: 12, fontWeight: "800" },
+  managementActions: { marginTop: spacing.sm },
+  managementRow: { minHeight: 64, flexDirection: "row", alignItems: "center", gap: spacing.sm, borderTopWidth: 1, borderTopColor: colors.border, paddingVertical: spacing.sm },
+  managementIcon: { width: 38, height: 38, borderRadius: 13, backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center" },
+  managementTitle: { color: colors.navy, fontSize: 14, fontWeight: "900" },
+  managementMeta: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
+  quarantineAction: { minHeight: 42, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: spacing.xs, paddingHorizontal: spacing.md, borderWidth: 1, borderColor: colors.danger, borderRadius: radius.lg, backgroundColor: colors.dangerBg },
+  quarantineActionText: { color: colors.danger, fontSize: 13, fontWeight: "900" },
   modelRow: { flexDirection: "row", alignItems: "center", gap: spacing.md, borderTopWidth: 1, borderTopColor: colors.border, paddingVertical: spacing.md, marginTop: spacing.sm },
   heroModelRow: { flexDirection: "row", alignItems: "center", gap: spacing.md, paddingVertical: spacing.md },
   heroModelVersion: { color: colors.navy, fontSize: 24, lineHeight: 29, fontWeight: "900", flexShrink: 1 },
@@ -1405,6 +1731,14 @@ const styles = StyleSheet.create({
   modelVersion: { color: colors.navy, fontSize: 14, fontWeight: "800", marginTop: 2 },
   lifecycleEmpty: { flexDirection: "row", alignItems: "center", gap: spacing.sm, marginTop: spacing.md, padding: spacing.md, borderRadius: radius.lg, backgroundColor: colors.surfaceMuted },
   lifecycleEmptyText: { flex: 1, color: colors.textMuted, fontSize: 13, lineHeight: 18 },
+  selectionControls: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.md, marginVertical: spacing.md },
+  selectionAvailable: { color: colors.textSecondary, fontSize: 13, fontWeight: "800" },
+  selectionControlButtons: { flexDirection: "row", gap: spacing.xs },
+  selectionControl: { minHeight: 38, justifyContent: "center", paddingHorizontal: spacing.sm, borderRadius: radius.md, backgroundColor: colors.surfaceMuted },
+  selectionControlText: { color: colors.primary, fontSize: 13, fontWeight: "900" },
+  selectionControlDisabled: { color: colors.textMuted },
+  trainingSelectionRowSelected: { borderColor: colors.primary, backgroundColor: colors.primarySoft },
+  trainingSelectionTitle: { color: colors.navy, fontSize: 14, lineHeight: 19, fontWeight: "900" },
   comparisonHeading: { flexDirection: "row", alignItems: "flex-start", gap: spacing.md, marginBottom: spacing.md },
   metricHeader: { flexDirection: "row", alignItems: "center", paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.border },
   metricRow: { flexDirection: "row", alignItems: "center", minHeight: 44, borderBottomWidth: 1, borderBottomColor: colors.border },
@@ -1459,6 +1793,62 @@ const styles = StyleSheet.create({
   successBox: { flexDirection: "row", alignItems: "center", gap: spacing.sm, backgroundColor: colors.successBg, borderRadius: radius.lg, padding: spacing.md },
   successText: { flex: 1, color: colors.successFg, fontWeight: "700", lineHeight: 19 },
   successLink: { color: colors.successFg, fontWeight: "900", marginTop: spacing.xs, textDecorationLine: "underline" },
+  sheetBackdrop: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(15, 23, 42, 0.55)" },
+  sheet: { maxHeight: "94%", minHeight: "42%", gap: spacing.md, padding: spacing.lg, paddingBottom: spacing.xl, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl, backgroundColor: colors.surface },
+  sheetScroll: { flexGrow: 0 },
+  sheetContent: { gap: spacing.sm, paddingBottom: spacing.md },
+  sheetHelper: { color: colors.textMuted, fontSize: 12, lineHeight: 17 },
+  sheetQuarantineLink: { minHeight: 42, flexDirection: "row", alignItems: "center", gap: spacing.xs, paddingHorizontal: spacing.sm, borderRadius: radius.md, backgroundColor: colors.dangerBg },
+  sheetQuarantineText: { flex: 1, color: colors.danger, fontSize: 13, fontWeight: "900" },
+  trainingGroup: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, overflow: "hidden" },
+  trainingGroupRow: { minHeight: 62, flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.md, backgroundColor: colors.surface },
+  trainingGroupOpen: { flex: 1, flexDirection: "row", alignItems: "center", gap: spacing.sm },
+  trainingGroupTitle: { color: colors.navy, fontSize: 15, fontWeight: "900" },
+  trainingGroupMeta: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
+  trainingDrilldown: { gap: spacing.sm, padding: spacing.sm, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surfaceMuted },
+  trainingSubmissionDetail: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: spacing.sm, padding: spacing.sm, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, backgroundColor: colors.surface },
+  trainingThumbnail: { width: 72, maxHeight: 72, borderRadius: radius.md, backgroundColor: colors.border },
+  wholeSubmissionNote: { color: colors.primary, fontSize: 11, fontWeight: "800", marginTop: 3 },
+  quarantineCard: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, overflow: "hidden" },
+  quarantineRow: { minHeight: 64, flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.md, backgroundColor: colors.surface },
+  quarantineDetails: { gap: spacing.sm, padding: spacing.md, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surfaceMuted },
+  quarantineImage: { width: "100%", maxHeight: 260, borderRadius: radius.lg, backgroundColor: colors.border },
+  quarantineAnnotation: { padding: spacing.sm, borderRadius: radius.md, backgroundColor: colors.surface },
+  quarantineActions: { flexDirection: "row", gap: spacing.sm, marginTop: spacing.xs },
+  modelCardHeader: { flexDirection: "row", alignItems: "flex-start", gap: spacing.md },
+  modelDisplayName: { color: colors.navy, fontSize: 20, lineHeight: 25, fontWeight: "900" },
+  modelVersionCompact: { color: colors.textMuted, fontSize: 12, lineHeight: 17, fontWeight: "700" },
+  compactDivider: { height: 1, backgroundColor: colors.border, marginVertical: spacing.md },
+  candidateCompactRow: { flexDirection: "row", alignItems: "center", gap: spacing.md },
+  comparisonCompact: { marginTop: spacing.md, padding: spacing.md, borderRadius: radius.lg, backgroundColor: colors.surfaceMuted, gap: spacing.sm },
+  comparisonCompactHeader: { flexDirection: "row", alignItems: "flex-start", gap: spacing.sm },
+  comparisonCompactTitle: { color: colors.navy, fontSize: 15, fontWeight: "900" },
+  comparisonCompactText: { color: colors.textMuted, fontSize: 12, lineHeight: 17 },
+  metricSummaryRow: { flexDirection: "row", gap: spacing.xs },
+  metricSummaryItem: { flex: 1, padding: spacing.sm, borderRadius: radius.md, backgroundColor: colors.surface },
+  metricSummaryLabel: { color: colors.textMuted, fontSize: 9, lineHeight: 12, fontWeight: "800" },
+  metricSummaryValue: { color: colors.navy, fontSize: 15, fontWeight: "900", marginTop: 3 },
+  comparisonDetailsToggle: { minHeight: 38, flexDirection: "row", alignItems: "center", alignSelf: "flex-start", gap: spacing.xs },
+  comparisonDetailsText: { color: colors.primary, fontSize: 12, fontWeight: "900" },
+  comparisonDetails: { gap: spacing.sm },
+  primaryLifecycleAction: { gap: spacing.xs },
+  systemDecision: { minHeight: 48, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: spacing.sm, borderRadius: radius.lg, backgroundColor: colors.primarySoft },
+  systemDecisionText: { color: colors.textSecondary, fontSize: 13, fontWeight: "800" },
+  quickActions: { flexDirection: "row", gap: spacing.sm },
+  quickAction: { flex: 1, minHeight: 74, flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.sm, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, backgroundColor: colors.surface },
+  quickActionDanger: { borderColor: colors.danger, backgroundColor: colors.dangerBg },
+  quickActionIcon: { width: 34, height: 34, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: colors.primarySoft },
+  quickActionIconDanger: { backgroundColor: colors.dangerBg },
+  quickActionTitle: { color: colors.navy, fontSize: 13, fontWeight: "900" },
+  quickActionTitleDanger: { color: colors.danger },
+  quickActionMeta: { color: colors.textMuted, fontSize: 11, marginTop: 2 },
+  trainingSubmissionOpen: { flex: 1, flexDirection: "row", alignItems: "center", gap: spacing.sm },
+  trainingSubmissionPreview: { width: "100%", gap: spacing.sm, paddingTop: spacing.sm },
+  trainingPreviewImage: { width: "100%", maxHeight: 240, borderRadius: radius.md, backgroundColor: colors.border },
+  quarantineGroupRow: { minHeight: 62, flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.md, backgroundColor: colors.surface },
+  quarantineGroupIcon: { width: 34, height: 34, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: colors.dangerBg },
+  quarantineSubmission: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, overflow: "hidden", backgroundColor: colors.surface },
+  quarantineSubmissionRow: { minHeight: 56, flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.sm },
   imageBackdrop: { flex: 1, backgroundColor: "rgba(15, 23, 42, 0.72)", alignItems: "center", justifyContent: "center", padding: spacing.lg },
   imageModal: { width: "100%", maxWidth: 520, backgroundColor: colors.surface, borderRadius: radius.xl, padding: spacing.lg, gap: spacing.md },
   imageHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.md },

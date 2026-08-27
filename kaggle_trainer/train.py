@@ -617,6 +617,8 @@ def build_combined_dataset(base_root: Path, corrections_root: Path, correction_i
         "base_dataset_content_sha256": directory_sha256(base_root),
         "skipped_conflicting_base_duplicates": skipped_conflicts,
         "included_submission_ids": correction_info["manifest"].get("included_submission_ids", []),
+        "trusted_submission_ids": correction_info["manifest"].get("trusted_submission_ids", []),
+        "experimental_submission_ids": correction_info["manifest"].get("experimental_submission_ids", []),
         "class_mapping": [{"id": index, "name": name} for index, name in enumerate(classes)],
         "split_strategy": {"name": "stable_image_sha256", "seed": "fridge9000-combined-split-v1", "fractions": {"train": job.train_fraction, "val": job.val_fraction, "test": job.test_fraction}},
         "split_counts": counts, "source_counts": source_counts, "samples": manifest_samples,
@@ -858,6 +860,8 @@ def run_worker(input_root: Path, working_root: Path, validate_only: bool = False
                 "split_counts": dataset["manifest"]["split_counts"],
                 "class_mapping": dataset["manifest"]["class_mapping"],
                 "included_submission_ids": dataset["manifest"]["included_submission_ids"],
+                "trusted_submission_ids": dataset["manifest"]["trusted_submission_ids"],
+                "experimental_submission_ids": dataset["manifest"]["experimental_submission_ids"],
             },
             "outputs": {"candidate": "candidate_best.pt", "candidate_last": "candidate_last.pt", "comparison": "comparison.json", "training_metrics": "training_metrics.json"},
         }
