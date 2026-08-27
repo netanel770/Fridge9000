@@ -737,7 +737,7 @@ The export process:
 4. Creates a PostgreSQL custom-format dump using `pg_dump`.
 5. Copies runtime directories.
 6. Copies the local `.env` if present.
-7. Creates a backup manifest.
+7. Creates a backup manifest that distinguishes all managed runtime directories from the directories actually included in this snapshot.
 8. Compresses everything into one timestamped ZIP.
 
 Example:
@@ -824,7 +824,7 @@ The importer:
 3. Stops the backend.
 4. Starts PostgreSQL.
 5. Restores the database using `pg_restore`.
-6. Restores runtime directories.
+6. Clears every managed runtime directory, then restores only the directories included in the backup. This prevents stale files from the destination computer surviving the import.
 7. Restores `.env` when included.
 8. Rebuilds and starts Fridge 9000.
 9. Performs a basic database verification.
@@ -848,6 +848,8 @@ Comparison Artifacts
 ```
 
 If the destination computer already contains Fridge data that should be preserved, export it before importing another backup.
+
+The managed runtime directories are restored as one coherent snapshot. If a managed directory was absent when the backup was created, import clears any destination copy and leaves it absent rather than retaining unrelated local files. Backups created by the immediately previous manifest format remain supported.
 
 ---
 

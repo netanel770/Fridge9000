@@ -23,6 +23,14 @@ $RepoRoot = (Resolve-Path (Join-Path $ScriptDirectory "..")).Path
 $DbContainer = "fridge9000-db"
 $DbUser = "fridge"
 $DbName = "fridge9000"
+$ManagedRuntimeDirectories = @(
+    "uploads",
+    "candidate_models",
+    "dataset_exports",
+    "model_comparisons",
+    "base_dataset",
+    "remote_training_jobs"
+)
 
 function Write-Step {
     param([string]$Message)
@@ -76,7 +84,7 @@ function Copy-DirectoryIfExists {
 
     if (-not (Test-Path $Source)) {
         Write-Host "Skipping missing path: $Source"
-        return
+        return $false
     }
 
     Ensure-Directory (Split-Path -Parent $Destination)
@@ -86,6 +94,43 @@ function Copy-DirectoryIfExists {
         -Destination $Destination `
         -Recurse `
         -Force
+
+    return $true
+}
+
+function Restore-RuntimeDirectories {
+    param(
+        [Parameter(Mandatory)]
+        [string]$TargetRoot,
+
+        [Parameter(Mandatory)]
+        [string]$BackupRoot,
+
+        [Parameter(Mandatory)]
+        [string[]]$Directories
+    )
+
+    foreach ($directory in $Directories) {
+        $source = Join-Path $BackupRoot "backend\$directory"
+        $destination = Join-Path $TargetRoot "backend\$directory"
+
+        # Import is an exact snapshot restore: destination-only files must
+        # never survive, even when the backup omitted this directory.
+        if (Test-Path $destination) {
+            Remove-Item $destination -Recurse -Force
+        }
+
+        if (-not (Test-Path $source)) {
+            Write-Host "Backup does not include backend/$directory; target cleared."
+            continue
+        }
+
+        Copy-Item `
+            $source `
+            $destination `
+            -Recurse `
+            -Force
+    }
 }
 
 function Export-FridgeData {
@@ -185,20 +230,15 @@ function Export-FridgeData {
 
         Write-Step "Copying Fridge runtime data"
 
-        $runtimeDirectories = @(
-            "uploads",
-            "candidate_models",
-            "dataset_exports",
-            "model_comparisons",
-            "base_dataset",
-            "remote_training_jobs"
-        )
+        $includedRuntimeDirectories = @()
 
-        foreach ($directory in $runtimeDirectories) {
+        foreach ($directory in $ManagedRuntimeDirectories) {
             $source = Join-Path $RepoRoot "backend\$directory"
             $destination = Join-Path $workingDirectory "backend\$directory"
 
-            Copy-DirectoryIfExists $source $destination
+            if (Copy-DirectoryIfExists $source $destination) {
+                $includedRuntimeDirectories += $directory
+            }
         }
 
         $envFile = Join-Path $RepoRoot ".env"
@@ -216,14 +256,15 @@ function Export-FridgeData {
         Write-Step "Writing backup manifest"
 
         $manifest = [ordered]@{
-            format_version = 1
+            format_version = 2
             created_at = (Get-Date).ToString("o")
             branch = $branch
             commit = $commit
             database = $DbName
             database_container = $DbContainer
             computer = $env:COMPUTERNAME
-            included_runtime_directories = $runtimeDirectories
+            managed_runtime_directories = $ManagedRuntimeDirectories
+            included_runtime_directories = $includedRuntimeDirectories
         }
 
         $manifest |
@@ -310,12 +351,60 @@ after confirming this is the correct laptop/repository.
 
         $manifestPath = Join-Path $tempDirectory "manifest.json"
 
+        $includedRuntimeDirectories = @()
+        $usesExplicitRuntimeManifest = $false
+
         if (Test-Path $manifestPath) {
             $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
 
             Write-Host "Backup created: $($manifest.created_at)"
             Write-Host "Source branch:  $($manifest.branch)"
             Write-Host "Source commit:  $($manifest.commit)"
+
+            if ($manifest.format_version -ge 2) {
+                if (-not $manifest.PSObject.Properties["managed_runtime_directories"] -or
+                    -not $manifest.PSObject.Properties["included_runtime_directories"]) {
+                    throw "Backup manifest format 2 is missing runtime-directory metadata."
+                }
+
+                if (@(Compare-Object @($manifest.managed_runtime_directories) $ManagedRuntimeDirectories).Count -gt 0) {
+                    throw "Backup manifest managed runtime directories do not match this Fridge9000 version."
+                }
+
+                $unknownDirectories = @(
+                    $manifest.included_runtime_directories |
+                        Where-Object { $_ -notin $ManagedRuntimeDirectories }
+                )
+
+                if ($unknownDirectories.Count -gt 0) {
+                    throw "Backup manifest includes unmanaged runtime directories: $($unknownDirectories -join ', ')."
+                }
+
+                $includedRuntimeDirectories = @($manifest.included_runtime_directories)
+                $usesExplicitRuntimeManifest = $true
+            }
+        }
+
+        $actualIncludedRuntimeDirectories = @(
+            $ManagedRuntimeDirectories | Where-Object {
+                Test-Path (Join-Path $tempDirectory "backend\$_")
+            }
+        )
+
+        if (-not $usesExplicitRuntimeManifest) {
+            # Format 1 manifests listed configured paths instead of paths that
+            # were actually copied. Infer archive contents for compatibility.
+            $includedRuntimeDirectories = $actualIncludedRuntimeDirectories
+        }
+        elseif (@(Compare-Object $includedRuntimeDirectories $actualIncludedRuntimeDirectories).Count -gt 0) {
+            throw "Backup manifest runtime-directory contents do not match the archive."
+        }
+
+        foreach ($directory in $includedRuntimeDirectories) {
+            $source = Join-Path $tempDirectory "backend\$directory"
+            if (-not (Test-Path $source)) {
+                throw "Backup manifest says backend/$directory was included, but it is missing from the archive."
+            }
         }
 
         Write-Step "Stopping Fridge services"
@@ -371,34 +460,10 @@ after confirming this is the correct laptop/repository.
 
         Write-Step "Restoring runtime files"
 
-        $runtimeDirectories = @(
-            "uploads",
-            "candidate_models",
-            "dataset_exports",
-            "model_comparisons",
-            "base_dataset",
-            "remote_training_jobs"
-        )
-
-        foreach ($directory in $runtimeDirectories) {
-            $source = Join-Path $tempDirectory "backend\$directory"
-
-            if (-not (Test-Path $source)) {
-                continue
-            }
-
-            $destination = Join-Path $RepoRoot "backend\$directory"
-
-            if (Test-Path $destination) {
-                Remove-Item $destination -Recurse -Force
-            }
-
-            Copy-Item `
-                $source `
-                $destination `
-                -Recurse `
-                -Force
-        }
+        Restore-RuntimeDirectories `
+            -TargetRoot $RepoRoot `
+            -BackupRoot $tempDirectory `
+            -Directories $ManagedRuntimeDirectories
 
         $backupEnv = Join-Path $tempDirectory ".env"
 
