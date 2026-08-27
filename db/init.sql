@@ -104,12 +104,16 @@ CREATE TABLE IF NOT EXISTS annotation_submissions (
   ),
   image_width INT NOT NULL CONSTRAINT annotation_submissions_image_width_check CHECK (image_width > 0),
   image_height INT NOT NULL CONSTRAINT annotation_submissions_image_height_check CHECK (image_height > 0),
+  training_state TEXT NOT NULL DEFAULT 'eligible' CONSTRAINT annotation_submissions_training_state_check CHECK (
+    training_state IN ('eligible', 'experimental', 'trusted', 'quarantined')
+  ),
   created_at TIMESTAMP NOT NULL DEFAULT NOW(),
   reviewed_at TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_annotation_submissions_scan_id ON annotation_submissions(scan_id);
 CREATE INDEX IF NOT EXISTS idx_annotation_submissions_status ON annotation_submissions(status);
+CREATE INDEX IF NOT EXISTS idx_annotation_submissions_training_state ON annotation_submissions(training_state);
 
 -- Individual human corrections within an annotation submission
 CREATE TABLE IF NOT EXISTS annotations (
@@ -180,6 +184,8 @@ CREATE TABLE IF NOT EXISTS model_versions (
 CREATE INDEX IF NOT EXISTS idx_model_versions_status ON model_versions(status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_model_versions_single_active
   ON model_versions(status) WHERE status = 'active';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_model_versions_single_candidate
+  ON model_versions(status) WHERE status = 'candidate';
 
 INSERT INTO model_versions(version, model_path, status)
 SELECT 'fridge9000-production-initial', 'best.pt', 'active'
@@ -192,6 +198,7 @@ CREATE TABLE IF NOT EXISTS training_run_submission_usage (
   dataset_version TEXT NOT NULL,
   model_version_id INT NOT NULL REFERENCES model_versions(id) ON DELETE RESTRICT,
   used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  is_experimental BOOLEAN NOT NULL DEFAULT FALSE,
   PRIMARY KEY (training_run_id, submission_id)
 );
 
@@ -207,6 +214,7 @@ CREATE TABLE IF NOT EXISTS training_run_annotation_usage (
   dataset_version TEXT NOT NULL,
   model_version_id INT NOT NULL REFERENCES model_versions(id) ON DELETE RESTRICT,
   used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  is_experimental BOOLEAN NOT NULL DEFAULT FALSE,
   PRIMARY KEY (training_run_id, annotation_id)
 );
 
@@ -239,11 +247,6 @@ CREATE INDEX IF NOT EXISTS idx_model_comparisons_candidate
   ON model_comparisons(candidate_model_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_model_comparisons_dataset
   ON model_comparisons(dataset_version, created_at DESC);
-
-ALTER TABLE model_comparisons
-  ADD COLUMN IF NOT EXISTS class_comparison JSONB NOT NULL DEFAULT '{"active_classes":[],"candidate_classes":[],"shared_classes":[],"added_classes":[],"removed_classes":[]}'::jsonb,
-  ADD COLUMN IF NOT EXISTS shared_class_comparison JSONB NOT NULL DEFAULT '{"available":false,"classes":[],"unavailable_classes":[]}'::jsonb,
-  ADD COLUMN IF NOT EXISTS added_class_metrics JSONB NOT NULL DEFAULT '{"available":false,"classes":[],"unavailable_classes":[],"per_class":{}}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS model_activation_history (
   id SERIAL PRIMARY KEY,
