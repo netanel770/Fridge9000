@@ -4,22 +4,86 @@
 
 # Fridge 9000
 
-Fridge 9000 is a smart refrigerator management system that combines **computer vision, inventory tracking, OCR, freshness analysis, and a human-in-the-loop ML pipeline** to help users understand what is in their fridge and reduce food waste.
+Fridge 9000 is a smart refrigerator management system that combines **computer vision, inventory tracking, OCR, freshness analysis, and human-in-the-loop machine learning**.
 
-The system can detect products from refrigerator images, review and correct AI predictions, track inventory and expiration dates, process shopping receipts, classify product freshness, and turn approved human annotations into traceable training data for future detector versions.
+The mobile app can scan refrigerator images, review AI detections, update inventory, track expiration dates, process receipts, analyze freshness, and collect human corrections that can later be used to train improved detector models.
+
+---
 
 ## Features
 
 ### AI Product Detection
 
-* Detects food and beverage products using **YOLO**.
-* Stores detection labels, confidence scores, and bounding boxes.
-* Lets users review detections before applying inventory changes.
-* Supports correcting labels, adjusting boxes, removing false positives, and adding missed products.
+Fridge 9000 uses **YOLO** to detect supported products from refrigerator images.
 
-### Human-in-the-Loop Learning
+It stores:
 
-Fridge 9000 includes a complete annotation and model-improvement workflow.
+- Product labels
+- Confidence scores
+- Bounding boxes
+- Scan history
+
+Users can review detections before inventory changes are applied.
+
+Incorrect predictions can be corrected by:
+
+- Changing the product label
+- Adjusting the bounding box
+- Removing false-positive detections
+- Adding products the detector missed
+- Confirming correct detections
+
+Uploaded images are normalized before detection so the stored image, detector input, and annotation coordinates use the same orientation.
+
+---
+
+### Inventory Management
+
+The application supports:
+
+- Adding products from refrigerator scans
+- Manual inventory updates
+- Product quantities
+- Separate inventory batches
+- Expiration dates
+- Estimated expiration dates
+- Partially consumed products
+- Inventory event history
+- Low-stock and missing-product alerts
+
+---
+
+### Receipt OCR
+
+Shopping receipts can be uploaded as images or PDFs.
+
+The backend uses **Tesseract OCR** to extract products from receipts.
+
+Detected products can be reviewed before being added to inventory.
+
+---
+
+### Freshness Detection
+
+Fridge 9000 includes a separate image-classification model for supported freshness or rot detection.
+
+Freshness classification is intentionally separate from the YOLO product-detection lifecycle.
+
+---
+
+### SAM2 Segmentation
+
+YOLO detections can be passed to **SAM2** to generate representative product segmentation masks and outlines.
+
+The system evaluates candidate masks instead of blindly accepting the first segmentation result.
+
+---
+
+# Teach AI
+
+Fridge 9000 includes a full **human-in-the-loop learning workflow**.
+
+Users can correct normal AI scans or upload images and annotate products manually.
 
 Supported annotation actions:
 
@@ -31,219 +95,159 @@ ADD
 REMOVE
 ```
 
-Users can teach the detector in two ways:
+Users can:
 
-1. **AI-assisted annotation**
+1. Run a normal refrigerator scan.
+2. Review the AI predictions.
+3. Correct labels, boxes, false positives, or missed products.
+4. Submit corrections for moderation.
+5. Approve useful contributions as training data.
+6. Train a candidate model.
+7. Compare the candidate against the active model.
+8. Promote it only if the backend promotion policy passes.
+9. Roll back to a previous model if necessary.
 
-   * Run a normal YOLO scan.
-   * Review the detected products.
-   * Confirm or correct the model's predictions.
+Manual annotations do not create fake YOLO predictions.
 
-2. **Manual annotation**
+They enter the same moderation and training pipeline while preserving their original source.
 
-   * Upload an image without running YOLO.
-   * Draw bounding boxes and assign product labels manually.
-   * Submit annotations through the same moderation and training pipeline.
+---
 
-Manual annotations do not create fake detector predictions. They are stored as `ADD` annotations with no source detection, preserving accurate provenance.
+# Model Lifecycle
 
-Approved annotations can later be exported into versioned YOLO datasets and used to train candidate detector models.
-
-### Model Lifecycle
-
-Detector improvement is treated as a versioned workflow rather than simply overwriting `best.pt`.
+Detector improvement is handled as a versioned lifecycle instead of simply replacing `best.pt`.
 
 ```text
-Image
-  ↓
-YOLO Detection / Manual Annotation
-  ↓
-Human Annotation
-  ↓
+Scan / Manual Image
+        ↓
+Human Corrections
+        ↓
 Moderation
-  ↓
+        ↓
 Approved Training Data
-  ↓
-Versioned Dataset
-  ↓
+        ↓
+Versioned YOLO Dataset
+        ↓
 Candidate Training
-  ↓
+        ↓
 Active vs Candidate Comparison
-  ↓
+        ↓
 Promotion or Rejection
-  ↓
+        ↓
 Rollback Available
 ```
 
 The system tracks:
 
-* Annotation submissions and individual corrections
-* Dataset versions
-* Training runs
-* Starting model and weights
-* Training parameters and metrics
-* Which annotations were consumed by training
-* Candidate and active model versions
-* Model comparisons
-* Promotion and rollback history
+- Annotation submissions
+- Dataset versions
+- Training runs
+- Model versions
+- Training parameters
+- Training metrics
+- Model comparisons
+- Contributions used for training
+- Promotion history
+- Rollback history
 
-Only one detector can be active at a time.
+Only one detector is active at a time.
 
-Promotion is always explicit. A same-class candidate must outperform the active model on the stored overall comparison. A candidate that adds products may tolerate up to a small configured regression on existing classes only when its aggregate and per-product results for every new class meet the configured quality thresholds. Removing a supported class always blocks promotion.
-
-### Inventory Management
-
-* Add or remove products using refrigerator scans.
-* Add products manually.
-* Track quantities using separate inventory batches.
-* Track multiple expiration dates for the same product.
-* Track partially consumed/open products.
-* Preserve inventory event history.
-
-### Expiration and Alerts
-
-Fridge 9000 tracks known or estimated expiration dates and can identify:
-
-* Expired products
-* Products expiring soon
-* Low-stock products
-* Missing products
-
-### Receipt OCR
-
-Shopping receipts can be uploaded as images or PDFs.
-
-The backend uses **Tesseract OCR** to extract purchased products, which can then be reviewed before being added to inventory.
-
-### SAM2 Product Segmentation
-
-YOLO detections can be passed to **SAM2** to generate representative product outlines.
-
-The segmentation pipeline evaluates candidate masks using filtering and quality checks rather than blindly accepting the first SAM result.
-
-### Freshness Classification
-
-A separate image-classification model can evaluate supported products for freshness or rot.
-
-Freshness classification is intentionally separate from the YOLO detector lifecycle.
-
-### Mobile Application
-
-The mobile application is built with **React Native, Expo, TypeScript, and Expo Router**.
-
-It provides interfaces for:
-
-* Inventory
-* Product scans
-* Detection review
-* Manual annotation
-* AI contributions and moderation
-* Model progress
-* Alerts and expiration
-* Receipts
-* Freshness detection
-* Inventory history
+The active model is **never replaced automatically**.
 
 ---
 
-## Architecture
+## Class-Aware Model Promotion
 
-```text
-                         Fridge 9000
-                              │
-                              ▼
-                    React Native / Expo
-                              │
-                              ▼
-                       FastAPI Backend
-                              │
-          ┌───────────────────┼───────────────────┐
-          ▼                   ▼                   ▼
-    YOLO + SAM2          Tesseract OCR       Inventory
-          │                                       │
-          ▼                                       ▼
-   Detection Review                         PostgreSQL
-          │                                       ▲
-          ▼                                       │
- Human / Manual Annotations ──────────────────────┘
-          │
-          ▼
-     Moderation
-          │
-          ▼
- Versioned Dataset
-          │
-          ▼
- Candidate Training
-          │
-          ▼
- Model Comparison
-          │
-          ▼
- Promotion / Rollback
+Candidate models are evaluated using class-aware metrics.
+
+A candidate cannot silently remove products already supported by the active model.
+
+For candidates that introduce new product classes, the promotion policy checks:
+
+- Performance on existing shared classes
+- Average performance of new classes
+- Performance of each individual new class
+
+Current default policy:
+
+```env
+MAX_SHARED_MAP50_95_REGRESSION=0.02
+MIN_ADDED_CLASS_MAP50_95=0.50
+MIN_ADDED_CLASS_PER_CLASS_MAP50_95=0.30
 ```
 
-## Technology Stack
-
-### Backend
-
-* Python
-* FastAPI
-* PostgreSQL
-* psycopg2
-* OpenCV
-* Ultralytics YOLO
-* SAM2
-* Tesseract OCR
-* NumPy
-
-### Mobile
-
-* React Native
-* Expo
-* TypeScript
-* Expo Router
-
-### Infrastructure and Testing
-
-* Docker
-* Docker Compose
-* PostgreSQL 16
-* pytest
-* FastAPI TestClient
+This means a new model must improve the system without seriously damaging performance on existing products.
 
 ---
 
-## Repository Structure
+# Technology Stack
+
+## Backend
+
+- Python
+- FastAPI
+- PostgreSQL
+- psycopg2
+- OpenCV
+- Ultralytics YOLO
+- PyTorch
+- SAM2
+- Tesseract OCR
+- NumPy
+- Pillow
+
+## Mobile
+
+- React Native
+- Expo
+- TypeScript
+- Expo Router
+
+## Infrastructure
+
+- Docker
+- Docker Compose
+- PostgreSQL 16
+- pytest
+- Kaggle GPU training
+
+---
+
+# Project Structure
 
 ```text
 Fridge9000/
 ├── backend/
-│   ├── api/                  # FastAPI route definitions
-│   ├── core/                 # Application configuration
-│   ├── db/                   # Database helpers
-│   ├── services/             # Application and ML services
-│   ├── tests/                # Backend test suite
-│   ├── main.py               # FastAPI entry point
-│   ├── train_yolo_candidate.py # Local candidate training
+│   ├── api/                  FastAPI routes
+│   ├── core/                 Application configuration
+│   ├── db/                   Database helpers
+│   ├── services/             Application and ML services
+│   ├── tests/                Backend test suite
+│   ├── class_aware_metrics.py
+│   ├── model_promotion_policy.py
 │   ├── export_yolo_dataset.py
-│   └── compare_yolo_models.py
+│   ├── train_yolo_candidate.py
+│   ├── compare_yolo_models.py
+│   └── main.py
 │
 ├── db/
-│   └── init.sql              # PostgreSQL schema
+│   └── init.sql
+│
+├── kaggle_trainer/
+│   ├── train.py
+│   └── kernel-metadata.json
 │
 ├── mobile/
-│   ├── app/                  # Expo Router screens
+│   ├── app/
 │   ├── assets/
-│   ├── src/
-│   └── package.json
+│   └── src/
 │
-├── kaggle_trainer/           # Remote training support
-├── docker-compose.yml        # Development DB + backend
-├── docker-compose.test.yml   # Isolated PostgreSQL test DB
-├── run-fridge.bat            # One-click Windows launcher
-├── start-fridge.ps1          # PowerShell launcher and lifecycle management
-├── pytest.ini
+├── assets/
+├── docker-compose.yml
+├── docker-compose.test.yml
+├── fridge-test.bat
+├── run-fridge.bat
+├── start-fridge.ps1
 └── README.md
 ```
 
@@ -255,12 +259,10 @@ Fridge9000/
 
 Install:
 
-* Docker Desktop
-* Git
-* Node.js and npm
-* Expo Go on the mobile device used for development
-
-Python is also required when running the backend test suite directly from the host.
+- Docker Desktop
+- Git
+- Node.js and npm
+- Expo Go on the mobile device
 
 Clone the repository:
 
@@ -277,124 +279,397 @@ npm install
 cd ..
 ```
 
+---
+
 ## Quick Start on Windows
 
 Make sure **Docker Desktop is running**.
 
-Then double-click:
-
-```text
-run-fridge.bat
-```
-
-Alternatively, from Command Prompt:
-
-```cmd
-run-fridge
-```
-
-The launcher automatically:
-
-1. Detects a suitable LAN IPv4 address.
-2. Sets `EXPO_PUBLIC_API_BASE_URL`.
-3. Builds and starts PostgreSQL and FastAPI with Docker Compose.
-4. Waits for the backend services to become healthy.
-5. Starts Expo directly from `mobile/`.
-6. Displays the Expo QR code for connecting the mobile application.
-
-The normal development architecture is:
-
-```text
-PostgreSQL  ─┐
-             ├── Docker Compose
-FastAPI      ─┘
-
-Expo / Metro ─── Windows host
-```
-
-Expo intentionally runs outside Docker so its interactive CLI, LAN discovery, and QR code work normally.
-
-Once Expo starts, scan the displayed QR code using **Expo Go**.
-
-The phone and development PC must be able to reach each other on the same local network.
-
-The backend is automatically exposed at:
-
-```text
-http://<your-LAN-IP>:8000
-```
-
-## Stopping Fridge 9000
-
-Press:
-
-```text
-Ctrl + C
-```
-
-in the launcher terminal.
-
-The launcher automatically:
-
-1. Stops Expo.
-2. Shuts down the FastAPI and PostgreSQL Docker containers.
-3. Restores the previous `EXPO_PUBLIC_API_BASE_URL` environment state.
-4. Restores the original terminal working directory.
-
-The PostgreSQL development data is preserved between runs because the Docker volume is not deleted.
-
-Do **not** use:
-
-```bash
-docker compose down -v
-```
-
-unless you intentionally want to delete the development database volume.
-
-## Advanced Launcher Usage
-
-The underlying PowerShell launcher can also be run directly from the project root:
+From the repository root run:
 
 ```powershell
 .\start-fridge.ps1
 ```
 
-### Custom Backend URL
+The launcher automatically:
 
-A specific backend URL can be supplied with:
+1. Detects a usable LAN IPv4 address.
+2. Sets the mobile API URL.
+3. Builds and starts PostgreSQL and FastAPI.
+4. Waits for the backend to become healthy.
+5. Starts Expo from the `mobile` directory.
+6. Displays the Expo QR code.
 
-```powershell
-.\start-fridge.ps1 -ApiUrl "https://example.com"
+Scan the QR code with **Expo Go**.
+
+The phone and development PC must be able to reach each other on the same local network.
+
+The backend is normally available at:
+
+```text
+http://<your-LAN-IP>:8000
 ```
 
-### Expo Tunnel Mode
+---
 
-Expo tunnel mode is also available:
+## Stopping the Project
 
-```powershell
-.\start-fridge.ps1 -Tunnel
+Press:
+
+```text
+Ctrl+C
 ```
 
-`-Tunnel` tunnels the Expo development server. It does not automatically expose the FastAPI backend, so the configured API URL must still be reachable from the phone.
+in the launcher terminal.
+
+The launcher shuts down Expo and the Docker services.
+
+Development PostgreSQL data is preserved.
+
+Do not run:
+
+```bash
+docker compose down -v
+```
+
+unless you intentionally want to delete the development database.
+
+---
+
+# Kaggle GPU Training
+
+Kaggle training is optional.
+
+Fridge 9000 supports both:
+
+```env
+TRAINING_PROVIDER=local
+```
+
+and:
+
+```env
+TRAINING_PROVIDER=kaggle
+```
+
+Kaggle is recommended when GPU training is required.
+
+---
+
+## 1. Create a Kaggle Account
+
+Create or sign in to a Kaggle account.
+
+Make sure the account is allowed to use GPU notebooks.
+
+Depending on the account, Kaggle may require phone verification before GPU accelerators become available.
+
+---
+
+## 2. Create a Kaggle API Token
+
+Open your Kaggle account settings.
+
+Go to:
+
+```text
+Settings
+→ API
+→ Generate/Create API Token
+```
+
+Copy the generated token.
+
+Never commit this token to Git.
+
+---
+
+## 3. Create the Permanent Base Dataset
+
+Remote training combines:
+
+```text
+Permanent base dataset
+        +
+New approved Fridge 9000 corrections
+```
+
+Create a Kaggle dataset named:
+
+```text
+<your-kaggle-username>/fridge9000-training-data
+```
+
+The dataset must contain one YOLO base dataset with:
+
+```text
+base_dataset/
+├── classes.txt
+├── images/
+│   ├── image001.jpg
+│   ├── image002.jpg
+│   └── ...
+└── labels/
+    ├── image001.txt
+    ├── image002.txt
+    └── ...
+```
+
+`classes.txt` contains one product name per line:
+
+```text
+Osem Tomato Ketchup
+Tirosh Wine
+Tnuva 3% Milk
+Tnuva Cottage Cheese
+Yoplait Strawberry Yogurt
+```
+
+Each label file uses standard YOLO detection format:
+
+```text
+class_id center_x center_y width height
+```
+
+Example:
+
+```text
+0 0.512 0.423 0.245 0.531
+```
+
+Coordinates must be normalized between `0` and `1`.
+
+Every image should have a matching `.txt` label file.
+
+---
+
+## 4. Create `.env`
+
+The repository contains:
+
+```text
+.env.example
+```
+
+Create your local `.env`:
+
+### Command Prompt
+
+```cmd
+copy .env.example .env
+```
+
+### PowerShell
+
+```powershell
+Copy-Item .env.example .env
+```
+
+`.env` is ignored by Git.
+
+---
+
+## 5. Configure Kaggle
+
+Edit `.env`:
+
+```env
+TRAINING_PROVIDER=kaggle
+
+KAGGLE_USERNAME=your_kaggle_username
+KAGGLE_API_TOKEN=your_kaggle_api_token
+
+KAGGLE_DATASET_SLUG_PREFIX=fridge9000-training-data
+
+KAGGLE_KERNEL_SLUG=your_kaggle_username/fridge9000-remote-yolo-trainer
+
+KAGGLE_MACHINE_SHAPE=NvidiaTeslaT4
+
+KAGGLE_STARTING_WEIGHTS_PATH=/app/yolo11s.pt
+KAGGLE_STARTING_MODEL_VERSION=yolo11s-pretrained
+
+KAGGLE_CLI_PATH=kaggle
+KAGGLE_POLL_INTERVAL_SECONDS=30
+KAGGLE_TIMEOUT_SECONDS=14400
+KAGGLE_COMMAND_TIMEOUT_SECONDS=300
+```
+
+The default project configuration uses:
+
+```text
+NvidiaTeslaT4
+```
+
+for remote training.
+
+The configured starting weights must be **pretrained YOLO weights**, not the current Fridge 9000 production model.
+
+---
+
+## 6. Optional Training Settings
+
+Training settings can also be configured through environment variables:
+
+```env
+MODEL_TRAIN_EPOCHS=30
+MODEL_TRAIN_IMGSZ=640
+MODEL_TRAIN_BATCH=8
+
+MODEL_COMPARE_IMGSZ=640
+MODEL_COMPARE_BATCH=8
+```
+
+The default training length is:
+
+```text
+30 epochs
+```
+
+---
+
+## 7. Rebuild the Backend
+
+After changing `.env`, rebuild the backend:
+
+```bash
+docker compose up -d --build
+```
+
+Or restart the normal launcher:
+
+```powershell
+.\start-fridge.ps1
+```
+
+---
+
+## 8. Verify Kaggle Access
+
+Check that the Kaggle CLI works inside the backend container:
+
+```bash
+docker compose exec backend kaggle --version
+```
+
+You can also verify the configured environment:
+
+```bash
+docker compose exec backend printenv TRAINING_PROVIDER
+```
+
+Expected:
+
+```text
+kaggle
+```
+
+---
+
+## 9. Train a Candidate
+
+In the mobile application:
+
+```text
+Teach AI
+→ Contributions
+→ Approve useful corrections
+→ AI Progress
+→ Train Candidate
+```
+
+Fridge 9000 then automatically:
+
+1. Exports approved annotations.
+2. Creates a versioned correction dataset.
+3. Creates a private per-run Kaggle dataset.
+4. Creates a private Kaggle training notebook.
+5. Requests the configured GPU.
+6. Combines the base dataset with the corrections.
+7. Trains the candidate model.
+8. Evaluates the active and candidate models.
+9. Downloads the Kaggle artifacts.
+10. Validates them locally.
+11. Registers the candidate.
+
+The active model continues serving predictions during this entire process.
+
+---
+
+## Watching Training Progress
+
+Backend lifecycle logs:
+
+```bash
+docker compose logs -f backend
+```
+
+Typical phases include:
+
+```text
+preparing
+uploading
+waiting_for_dataset
+queued
+running
+downloading
+registering
+completed
+```
+
+The Kaggle notebook page can be used to see YOLO's epoch-by-epoch training output.
+
+---
+
+## Kaggle Training Safety
+
+Remote artifacts are not blindly trusted.
+
+Before candidate registration, the backend validates:
+
+- Training-run identity
+- Candidate model metadata
+- Class mappings
+- Class preservation
+- Comparison metrics
+- Numeric metric validity
+- Candidate artifacts
+
+The backend recomputes class-aware comparison data before storing it.
+
+A completed Kaggle training job still does **not** automatically activate the candidate.
+
+Promotion remains a separate explicit action.
 
 ---
 
 # Testing
 
-The backend test suite uses a **separate PostgreSQL 16 database** so tests cannot accidentally modify the development database.
+Fridge 9000 uses a separate PostgreSQL test database.
 
-The isolated test database:
+The test database does not use the normal development database volume.
 
-* Uses database `fridge9000_test`
-* Runs on host port `5433`
-* Uses temporary storage instead of the development database volume
-* Is rejected by the fixtures if configured to use the normal development database
+## Full Windows Validation
 
-Install test dependencies:
+From the repository root:
 
-```bash
-python -m pip install -r backend/requirements-test.txt
+```cmd
+fridge-test.bat
 ```
+
+The validation runner executes:
+
+1. Isolated PostgreSQL test database
+2. Backend pytest suite
+3. Training-provider tests
+4. Kaggle worker tests
+5. TypeScript checks
+6. Mobile lint
+7. Expo Doctor
+8. Git whitespace validation
+
+---
+
+## Backend Tests
 
 Start the isolated test database:
 
@@ -402,74 +677,62 @@ Start the isolated test database:
 docker compose -f docker-compose.test.yml -p fridge9000-test up -d --wait
 ```
 
-Run the full backend suite:
+Run:
 
 ```bash
 pytest
 ```
 
-Run API tests:
-
-```bash
-pytest -m api
-```
-
-Run integration tests:
-
-```bash
-pytest -m integration
-```
-
-Run the normal suite while excluding ML and end-to-end tests:
-
-```bash
-pytest -m "not ml and not e2e"
-```
-
-The current automated tests cover important workflows including:
-
-* Database and health checks
-* Inventory and inventory batches
-* Scan persistence and review
-* Inventory consistency and transaction rollback
-* Annotation creation and validation
-* Moderation and annotation provenance
-* Manual annotation without YOLO inference
-* Invalid and cross-scan/cross-image operations
-
-Manual-annotation tests can also be run directly:
-
-```bash
-pytest backend/tests/api/test_manual_annotations.py -v
-```
-
-Stop the isolated test database when finished:
+Stop the test database:
 
 ```bash
 docker compose -f docker-compose.test.yml -p fridge9000-test down
 ```
+
+---
 
 ## Mobile Validation
 
 From `mobile/`:
 
 ```bash
+npx tsc --noEmit
 npm run lint
 npx expo-doctor
 ```
 
 ---
 
-## Development Notes
+# Development Notes
 
-Runtime-generated uploads, model outputs, datasets, test caches, and local environment files should not be committed.
+- `.env` must never be committed.
+- Kaggle API tokens must never be committed.
+- Runtime uploads should not be committed.
+- Generated datasets should not be committed.
+- Candidate model artifacts should not be committed.
+- Model-comparison output should not be committed.
+- The active detector remains unchanged while a candidate is training.
+- Promotion is always explicit.
+- Freshness classification is separate from the YOLO detector lifecycle.
+- Expo runs on the Windows host while PostgreSQL and FastAPI run through Docker Compose.
 
-The root `.env` file is optional and ignored by Git. See `.env.example` for configurable values used by model training and other development workflows.
+---
 
-The mobile application receives its backend URL through:
+# Goal
+
+Fridge 9000 is designed to go beyond simple object detection.
+
+The project combines:
 
 ```text
-EXPO_PUBLIC_API_BASE_URL
+Computer Vision
++ Inventory Management
++ Human Feedback
++ Versioned Training Data
++ Remote GPU Training
++ Model Evaluation
++ Safe Promotion
++ Rollback
 ```
 
-Do not hardcode local IP addresses in the mobile source code.
+into one complete smart-fridge system.
