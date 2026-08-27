@@ -247,7 +247,6 @@ Fridge9000/
 ├── docker-compose.test.yml
 ├── fridge-test.bat
 ├── run-fridge.bat
-├── start-fridge.ps1
 └── README.md
 ```
 
@@ -285,17 +284,17 @@ cd ..
 
 Make sure **Docker Desktop is running**.
 
-From the repository root run:
+From the repository root, run:
 
-```powershell
-.\start-fridge.ps1
+```cmd
+run-fridge.bat
 ```
 
 The launcher automatically:
 
 1. Detects a usable LAN IPv4 address.
-2. Sets the mobile API URL.
-3. Builds and starts PostgreSQL and FastAPI.
+2. Configures the mobile API URL.
+3. Builds and starts PostgreSQL and FastAPI with Docker Compose.
 4. Waits for the backend to become healthy.
 5. Starts Expo from the `mobile` directory.
 6. Displays the Expo QR code.
@@ -320,7 +319,7 @@ Press:
 Ctrl+C
 ```
 
-in the launcher terminal.
+in the launcher window.
 
 The launcher shuts down Expo and the Docker services.
 
@@ -415,7 +414,9 @@ base_dataset/
     └── ...
 ```
 
-`classes.txt` contains one product name per line:
+`classes.txt` contains one product name per line.
+
+Example:
 
 ```text
 Osem Tomato Ketchup
@@ -453,16 +454,8 @@ The repository contains:
 
 Create your local `.env`:
 
-### Command Prompt
-
 ```cmd
 copy .env.example .env
-```
-
-### PowerShell
-
-```powershell
-Copy-Item .env.example .env
 ```
 
 `.env` is ignored by Git.
@@ -480,9 +473,7 @@ KAGGLE_USERNAME=your_kaggle_username
 KAGGLE_API_TOKEN=your_kaggle_api_token
 
 KAGGLE_DATASET_SLUG_PREFIX=fridge9000-training-data
-
 KAGGLE_KERNEL_SLUG=your_kaggle_username/fridge9000-remote-yolo-trainer
-
 KAGGLE_MACHINE_SHAPE=NvidiaTeslaT4
 
 KAGGLE_STARTING_WEIGHTS_PATH=/app/yolo11s.pt
@@ -527,19 +518,17 @@ The default training length is:
 
 ---
 
-## 7. Rebuild the Backend
+## 7. Restart Fridge 9000
 
-After changing `.env`, rebuild the backend:
+After changing `.env`, stop the project if it is already running.
 
-```bash
-docker compose up -d --build
+Then start it again with:
+
+```cmd
+run-fridge.bat
 ```
 
-Or restart the normal launcher:
-
-```powershell
-.\start-fridge.ps1
-```
+The launcher will rebuild and start the required services.
 
 ---
 
@@ -551,7 +540,7 @@ Check that the Kaggle CLI works inside the backend container:
 docker compose exec backend kaggle --version
 ```
 
-You can also verify the configured environment:
+Verify that the Kaggle provider is enabled:
 
 ```bash
 docker compose exec backend printenv TRAINING_PROVIDER
@@ -616,7 +605,7 @@ registering
 completed
 ```
 
-The Kaggle notebook page can be used to see YOLO's epoch-by-epoch training output.
+For epoch-by-epoch YOLO output, open the generated Kaggle notebook and view its output/logs.
 
 ---
 
