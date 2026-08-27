@@ -87,6 +87,42 @@ def load_rules():
     return _RULES_CACHE
 
 
+def _reconcile_annotation_training_states(cur):
+    """Align submission state with the current model registry without rewriting provenance."""
+    cur.execute(
+        """
+        UPDATE annotation_submissions s
+        SET training_state = CASE
+            WHEN EXISTS (
+                SELECT 1
+                FROM training_run_submission_usage u
+                JOIN model_versions m ON m.id = u.model_version_id
+                WHERE u.submission_id = s.id AND m.status = 'active'
+            ) THEN 'trusted'
+            WHEN EXISTS (
+                SELECT 1
+                FROM training_run_submission_usage u
+                JOIN model_versions m ON m.id = u.model_version_id
+                WHERE u.submission_id = s.id
+                  AND m.status = 'candidate'
+                  AND u.is_experimental
+            ) THEN 'experimental'
+            WHEN s.training_state = 'quarantined' THEN 'quarantined'
+            WHEN s.training_state = 'experimental' AND EXISTS (
+                SELECT 1
+                FROM training_run_submission_usage u
+                JOIN model_versions m ON m.id = u.model_version_id
+                WHERE u.submission_id = s.id
+                  AND m.status = 'rejected'
+                  AND u.is_experimental
+            ) THEN 'quarantined'
+            ELSE 'eligible'
+        END
+        WHERE s.status IN ('approved', 'used');
+        """
+    )
+
+
 def get_freshness_model():
     global _FRESHNESS_MODEL
     if _FRESHNESS_MODEL is not None:
@@ -642,38 +678,6 @@ def ensure_schema():
                 CREATE INDEX IF NOT EXISTS idx_training_annotation_usage_submission
                     ON training_run_annotation_usage(submission_id, used_at DESC);
 
-                -- Backfill lifecycle state for databases created before explicit
-                -- training trust existed. Active/archived lineage wins over any
-                -- rejected experiment that happened to reuse the same submission.
-                UPDATE annotation_submissions s
-                SET training_state = 'trusted'
-                WHERE EXISTS (
-                    SELECT 1
-                    FROM training_run_submission_usage u
-                    JOIN model_versions m ON m.id = u.model_version_id
-                    WHERE u.submission_id = s.id AND m.status IN ('active', 'archived')
-                );
-
-                UPDATE annotation_submissions s
-                SET training_state = 'quarantined'
-                WHERE s.training_state = 'eligible'
-                  AND EXISTS (
-                    SELECT 1
-                    FROM training_run_submission_usage u
-                    JOIN model_versions m ON m.id = u.model_version_id
-                    WHERE u.submission_id = s.id AND m.status = 'rejected'
-                );
-
-                UPDATE annotation_submissions s
-                SET training_state = 'experimental'
-                WHERE s.training_state = 'eligible'
-                  AND EXISTS (
-                    SELECT 1
-                    FROM training_run_submission_usage u
-                    JOIN model_versions m ON m.id = u.model_version_id
-                    WHERE u.submission_id = s.id AND m.status = 'candidate'
-                );
-
                 UPDATE training_run_submission_usage u
                 SET is_experimental = TRUE
                 FROM annotation_submissions s, model_versions m
@@ -736,6 +740,7 @@ def ensure_schema():
                     ON model_activation_history(created_at DESC);
                 """
             )
+            _reconcile_annotation_training_states(cur)
             cur.execute(
                 """
                 UPDATE model_comparisons
@@ -1126,18 +1131,7 @@ def _activate_model(version: str, action: str, comparison_id: Optional[str] = No
 
                 cur.execute("UPDATE model_versions SET status = 'archived' WHERE id = %s;", (current["id"],))
                 cur.execute("UPDATE model_versions SET status = 'active' WHERE id = %s;", (target["id"],))
-                if action == "PROMOTE" and target.get("training_run_id"):
-                    cur.execute(
-                        """
-                        UPDATE annotation_submissions s
-                        SET training_state = 'trusted'
-                        FROM training_run_submission_usage u
-                        WHERE u.training_run_id = %s
-                          AND u.submission_id = s.id
-                          AND u.is_experimental;
-                        """,
-                        (target["training_run_id"],),
-                    )
+                _reconcile_annotation_training_states(cur)
                 cur.execute(
                     """
                     INSERT INTO model_activation_history(action, from_model_id, to_model_id, comparison_id)

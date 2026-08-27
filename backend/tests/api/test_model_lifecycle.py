@@ -1066,8 +1066,9 @@ def test_invalid_comparison_metrics_are_not_persisted(
 def test_promotion_and_rollback_preserve_single_active_and_history(
     test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
 ):
-    submission_factory("assisted", "approved", "Apple")
-    submission_factory("manual", "approved", "Milk")
+    apple = submission_factory("assisted", "approved", "Apple")
+    milk = submission_factory("manual", "approved", "Milk")
+    submission_ids = [apple["submission_id"], milk["submission_id"]]
     trained = _run_successful_training(test_client, lifecycle_context)
     candidate_version = trained["result"]["model_version"]
     active_metrics = {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.5}
@@ -1107,6 +1108,22 @@ def test_promotion_and_rollback_preserve_single_active_and_history(
         models[candidate_version][0],
         comparison_id,
     )
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, training_state FROM annotation_submissions WHERE id = ANY(%s);",
+            (submission_ids,),
+        )
+        promoted_states = dict(cursor.fetchall())
+        cursor.execute("SELECT COUNT(*) FROM model_versions;")
+        model_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM training_runs;")
+        training_run_count = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT id, model_path, model_sha256 FROM model_versions WHERE version = %s;",
+            (candidate_version,),
+        )
+        candidate_identity = cursor.fetchone()
+    assert set(promoted_states.values()) == {"trusted"}
 
     rolled_back = test_client.post(
         f"/models/{lifecycle_context.active_version}/rollback"
@@ -1129,12 +1146,158 @@ def test_promotion_and_rollback_preserve_single_active_and_history(
         history = cursor.fetchall()
     assert statuses[lifecycle_context.active_version] == "active"
     assert statuses[candidate_version] == "archived"
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, training_state FROM annotation_submissions WHERE id = ANY(%s);",
+            (submission_ids,),
+        )
+        rolled_back_states = dict(cursor.fetchall())
+    assert set(rolled_back_states.values()) == {"eligible"}
     assert history[1] == (
         "ROLLBACK",
         models[candidate_version][0],
         lifecycle_context.active_id,
         None,
     )
+    db_connection.commit()
+
+    # Startup reconciliation must be idempotent and must not trust data merely
+    # because its former model still exists in archived history.
+    lifecycle_context.runtime.ensure_schema()
+    lifecycle_context.runtime.ensure_schema()
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, training_state FROM annotation_submissions WHERE id = ANY(%s);",
+            (submission_ids,),
+        )
+        startup_states = dict(cursor.fetchall())
+    assert set(startup_states.values()) == {"eligible"}
+
+    exporter = importlib.import_module("export_yolo_dataset")
+    exported_submissions, _, _ = exporter.fetch_export_rows(
+        db_connection, selected_submission_ids=submission_ids
+    )
+    assert {row["submission_id"] for row in exported_submissions} == set(submission_ids)
+    db_connection.commit()
+
+    # Reactivation reuses the exact archived artifact and provenance. Repeated
+    # switches only append activation history; they never retrain or clone it.
+    for expected_state in ("trusted", "eligible", "trusted"):
+        target_version = (
+            candidate_version
+            if expected_state == "trusted"
+            else lifecycle_context.active_version
+        )
+        reactivated = test_client.post(f"/models/{target_version}/rollback")
+        assert reactivated.status_code == 200
+        with db_connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT training_state FROM annotation_submissions WHERE id = ANY(%s);",
+                (submission_ids,),
+            )
+            assert {row[0] for row in cursor.fetchall()} == {expected_state}
+
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM model_versions;")
+        assert cursor.fetchone()[0] == model_count
+        cursor.execute("SELECT COUNT(*) FROM training_runs;")
+        assert cursor.fetchone()[0] == training_run_count
+        cursor.execute(
+            "SELECT id, model_path, model_sha256, status FROM model_versions WHERE version = %s;",
+            (candidate_version,),
+        )
+        final_candidate = cursor.fetchone()
+        cursor.execute("SELECT COUNT(*) FROM model_versions WHERE status = 'candidate';")
+        assert cursor.fetchone()[0] == 0
+        cursor.execute("SELECT COUNT(*) FROM model_activation_history;")
+        assert cursor.fetchone()[0] == 5
+    assert final_candidate[:3] == candidate_identity
+    assert final_candidate[3] == "active"
+    assert _active_count(db_connection) == 1
+
+
+def test_rollback_reconciles_shared_and_model_specific_training_lineage(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    apple = submission_factory("assisted", "approved", "Apple")
+    milk = submission_factory("manual", "approved", "Milk")
+    shared_ids = {apple["submission_id"], milk["submission_id"]}
+    first = _run_successful_training(test_client, lifecycle_context)
+    first_version = first["result"]["model_version"]
+    metrics_before = {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.5}
+    metrics_after = {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.6}
+    first_comparison = _run_comparison(
+        test_client, lifecycle_context, first_version, metrics_before, metrics_after
+    )
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (
+            SimpleNamespace(task="detect"),
+            str(Path(record["model_path"]).resolve()),
+        ),
+    )
+    assert test_client.post(
+        f"/models/{first_version}/promote",
+        json={"comparison_id": first_comparison["result"]["comparison_id"]},
+    ).status_code == 200
+
+    lemon = submission_factory("manual", "approved", "Lemon")
+    lemon_id = lemon["submission_id"]
+    second = _run_successful_training(test_client, lifecycle_context, [lemon_id])
+    second_version = second["result"]["model_version"]
+    second_comparison = _run_comparison(
+        test_client, lifecycle_context, second_version, metrics_before, metrics_after
+    )
+    assert test_client.post(
+        f"/models/{second_version}/promote",
+        json={"comparison_id": second_comparison["result"]["comparison_id"]},
+    ).status_code == 200
+
+    all_ids = sorted(shared_ids | {lemon_id})
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, training_state FROM annotation_submissions WHERE id = ANY(%s);",
+            (all_ids,),
+        )
+        assert set(dict(cursor.fetchall()).values()) == {"trusted"}
+        cursor.execute(
+            "SELECT training_run_id, submission_id, is_experimental FROM training_run_submission_usage ORDER BY training_run_id, submission_id;"
+        )
+        original_provenance = cursor.fetchall()
+        cursor.execute("SELECT COUNT(*) FROM model_versions;")
+        original_model_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM training_runs;")
+        original_run_count = cursor.fetchone()[0]
+    db_connection.commit()
+
+    assert test_client.post(f"/models/{first_version}/rollback").status_code == 200
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, training_state FROM annotation_submissions WHERE id = ANY(%s);",
+            (all_ids,),
+        )
+        first_lineage_states = dict(cursor.fetchall())
+    assert {first_lineage_states[value] for value in shared_ids} == {"trusted"}
+    assert first_lineage_states[lemon_id] == "eligible"
+    db_connection.commit()
+
+    assert test_client.post(f"/models/{second_version}/rollback").status_code == 200
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, training_state FROM annotation_submissions WHERE id = ANY(%s);",
+            (all_ids,),
+        )
+        assert set(dict(cursor.fetchall()).values()) == {"trusted"}
+        cursor.execute(
+            "SELECT training_run_id, submission_id, is_experimental FROM training_run_submission_usage ORDER BY training_run_id, submission_id;"
+        )
+        assert cursor.fetchall() == original_provenance
+        cursor.execute("SELECT COUNT(*) FROM model_versions;")
+        assert cursor.fetchone()[0] == original_model_count
+        cursor.execute("SELECT COUNT(*) FROM training_runs;")
+        assert cursor.fetchone()[0] == original_run_count
+    assert _active_count(db_connection) == 1
 
 
 def test_rejected_candidate_quarantines_only_its_experimental_batch(
