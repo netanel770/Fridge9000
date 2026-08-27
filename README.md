@@ -4,9 +4,13 @@
 
 # Fridge 9000
 
-Fridge 9000 is a smart refrigerator management system that combines **computer vision, inventory tracking, OCR, freshness analysis, and human-in-the-loop machine learning**.
+Fridge 9000 is a smart refrigerator management system combining **computer vision, inventory tracking, OCR, freshness analysis, and human-in-the-loop machine learning**.
 
-The mobile app can scan refrigerator images, review AI detections, update inventory, track expiration dates, process receipts, analyze freshness, and collect human corrections that can later be used to train improved detector models.
+The mobile app can scan refrigerator images, review AI detections, update inventory, track expiration dates, process receipts, analyze food freshness, and turn reviewed human corrections into improved object-detection models.
+
+The project is built around one central idea:
+
+> AI predictions should be useful immediately, while human corrections can safely improve future models without silently replacing the model currently serving the application.
 
 ---
 
@@ -14,80 +18,107 @@ The mobile app can scan refrigerator images, review AI detections, update invent
 
 ### AI Product Detection
 
-Fridge 9000 uses **YOLO** to detect supported products from refrigerator images.
+Fridge 9000 uses **YOLO** for refrigerator product detection.
 
-It stores:
+Each scan stores:
 
 - Product labels
 - Confidence scores
 - Bounding boxes
 - Scan history
 
-Users can review detections before inventory changes are applied.
+Before inventory is updated, detections can be reviewed and corrected.
 
-Incorrect predictions can be corrected by:
+Supported corrections include:
 
-- Changing the product label
-- Adjusting the bounding box
-- Removing false-positive detections
-- Adding products the detector missed
-- Confirming correct detections
+- Confirming a correct detection
+- Relabeling an incorrect product
+- Adjusting a bounding box
+- Removing a false positive
+- Adding a missed product
 
-A scan is still stored even when YOLO detects nothing, allowing users to manually annotate completely new or previously unsupported products.
+Images with zero YOLO detections are still stored, allowing completely new products to be manually annotated.
 
 ---
 
 ### Inventory Management
 
-The application supports:
+Inventory supports:
 
-- Adding products from refrigerator scans
-- Manual inventory updates
-- Product quantities
+- Automatic updates from refrigerator scans
+- Manual additions and removals
+- Per-product quantities
 - Separate inventory batches
-- Expiration dates
-- Estimated expiration dates
+- Manual and estimated expiration dates
 - Partially consumed products
-- Inventory event history
+- Inventory history
 - Low-stock and missing-product alerts
+
+#### Important design choice: batches are authoritative
+
+Inventory is represented by individual `inventory_batches`.
+
+The aggregate inventory quantity is derived from those batches rather than maintained as an independent source of truth.
+
+```text
+Inventory Batches
+      ↓
+Quantity Aggregation
+      ↓
+Inventory Summary
+```
+
+This keeps expiry information, open-product state, and quantities consistent.
+
+Schema initialization is idempotent and only performs legacy backfill when an inventory item has no batch records at all.
 
 ---
 
 ### Receipt OCR
 
-Shopping receipts can be uploaded as images or PDFs.
+Receipts can be uploaded as images or PDFs.
 
-The backend uses **Tesseract OCR** to extract products from receipts.
-
-Detected products can be reviewed before being added to inventory.
+The backend uses **Tesseract OCR** to extract product names, which can then be reviewed before inventory changes are applied.
 
 ---
 
-### Freshness Detection
+### Freshness Analysis
 
-Fridge 9000 includes a separate image-classification model for supported freshness or rot detection.
+Fridge 9000 contains a separate image-classification model for supported food freshness / rot detection.
 
-Freshness classification is intentionally separate from the YOLO product-detection lifecycle because freshness and product identification are different machine-learning tasks.
+#### Important design choice: freshness is a separate ML task
+
+Freshness classification is deliberately independent from YOLO product detection.
+
+```text
+YOLO
+→ What product is this?
+
+Freshness Classifier
+→ What condition is this product in?
+```
+
+Keeping these pipelines separate prevents unrelated training lifecycles from becoming coupled.
 
 ---
 
 ### SAM2 Segmentation
 
-YOLO detections can be passed to **SAM2** to generate representative product segmentation masks and outlines.
+YOLO detections can be passed to **SAM2** to generate representative product masks and outlines.
 
-YOLO handles product detection while SAM2 is used downstream to refine the detected product region.
+YOLO identifies the object, while SAM2 refines the detected product region.
 
-The segmentation pipeline evaluates candidate masks instead of blindly accepting the first generated result.
+Candidate masks are evaluated instead of automatically trusting the first generated mask.
 
 ---
 
-# Teach AI
+# Teach Fridge
 
-Fridge 9000 includes a full **human-in-the-loop learning workflow**.
+Fridge 9000 includes a complete **human-in-the-loop training workflow**.
 
-Users can correct normal AI scans or upload images and annotate products manually.
+Users can correct normal AI scans or manually annotate uploaded images.
 
-Supported annotation actions:
+Supported annotation actions are:
 
 ```text
 CONFIRM
@@ -97,62 +128,99 @@ ADD
 REMOVE
 ```
 
-Users can:
+The normal workflow is:
 
-1. Run a normal refrigerator scan.
-2. Review the AI predictions.
-3. Correct labels, boxes, false positives, or missed products.
-4. Submit corrections for moderation.
-5. Approve useful contributions as training data.
-6. Train a candidate model.
-7. Compare the candidate against the active model.
-8. Promote it only if the promotion policy passes.
-9. Roll back to a previous model if necessary.
+```text
+Scan / Manual Image
+        ↓
+Human Correction
+        ↓
+Moderation
+        ↓
+Approved Annotation
+        ↓
+Training Selection
+        ↓
+Versioned Dataset
+        ↓
+Candidate Training
+        ↓
+Model Comparison
+        ↓
+Promotion or Rejection
+```
+
+Raw user feedback is never automatically treated as trusted training data.
+
+---
+
+# Annotation Lifecycle
+
+Approved annotations have an explicit training lifecycle:
+
+```text
+eligible
+experimental
+trusted
+quarantined
+```
+
+### `eligible`
+
+Approved data that can be selected for a new candidate.
+
+### `experimental`
+
+Data currently associated with an unresolved candidate.
+
+### `trusted`
+
+Data represented by the **currently active model's training lineage**.
+
+### `quarantined`
+
+Experimental data belonging to a rejected candidate and excluded from normal training selection.
+
+#### Important design choice: trust follows the active model
+
+An annotation is not permanently trusted merely because it was used by a model at some point.
+
+For example:
+
+```text
+Lemon Model ACTIVE
+Lemon Annotations TRUSTED
+```
+
+If the application rolls back to an older model that does not contain those Lemon annotations:
+
+```text
+Initial Model ACTIVE
+Lemon Model ARCHIVED
+Lemon Annotations ELIGIBLE
+```
+
+The annotations can then be selected again for another candidate.
+
+If the Lemon model is later reactivated:
+
+```text
+Lemon Model ACTIVE
+Lemon Annotations TRUSTED
+```
+
+Startup reconciliation uses the same lifecycle semantics, so restarting the backend does not incorrectly make archived-only annotations trusted again.
 
 ---
 
 # Training Data Provenance
 
-Fridge 9000 does not train directly on raw user feedback.
+Every training run records which submissions and annotations were used.
 
-Every correction keeps information about where it came from and what the user changed.
-
-For example:
+The system maintains a traceable relationship between:
 
 ```text
-YOLO Detection
-     ↓
-RELABEL / ADJUST_BOX / CONFIRM / REMOVE
-```
-
-or:
-
-```text
-Manual Image
-     ↓
-ADD
-```
-
-Manual annotations are stored as genuine manual additions rather than fake YOLO predictions.
-
-Corrections must also pass moderation before they become eligible for training.
-
-```text
-User Feedback
-      ↓
-Pending Annotation
-      ↓
-Moderation
-      ↓
-Approved Annotation
-      ↓
-Versioned Dataset
-```
-
-This creates a traceable path from a user contribution all the way to a trained model:
-
-```text
-User Feedback
+Human Feedback
       ↓
 Approved Annotation
       ↓
@@ -160,93 +228,137 @@ Dataset Version
       ↓
 Training Run
       ↓
-Candidate Model
+Model Version
 ```
 
-The system also records which annotations were consumed by training.
+Manual annotations remain distinguishable from corrected YOLO predictions.
+
+Training provenance is preserved across promotion, rejection, and rollback.
 
 ---
 
 # Model Lifecycle
 
-Detector improvement is handled as a versioned lifecycle instead of simply replacing `best.pt`.
+Detector models are versioned instead of simply overwriting `best.pt`.
 
 ```text
-Scan / Manual Image
-        ↓
-Human Corrections
-        ↓
-Moderation
-        ↓
-Approved Training Data
-        ↓
-Versioned YOLO Dataset
-        ↓
-Candidate Training
-        ↓
-Active vs Candidate Comparison
-        ↓
+Active Model
+     ↓
+Train Candidate
+     ↓
+Candidate Model
+     ↓
+Compare
+     ↓
 Promotion Policy
-        ↓
-Promotion or Rejection
-        ↓
-Rollback Available
+   ↙       ↘
+Reject    Promote
+             ↓
+       Previous Active
+          Archived
 ```
 
-The system tracks:
+The system stores:
 
-- Annotation submissions
 - Dataset versions
 - Training runs
 - Model versions
-- Training parameters
-- Training metrics
+- Model artifacts
+- Metrics
 - Model comparisons
-- Contributions used for training
+- Training provenance
 - Promotion history
 - Rollback history
 
-Only one detector is active at a time.
+Only one detector can be active at a time.
 
-Training a candidate does **not** replace the active detector.
+Only one unresolved candidate can exist at a time.
 
-The current model continues serving predictions while the candidate is trained and evaluated.
+#### Important design choice: candidate training never replaces production
+
+Training a candidate does not modify the active detector.
+
+The current model continues serving predictions while another model is trained and evaluated.
 
 Promotion is always explicit.
 
 ---
 
-# Incremental Training Without Forgetting Existing Products
+# Model Rollback
 
-New corrections are not trained in isolation.
+Previously active models remain available as archived model versions.
 
-Training only on newly collected examples could improve a new product while causing the model to forget products it already knows.
+From **Teach Fridge → AI Progress**, `Rollback model` appears when an archived model is available.
 
-Fridge 9000 therefore separates the correction dataset from the permanent base dataset for traceability, then combines them during candidate training.
+The user can open Training History and explicitly choose which archived model to restore.
+
+#### Important design choice: rollback means reactivation, not retraining
+
+Rollback reuses the existing:
+
+- Model version
+- Model artifact
+- Model path
+- Training run
+- Training provenance
+
+No new training job or duplicate model is created.
+
+For example:
+
+```text
+Initial ACTIVE
+Lemon ARCHIVED
+
+      ↓ Rollback to Lemon
+
+Initial ARCHIVED
+Lemon ACTIVE
+```
+
+The same model can later be switched back again:
+
+```text
+Initial
+   ↕
+Lemon
+```
+
+Previously active models can therefore be reused without repeating expensive training.
+
+Rollback also reconciles annotation lifecycle state to match the newly active model.
+
+---
+
+# Incremental Training
+
+Training only on new corrections could teach the detector a new product while causing it to forget existing products.
+
+Fridge 9000 therefore combines permanent/base training data with reviewed corrections.
 
 ```text
 Permanent Base Dataset
           +
-Approved Corrections
+Trusted Baseline Data
+          +
+Selected New Corrections
           ↓
-Combined Training Dataset
+Combined Dataset
           ↓
 Candidate Training
 ```
 
-This allows new user corrections to improve the detector while preserving the original training knowledge.
+A candidate must preserve the product classes already supported by the active model.
 
-Before a remotely trained candidate is registered, the system also verifies that it still contains every class supported by the active model.
-
-A candidate that loses an existing product class is rejected.
+This allows the system to learn new products without casually forgetting that milk exists, a surprisingly important property for a refrigerator.
 
 ---
 
-# Model Comparison
+# Model Comparison and Promotion
 
-The active and candidate models are evaluated using the same evaluation data and configuration.
+Candidates are evaluated against the active detector using the same evaluation configuration.
 
-The comparison records metrics including:
+Comparison data includes:
 
 - Precision
 - Recall
@@ -256,41 +368,15 @@ The comparison records metrics including:
 - Shared-class metrics
 - Added-class metrics
 
-For normal candidates with the same set of classes, overall model performance can be compared directly.
-
-When a candidate introduces new classes, Fridge 9000 instead separates:
-
-```text
-Existing products shared by both models
-```
-
-from:
-
-```text
-New products introduced by the candidate
-```
-
-This prevents strong performance on new products from hiding a serious regression on existing ones.
-
----
-
-# Model Promotion Policy
-
-Fridge 9000 uses the backend promotion policy:
+The backend applies:
 
 ```text
 class-aware-promotion-v1
 ```
 
-A candidate must pass this policy before it can replace the active detector.
-
-There are two promotion modes.
-
----
-
 ## Same Product Classes
 
-If the active and candidate models support the same product classes, the candidate must outperform the active model.
+When both models support the same classes, the candidate must outperform the active model.
 
 The primary metric is:
 
@@ -298,132 +384,27 @@ The primary metric is:
 mAP50-95
 ```
 
-The candidate passes when:
-
-```text
-candidate mAP50-95 > active mAP50-95
-```
-
-If their mAP50-95 values are effectively equal, `mAP50` is used as the tie-breaker:
-
-```text
-candidate mAP50 > active mAP50
-```
-
-Otherwise, promotion is blocked.
+`mAP50` is used as a tie-breaker when appropriate.
 
 ---
 
-## Candidate Adds New Product Classes
+## Candidate Adds New Classes
 
-A candidate that introduces new product classes must pass **all** of the following checks.
-
-### 1. Existing classes must be preserved
-
-The candidate cannot remove a product class supported by the active model.
+When the candidate introduces new products:
 
 ```text
-Removed existing class
-→ Promotion blocked
+No existing class removed
+        +
+Existing-class regression ≤ 2 percentage points mAP50-95
+        +
+New-class average mAP50-95 ≥ 50%
+        +
+Every new class mAP50-95 ≥ 30%
+        ↓
+Eligible for Promotion
 ```
 
-Every existing class must also have valid comparison metrics.
-
----
-
-### 2. Existing-product regression is limited
-
-The candidate may lose at most:
-
-```env
-MAX_SHARED_MAP50_95_REGRESSION=0.02
-```
-
-That means a maximum regression of **2 percentage points of mAP50-95** on products already supported by the active model.
-
-Example:
-
-```text
-Active shared mAP50-95:     89%
-Candidate shared mAP50-95:  88%
-Difference:                 -1%
-
-PASS
-```
-
-But:
-
-```text
-Active shared mAP50-95:     89%
-Candidate shared mAP50-95:  79%
-Difference:                -10%
-
-BLOCKED
-```
-
----
-
-### 3. New classes must perform well overall
-
-The average mAP50-95 across newly added classes must reach:
-
-```env
-MIN_ADDED_CLASS_MAP50_95=0.50
-```
-
-Equivalent to:
-
-```text
-50% average mAP50-95
-```
-
----
-
-### 4. Every new class must meet a minimum
-
-Each new class must individually reach:
-
-```env
-MIN_ADDED_CLASS_PER_CLASS_MAP50_95=0.30
-```
-
-Equivalent to:
-
-```text
-30% mAP50-95 per class
-```
-
-This prevents a strong average from hiding a poorly performing new product.
-
-For example:
-
-```text
-Lemon       65%
-Milk        58%
-Yogurt      12%
-```
-
-Promotion would still be blocked because `Yogurt` is below the minimum.
-
----
-
-## Additional Promotion Safety
-
-Promotion is also blocked when:
-
-- No comparison exists
-- The comparison is stale
-- The candidate was compared against a model that is no longer active
-- An existing class disappeared
-- Shared-class metrics are missing
-- Added-class metrics are incomplete
-- Comparison metrics are malformed or non-finite
-
-The backend makes the final promotion decision.
-
-The mobile application displays that decision and only enables promotion when the backend reports that the candidate is eligible.
-
-### Default Promotion Thresholds
+Default thresholds:
 
 ```env
 MAX_SHARED_MAP50_95_REGRESSION=0.02
@@ -431,68 +412,94 @@ MIN_ADDED_CLASS_MAP50_95=0.50
 MIN_ADDED_CLASS_PER_CLASS_MAP50_95=0.30
 ```
 
-In short:
+This prevents strong performance on newly added products from hiding a serious regression on products already supported by the active detector.
 
-```text
-Same classes
-    ↓
-Candidate must outperform active model
-```
+The backend owns the final promotion decision.
 
-or:
-
-```text
-New classes added
-    ↓
-No existing classes removed
-    +
-Existing products lose ≤ 2% mAP50-95
-    +
-New classes average ≥ 50% mAP50-95
-    +
-Every new class ≥ 30% mAP50-95
-    ↓
-Eligible for promotion
-```
-
-Even after passing the policy, the candidate does **not** automatically become active.
+Passing the policy does **not** automatically activate the model.
 
 Promotion remains an explicit action.
 
 ---
 
-# Remote Training Validation
+# Local and Remote Training
 
-Kaggle is used as a **GPU compute provider**, not as a trusted source of truth.
+Fridge 9000 supports:
 
-A completed Kaggle notebook does not automatically create a valid candidate.
+```env
+TRAINING_PROVIDER=local
+```
 
-When remote training finishes, the backend validates:
+and:
 
-- Training-run identity
-- Candidate artifacts
-- Model metadata
-- Class mappings
-- Class preservation
-- Comparison metrics
-- Numeric metric validity
-- Class-aware comparison results
+```env
+TRAINING_PROVIDER=kaggle
+```
 
-The backend also recomputes the canonical class-aware comparison before registering the candidate.
+Local and remote training use the same model lifecycle.
+
+#### Important design choice: remote compute is not trusted
+
+Kaggle is treated as a GPU compute provider, not as the source of truth for the model registry.
 
 ```text
 Kaggle Training
       ↓
-Remote Artifacts
+Returned Artifacts
       ↓
 Backend Validation
       ↓
 Candidate Registration
       ↓
+Comparison
+      ↓
 Promotion Policy
 ```
 
-A remote run can therefore finish successfully while the resulting candidate is still rejected or blocked from promotion.
+The backend validates returned artifacts, model identity, class mappings, metrics, class preservation, and comparison results before accepting a candidate.
+
+A remotely completed job can therefore still be rejected.
+
+The Fridge backend and PostgreSQL model registry remain authoritative.
+
+---
+
+# Architecture
+
+```text
+                 React Native / Expo
+                         │
+                         ▼
+                    FastAPI API
+                         │
+             ┌───────────┴───────────┐
+             ▼                       ▼
+        PostgreSQL               ML Services
+             │                       │
+     Inventory / Scans       YOLO / SAM2 / OCR
+     Annotations / Models      Freshness Model
+             │
+             ▼
+       Training Lifecycle
+             │
+             ▼
+      Local or Remote GPU
+```
+
+The backend exposes separate API modules for areas including:
+
+- Scans
+- Inventory
+- Annotations
+- Models
+- Receipts
+- Product outlines
+- Events
+- System operations
+
+PostgreSQL stores persistent application state and model-lifecycle metadata.
+
+Generated artifacts such as uploads, datasets, model comparisons, and candidate models are stored outside Git.
 
 ---
 
@@ -509,22 +516,25 @@ A remote run can therefore finish successfully while the resulting candidate is 
 - PyTorch
 - SAM2
 - Tesseract OCR
-- NumPy
 - Pillow
+- NumPy
 
 ## Mobile
 
 - React Native
 - Expo
-- TypeScript
 - Expo Router
+- TypeScript
 
-## Infrastructure
+## Infrastructure and Testing
 
 - Docker
 - Docker Compose
 - PostgreSQL 16
 - pytest
+- TypeScript compiler
+- ESLint
+- Expo Doctor
 - Kaggle GPU training
 
 ---
@@ -534,16 +544,17 @@ A remote run can therefore finish successfully while the resulting candidate is 
 ```text
 Fridge9000/
 ├── backend/
-│   ├── api/                  FastAPI routes
-│   ├── core/                 Application configuration
-│   ├── db/                   Database helpers
-│   ├── services/             Application and ML services
-│   ├── tests/                Backend test suite
+│   ├── api/
+│   ├── core/
+│   ├── db/
+│   ├── services/
+│   ├── tests/
 │   ├── class_aware_metrics.py
-│   ├── model_promotion_policy.py
-│   ├── export_yolo_dataset.py
-│   ├── train_yolo_candidate.py
 │   ├── compare_yolo_models.py
+│   ├── export_yolo_dataset.py
+│   ├── model_promotion_policy.py
+│   ├── train_yolo_candidate.py
+│   ├── training_providers.py
 │   └── main.py
 │
 ├── db/
@@ -551,18 +562,25 @@ Fridge9000/
 │
 ├── kaggle_trainer/
 │   ├── train.py
-│   └── kernel-metadata.json
+│   ├── test_train.py
+│   └── README.md
 │
 ├── mobile/
 │   ├── app/
 │   ├── assets/
 │   └── src/
 │
+├── scripts/
+│   └── fridge-data.ps1
+│
 ├── assets/
 ├── docker-compose.yml
 ├── docker-compose.test.yml
-├── fridge-test.bat
 ├── run-fridge.bat
+├── start-fridge.ps1
+├── fridge-test.bat
+├── export-fridge-data.bat
+├── import-fridge-data.bat
 └── README.md
 ```
 
@@ -576,7 +594,7 @@ Install:
 
 - Docker Desktop
 - Git
-- Node.js and npm
+- Node.js / npm
 - Expo Go on the mobile device
 
 Clone the repository:
@@ -586,7 +604,7 @@ git clone https://github.com/netanel770/Fridge9000.git
 cd Fridge9000
 ```
 
-Install the mobile dependencies once:
+Install mobile dependencies once:
 
 ```bash
 cd mobile
@@ -594,40 +612,50 @@ npm install
 cd ..
 ```
 
+Create your local environment file:
+
+```cmd
+copy .env.example .env
+```
+
+`.env` must never be committed.
+
 ---
 
-## Quick Start on Windows
+## Windows Quick Start
 
-Make sure **Docker Desktop is running**.
+Make sure Docker Desktop is running.
 
-From the repository root, run:
+From the repository root:
 
 ```cmd
 run-fridge.bat
 ```
 
-The launcher automatically:
+`run-fridge.bat` launches `start-fridge.ps1`.
 
-1. Detects a usable LAN IPv4 address.
-2. Configures the mobile API URL.
-3. Builds and starts PostgreSQL and FastAPI with Docker Compose.
-4. Waits for the backend to become healthy.
+The launcher:
+
+1. Detects a usable physical LAN IPv4 address.
+2. Sets the Expo API URL.
+3. Builds and starts PostgreSQL and FastAPI through Docker Compose.
+4. Waits for Docker services to become ready.
 5. Starts Expo.
 6. Displays the Expo QR code.
 
-Scan the QR code with **Expo Go**.
-
-The phone and development PC must be able to reach each other on the same local network.
+The mobile device and development computer must be able to reach each other on the same local network.
 
 The backend is normally available at:
 
 ```text
-http://<your-LAN-IP>:8000
+http://<LAN-IP>:8000
 ```
+
+A custom API URL or Expo tunnel mode can also be supplied through `start-fridge.ps1`.
 
 ---
 
-## Stopping the Project
+## Stopping Fridge 9000
 
 Press:
 
@@ -637,9 +665,9 @@ Ctrl+C
 
 in the launcher window.
 
-The launcher shuts down Expo and the Docker services.
+The launcher shuts down Expo and Docker Compose.
 
-Development PostgreSQL data is preserved.
+The PostgreSQL Docker volume is preserved.
 
 Do not run:
 
@@ -651,118 +679,228 @@ unless you intentionally want to delete the development database.
 
 ---
 
-# Kaggle GPU Training Setup
+# Persistent Development Data
 
-Kaggle training is optional.
+Git contains the application source code, but it intentionally does **not** contain all runtime state.
 
-Fridge 9000 supports:
+Persistent Fridge data includes:
 
-```env
-TRAINING_PROVIDER=local
+- PostgreSQL database
+- Uploaded scan images
+- Candidate model artifacts
+- Dataset exports
+- Model-comparison artifacts
+- Base training dataset
+- Remote-training job state
+- Local `.env`
+
+Important runtime directories include:
+
+```text
+backend/uploads/
+backend/candidate_models/
+backend/dataset_exports/
+backend/model_comparisons/
+backend/base_dataset/
+backend/remote_training_jobs/
 ```
 
-or:
+These directories are intentionally ignored by Git.
 
-```env
-TRAINING_PROVIDER=kaggle
+#### Important design choice: database and model artifacts must move together
+
+The database stores model registry information and model paths.
+
+The actual trained `.pt` files live in runtime storage such as:
+
+```text
+backend/candidate_models/
 ```
 
-Kaggle is recommended when GPU training is required.
+Restoring only PostgreSQL without restoring the corresponding model artifacts can leave the registry pointing to files that do not exist.
+
+Fridge therefore includes a portable backup and restore workflow.
 
 ---
 
-## 1. Create a Kaggle Account
+# Backup and Machine Transfer
 
-Create or sign in to a Kaggle account.
+Fridge 9000 includes:
 
-Make sure the account can use GPU notebooks.
+```text
+export-fridge-data.bat
+import-fridge-data.bat
+scripts/fridge-data.ps1
+```
 
-Kaggle may require phone verification before GPU accelerators become available.
+These scripts allow a development installation to be transferred between computers while preserving both database state and generated artifacts.
 
 ---
 
-## 2. Create a Kaggle API Token
+## Export Fridge Data
 
-Open your Kaggle account settings and go to the API section.
+From the repository root, run:
 
-Generate an API token and copy it.
-
-Never commit the token to Git.
-
----
-
-## 3. Create the Permanent Base Dataset
-
-Remote training combines:
-
-```text
-Permanent Base Dataset
-          +
-New Approved Corrections
+```cmd
+export-fridge-data.bat
 ```
 
-Create a Kaggle dataset named:
+The BAT file invokes:
 
 ```text
-<your-kaggle-username>/fridge9000-training-data
+scripts/fridge-data.ps1 -Mode Export
 ```
 
-The dataset must contain one YOLO base dataset with:
+The export process:
 
-```text
-base_dataset/
-├── classes.txt
-├── images/
-│   ├── image001.jpg
-│   ├── image002.jpg
-│   └── ...
-└── labels/
-    ├── image001.txt
-    ├── image002.txt
-    └── ...
-```
-
-`classes.txt` contains one class name per line.
-
-Each label file uses normal YOLO detection format:
-
-```text
-class_id center_x center_y width height
-```
+1. Records the current Git branch and commit.
+2. Stops the Fridge backend so runtime files are not changing during the snapshot.
+3. Keeps / starts PostgreSQL.
+4. Creates a PostgreSQL custom-format dump using `pg_dump`.
+5. Copies runtime directories.
+6. Copies the local `.env` if present.
+7. Creates a backup manifest.
+8. Compresses everything into one timestamped ZIP.
 
 Example:
 
 ```text
-0 0.512 0.423 0.245 0.531
+fridge9000-backup-2026-08-28_01-45-00.zip
 ```
 
-Coordinates must be normalized between `0` and `1`.
+The backup contains approximately:
 
-Every image should have a matching label file.
+```text
+fridge9000.dump
+.env
+manifest.json
+
+backend/
+├── uploads/
+├── candidate_models/
+├── dataset_exports/
+├── model_comparisons/
+├── base_dataset/
+└── remote_training_jobs/   if present
+```
+
+The PostgreSQL dump preserves application state including:
+
+- Inventory
+- Inventory batches
+- Scans
+- Annotation submissions
+- Annotation lifecycle states
+- Training runs
+- Dataset/model provenance
+- Model versions
+- Model comparisons
+- Active / archived model registry
+- Activation history
+
+The runtime folders preserve the actual files referenced by that database state, including trained candidate-model weights.
+
+The backend is intentionally left stopped after export.
 
 ---
 
-## 4. Create `.env`
+## Import Fridge Data
 
-The repository contains:
+Import is intended for restoring a backup or transferring an existing Fridge installation to another machine.
 
-```text
-.env.example
+First clone the repository on the destination computer:
+
+```bash
+git clone https://github.com/netanel770/Fridge9000.git
+cd Fridge9000
 ```
 
-Create a local `.env`:
+Check out the appropriate branch/version if required.
+
+Install the mobile dependencies:
+
+```bash
+cd mobile
+npm install
+cd ..
+```
+
+Then either drag the backup ZIP onto:
+
+```text
+import-fridge-data.bat
+```
+
+or run:
+
+```cmd
+import-fridge-data.bat "C:\path\to\fridge9000-backup.zip"
+```
+
+The import script requires explicit confirmation before replacing the destination machine's development state.
+
+The importer:
+
+1. Extracts the backup.
+2. Reads the source manifest.
+3. Stops the backend.
+4. Starts PostgreSQL.
+5. Restores the PostgreSQL dump using `pg_restore`.
+6. Restores runtime directories.
+7. Restores `.env` when included.
+8. Rebuilds and starts Fridge 9000.
+9. Performs a basic database verification.
+
+The restored installation includes:
+
+```text
+Inventory
+Scans
+Annotations
+Annotation lifecycle state
+Training runs
+Model versions
+Model comparisons
+Activation history
+Active / archived models
+Trained model files
+Uploads
+Datasets
+Comparison artifacts
+```
+
+### Important import warning
+
+Import replaces the destination development database and matching runtime directories.
+
+It is therefore intentionally protected by explicit confirmation.
+
+A backup should be created first if the destination machine already contains Fridge data that must be preserved.
+
+---
+
+# Configuration
+
+The main runtime and training configuration lives in `.env`.
+
+Start from:
 
 ```cmd
 copy .env.example .env
 ```
 
-`.env` is ignored by Git.
+Example local configuration:
 
----
+```env
+TRAINING_PROVIDER=local
+LOCAL_BASE_DATASET_PATH=/app/base_dataset
 
-## 5. Configure Kaggle
+MAX_SHARED_MAP50_95_REGRESSION=0.02
+MIN_ADDED_CLASS_MAP50_95=0.50
+MIN_ADDED_CLASS_PER_CLASS_MAP50_95=0.30
+```
 
-Edit `.env`:
+For Kaggle:
 
 ```env
 TRAINING_PROVIDER=kaggle
@@ -783,115 +921,65 @@ KAGGLE_TIMEOUT_SECONDS=14400
 KAGGLE_COMMAND_TIMEOUT_SECONDS=300
 ```
 
-The configured starting weights must be pretrained YOLO weights rather than the current Fridge 9000 production model.
+Never commit real credentials.
 
 ---
 
-## 6. Optional Training Settings
+# Candidate Training
 
-Training settings can also be configured:
-
-```env
-MODEL_TRAIN_EPOCHS=30
-MODEL_TRAIN_IMGSZ=640
-MODEL_TRAIN_BATCH=8
-
-MODEL_COMPARE_IMGSZ=640
-MODEL_COMPARE_BATCH=8
-```
-
----
-
-## 7. Start Fridge 9000
-
-After configuring `.env`, run:
-
-```cmd
-run-fridge.bat
-```
-
----
-
-## 8. Verify Kaggle Access
-
-Check that the Kaggle CLI works inside the backend container:
-
-```bash
-docker compose exec backend kaggle --version
-```
-
-Verify that Kaggle is the selected provider:
-
-```bash
-docker compose exec backend printenv TRAINING_PROVIDER
-```
-
-Expected:
+From the mobile application:
 
 ```text
-kaggle
+Teach Fridge
+      ↓
+AI Progress
+      ↓
+Train a candidate
 ```
 
----
+The system:
 
-## 9. Train a Candidate
+1. Selects approved eligible annotations.
+2. Exports a versioned correction dataset.
+3. Combines baseline/trusted data with selected corrections.
+4. Starts local or remote training.
+5. Produces a candidate model.
+6. Evaluates the candidate.
+7. Registers it in the model lifecycle.
+8. Compares it against the active detector.
+9. Applies the promotion policy.
 
-In the mobile application:
+The active model remains unchanged throughout candidate training.
 
-```text
-Teach AI
-→ Contributions
-→ Approve useful corrections
-→ AI Progress
-→ Train Candidate
-```
-
-Fridge 9000 automatically:
-
-1. Exports approved annotations.
-2. Creates a versioned correction dataset.
-3. Creates a private per-run Kaggle dataset.
-4. Creates a private Kaggle training notebook.
-5. Requests the configured GPU.
-6. Combines the base dataset with approved corrections.
-7. Trains the candidate.
-8. Evaluates the active and candidate models.
-9. Downloads the Kaggle artifacts.
-10. Validates the remote results.
-11. Registers the candidate if validation succeeds.
-
-The active detector remains unchanged throughout this process.
-
----
-
-## Watching Training Progress
-
-Backend lifecycle logs:
+Backend lifecycle activity can be viewed with:
 
 ```bash
 docker compose logs -f backend
 ```
 
-Typical phases include:
-
-```text
-preparing
-uploading
-waiting_for_dataset
-queued
-running
-downloading
-registering
-completed
-```
-
-For epoch-by-epoch YOLO output, open the generated Kaggle notebook and view its output or logs.
-
 ---
 
 # Testing
 
-Fridge 9000 uses a separate PostgreSQL test database so automated tests do not modify normal development data.
+Fridge 9000 uses a separate PostgreSQL test environment so automated tests do not mutate normal development data.
+
+#### Important design choice: tests do not use development PostgreSQL
+
+Model-lifecycle and inventory tests deliberately exercise operations such as:
+
+- Schema initialization
+- Candidate registration
+- Promotion
+- Rejection
+- Quarantine
+- Rollback
+- Repeated model reactivation
+- Annotation trust reconciliation
+- Inventory batch migration
+
+These operations therefore run against isolated test state rather than the developer's real inventory, annotations, or trained models.
+
+---
 
 ## Full Windows Validation
 
@@ -901,22 +989,25 @@ From the repository root:
 fridge-test.bat
 ```
 
-The validation runner executes:
+The validation runner performs:
 
-1. Isolated PostgreSQL test database
-2. Backend pytest suite
-3. Training-provider tests
-4. Kaggle worker tests
-5. TypeScript checks
-6. Mobile lint
-7. Expo Doctor
-8. Git whitespace validation
+```text
+1. Start isolated PostgreSQL test environment
+2. Run backend pytest suite
+3. Run training-provider tests
+4. Run Kaggle worker tests
+5. Stop isolated PostgreSQL test environment
+6. Run TypeScript checks
+7. Run mobile ESLint
+8. Run Expo Doctor
+9. Run git diff --check
+```
 
 ---
 
 ## Backend Tests
 
-Start the isolated test database:
+Start the isolated database:
 
 ```bash
 docker compose -f docker-compose.test.yml -p fridge9000-test up -d --wait
@@ -928,7 +1019,7 @@ Run:
 pytest
 ```
 
-Stop the test database:
+Stop it afterward:
 
 ```bash
 docker compose -f docker-compose.test.yml -p fridge9000-test down
@@ -950,38 +1041,62 @@ npx expo-doctor
 
 # Development Notes
 
-- `.env` must never be committed.
-- Kaggle API tokens must never be committed.
-- Runtime uploads should not be committed.
-- Generated datasets should not be committed.
-- Candidate model artifacts should not be committed.
-- Model-comparison output should not be committed.
-- The active detector remains unchanged while a candidate is training.
-- Promotion is always explicit.
-- Model rollback remains available after promotion.
-- Freshness classification is separate from the YOLO detector lifecycle.
-- Local and Kaggle training use the same candidate-model lifecycle.
-- Expo runs on the Windows host while PostgreSQL and FastAPI run through Docker Compose.
+- `.env` and real API credentials must never be committed.
+- Runtime uploads and generated training artifacts are intentionally ignored by Git.
+- Inventory batches are the authoritative inventory representation.
+- Only one detector can be active at a time.
+- Only one unresolved candidate can exist at a time.
+- Candidate training never silently changes the active detector.
+- Promotion is explicit.
+- Rejected experimental data is quarantined.
+- Annotation trust follows the currently active model's lineage.
+- Archived model provenance alone does not make annotations trusted.
+- Rollback reactivates existing archived models without retraining.
+- Previously active models remain reusable as long as their registered artifacts remain valid.
+- Local and Kaggle training use the same lifecycle.
+- Kaggle provides compute; the Fridge backend remains the source of truth.
+- Freshness classification remains separate from YOLO model lifecycle.
+- Development and test PostgreSQL environments are separated.
+- Database backups and trained model artifacts must be transferred together.
 
 ---
 
-# Goal
+# Project Goal
 
-Fridge 9000 is designed to go beyond simple object detection.
+Fridge 9000 is designed to go beyond simply calling a pretrained object detector.
 
 The project combines:
 
 ```text
 Computer Vision
-+ Inventory Management
-+ Human Feedback
-+ Moderated Training Data
-+ Versioned Datasets
-+ Incremental Model Training
-+ Remote GPU Training
-+ Class-Aware Evaluation
-+ Safe Model Promotion
-+ Rollback
++
+Inventory Management
++
+Human Feedback
++
+Moderated Training Data
++
+Training Provenance
++
+Versioned Datasets
++
+Incremental Model Training
++
+Remote GPU Compute
++
+Class-Aware Evaluation
++
+Safe Model Promotion
++
+Model Rollback / Reactivation
++
+Persistent Runtime State
++
+Portable Backup / Restore
 ```
 
-into one complete smart-fridge system.
+into one end-to-end smart refrigerator system.
+
+The important part is not only that the application can make predictions.
+
+Fridge 9000 can collect corrections, preserve where those corrections came from, train candidate models without disturbing production, evaluate candidates before deployment, reject unsafe changes, reactivate previous models without retraining, and preserve the entire application and ML lifecycle when moving between development machines.
