@@ -1240,7 +1240,24 @@ def _finalize_candidate_comparison(version: str, result: Dict[str, Any]):
 
     decision = _promotion_decision(comparison, active["id"], candidate["id"])
     finalized = {**result, "promotion_evaluation": decision, "auto_rejected": False}
-    if decision["eligible"] or decision["stale"]:
+    quality_failure_codes = {
+        "removed_classes",
+        "shared_class_regression",
+        "added_class_quality",
+        "added_class_below_minimum",
+    }
+    reason_codes = {
+        reason.get("code") for reason in decision.get("reasons", [])
+        if reason.get("code")
+    }
+    non_destructive_codes = {
+        "comparison_missing", "stale_comparison", "malformed_class_metrics"
+    }
+    if (
+        decision["eligible"]
+        or reason_codes & non_destructive_codes
+        or not (reason_codes & quality_failure_codes)
+    ):
         return finalized
 
     rejection = reject_model(version)
@@ -2056,60 +2073,6 @@ def get_ai_progress():
         candidate["id"] if candidate else None,
     )
 
-    # Reconcile legacy candidates that were compared before automatic
-    # rejection was introduced.
-    #
-    # A candidate should be auto-rejected when there is at least one
-    # definitive model-quality failure.
-    #
-    # Invalid or stale comparison states must remain non-destructive so the
-    # comparison can be inspected or retried rather than quarantining data
-    # based on unreliable evidence.
-    hard_failure_reason_codes = {
-        "removed_classes",
-        "shared_class_regression",
-        "added_class_quality",
-        "added_class_below_minimum",
-    }
-
-    invalid_comparison_reason_codes = {
-        "comparison_missing",
-        "stale_comparison",
-        "malformed_class_metrics",
-    }
-
-    reason_codes = {
-        reason.get("code")
-        for reason in promotion_evaluation.get("reasons", [])
-        if reason.get("code")
-    }
-
-    has_hard_failure = bool(reason_codes & hard_failure_reason_codes)
-    has_invalid_comparison = bool(
-        reason_codes & invalid_comparison_reason_codes
-    )
-
-    should_auto_reject = (
-        candidate is not None
-        and comparison is not None
-        and not promotion_evaluation["eligible"]
-        and not promotion_evaluation["stale"]
-        and has_hard_failure
-        and not has_invalid_comparison
-    )
-
-    if should_auto_reject:
-        reject_model(candidate["version"])
-
-        candidate = None
-        comparison = None
-
-        promotion_evaluation = _promotion_decision(
-            None,
-            active["id"] if active else None,
-            None,
-        )
-
     if comparison:
         comparison["promotion_evaluation"] = promotion_evaluation
 
@@ -2156,7 +2119,13 @@ def _run_lifecycle_job(job_id: str, operation):
         _finish_lifecycle_job(job_id, result=operation())
     except BaseException as exc:
         LOGGER.exception("Model lifecycle job failed: %s", job_id)
-        _finish_lifecycle_job(job_id, error={"type": type(exc).__name__, "message": str(exc)})
+        message = " ".join(str(exc).split())
+        if len(message) > 500:
+            message = f"{message[:497]}..."
+        _finish_lifecycle_job(
+            job_id,
+            error={"type": type(exc).__name__, "message": message or "Model lifecycle operation failed"},
+        )
 
 
 def _start_lifecycle_job(kind: str, operation):

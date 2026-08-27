@@ -370,11 +370,12 @@ class KaggleCommandRunner:
                 return output
             if "403" in output and "forbidden" in output.casefold():
                 raise KaggleForbiddenError(
-                    f"Kaggle denied access while running '{arguments[0]}'. Verify that the API token belongs to "
-                    f"'{KAGGLE_USERNAME}' and can access private notebooks. Kaggle response: {output[-800:]}"
+                    f"Kaggle denied access to {arguments[0]}. Check the account, API token, and private notebook permissions."
                 )
             if attempt + 1 == attempts:
-                raise ProviderError(f"Kaggle command failed ({arguments[0]}): {output[-1200:]}")
+                raise ProviderError(
+                    f"Kaggle {arguments[0]} command failed. Check Kaggle availability and the remote job logs."
+                )
             time.sleep(2 ** attempt)
         raise AssertionError("unreachable")
 
@@ -400,11 +401,13 @@ def _wait_for_remote_dataset_files(
     timeout_seconds: float = 180.0,
     poll_seconds: float = 3.0,
     settle_seconds: float = 20.0,
+    max_forbidden_checks: int = 3,
 ) -> None:
     """Wait for Kaggle's file listing and notebook mounts to become consistent."""
     deadline = time.monotonic() + timeout_seconds
     complete_checks = 0
     last_found: set[str] = set()
+    forbidden_checks = 0
     while True:
         try:
             found: set[str] = set()
@@ -436,9 +439,15 @@ def _wait_for_remote_dataset_files(
                     )
                 seen_tokens.add(page_token)
             last_found = found
+            forbidden_checks = 0
         except KaggleForbiddenError:
             # A freshly-created private dataset can return 403 until its ACL has
             # propagated. Treat it as not-ready here, but nowhere else.
+            forbidden_checks += 1
+            if forbidden_checks >= max_forbidden_checks:
+                raise KaggleForbiddenError(
+                    "Kaggle repeatedly denied access to the uploaded dataset. Check account and private dataset permissions."
+                )
             found = set()
         complete_checks = complete_checks + 1 if found == set(required_files) else 0
         if complete_checks >= 2:
@@ -457,6 +466,26 @@ def _zip_dataset(dataset_dir: Path, destination: Path) -> None:
             archive.write(source, source.relative_to(dataset_dir).as_posix())
 
 
+def _acquire_remote_training_lock():
+    connection = psycopg2.connect(DATABASE_URL)
+    connection.autocommit = True
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_try_advisory_lock(9000, 2);")
+        acquired = cursor.fetchone()[0]
+    if not acquired:
+        connection.close()
+        raise ProviderError("Another remote training submission is already in progress")
+    return connection
+
+
+def _release_remote_training_lock(connection) -> None:
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_unlock(9000, 2);")
+    finally:
+        connection.close()
+
+
 def _write_training_record(run_id: str, dataset_version: str, starting_weights: Path, starting_model_version: str, parameters: dict[str, Any]):
     with psycopg2.connect(DATABASE_URL) as connection:
         with connection.cursor() as cursor:
@@ -468,11 +497,14 @@ def _write_training_record(run_id: str, dataset_version: str, starting_weights: 
 
 
 def _fail_training_record(run_id: str, exc: BaseException):
+    message = " ".join(str(exc).split())
+    if len(message) > 500:
+        message = f"{message[:497]}..."
     with psycopg2.connect(DATABASE_URL) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "UPDATE training_runs SET status='failed', ended_at=NOW(), error=%s WHERE id=%s AND status='running';",
-                (Json({"type": type(exc).__name__, "message": str(exc)}), run_id),
+                (Json({"type": type(exc).__name__, "message": message or "Remote training failed"}), run_id),
             )
 
 
@@ -635,6 +667,7 @@ def kaggle_training(
     selected_submission_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     runner = runner or KaggleCommandRunner()
+    remote_lock = _acquire_remote_training_lock()
     run_id = f"remote-{job_id}"
     record_created = False
     try:
@@ -692,7 +725,9 @@ def kaggle_training(
             (package / "dataset-metadata.json").write_text(json.dumps({"id": dataset_slug, "title": dataset_title, "isPrivate": True, "licenses": [{"name": "other"}]}, indent=2), encoding="utf-8")
             progress(phase="uploading", training_run_id=run_id, dataset_version=dataset_version, remote_dataset=dataset_slug)
             _remote_phase(run_id, "uploading", remote_dataset=dataset_slug, remote_kernel=kernel_slug)
-            runner.run(["datasets", "create", "-p", str(package), "--dir-mode", "zip"], retry=True)
+            # Resource creation is intentionally single-shot: an ambiguous retry
+            # must not create or submit duplicate remote work.
+            runner.run(["datasets", "create", "-p", str(package), "--dir-mode", "zip"], retry=False)
             progress(phase="waiting_for_dataset")
             _remote_phase(run_id, "waiting_for_dataset", remote_dataset=dataset_slug, remote_kernel=kernel_slug)
             _wait_for_remote_dataset_files(
@@ -748,6 +783,8 @@ def kaggle_training(
         if record_created:
             _fail_training_record(run_id, exc)
         raise
+    finally:
+        _release_remote_training_lock(remote_lock)
 
 
 def training_provider(name: str):

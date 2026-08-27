@@ -580,16 +580,91 @@ def test_failed_training_preserves_active_model_and_has_no_usage(
         cursor.execute("SELECT COUNT(*) FROM training_run_annotation_usage;")
         assert cursor.fetchone()[0] == 0
         cursor.execute(
-            "SELECT status FROM annotation_submissions WHERE id = %s;",
-            (approved["submission_id"],),
+            "SELECT status, training_state FROM annotation_submissions ORDER BY id;"
         )
-        assert cursor.fetchone()[0] == "approved"
+        submission_states = cursor.fetchall()
+        assert len(submission_states) == 2
+        assert set(submission_states) == {("approved", "eligible")}
     assert run["status"] == "failed"
     assert run["ended_at"] is not None
     assert run["candidate_model_path"] is None
     assert run["error"]["type"] == "RuntimeError"
     assert "deterministic training failure" in run["error"]["message"]
     assert _active_count(db_connection) == 1
+
+
+def test_provider_failure_leaves_selected_submissions_eligible(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    selected = submission_factory("manual", "approved", "Lemon")
+    monkeypatch.setattr(
+        lifecycle_context.providers,
+        "training_provider",
+        lambda _name: lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("Kaggle denied access to kernels. Check account permissions.")
+        ),
+    )
+
+    response = test_client.post(
+        "/model-lifecycle/train",
+        json={"submission_ids": [selected["submission_id"]]},
+    )
+    assert response.status_code == 200
+    job = response.json()
+    assert job["status"] == "failed"
+    assert job["error"]["message"] == (
+        "Kaggle denied access to kernels. Check account permissions."
+    )
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM model_versions WHERE status = 'candidate';")
+        assert cursor.fetchone()[0] == 0
+        cursor.execute(
+            "SELECT status, training_state FROM annotation_submissions WHERE id = %s;",
+            (selected["submission_id"],),
+        )
+        assert cursor.fetchone() == ("approved", "eligible")
+    assert _active_count(db_connection) == 1
+
+
+def test_ai_progress_is_read_only(
+    test_client, db_connection, lifecycle_context, submission_factory
+):
+    contribution = submission_factory("manual", "approved", "Milk")
+    submission_factory("manual", "approved", "Apple")
+    trained = _run_successful_training(test_client, lifecycle_context)
+    candidate_version = trained["result"]["model_version"]
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT status FROM model_versions WHERE version = %s;",
+            (candidate_version,),
+        )
+        model_status_before = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT status, training_state FROM annotation_submissions WHERE id = %s;",
+            (contribution["submission_id"],),
+        )
+        submission_before = cursor.fetchone()
+
+    with patch.object(
+        lifecycle_context.runtime,
+        "reject_model",
+        side_effect=AssertionError("GET /ai-progress attempted a lifecycle mutation"),
+    ) as reject:
+        assert test_client.get("/ai-progress").status_code == 200
+        assert test_client.get("/ai-progress").status_code == 200
+    reject.assert_not_called()
+
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT status FROM model_versions WHERE version = %s;",
+            (candidate_version,),
+        )
+        assert cursor.fetchone()[0] == model_status_before == "candidate"
+        cursor.execute(
+            "SELECT status, training_state FROM annotation_submissions WHERE id = %s;",
+            (contribution["submission_id"],),
+        )
+        assert cursor.fetchone() == submission_before == ("approved", "experimental")
 
 
 def test_lifecycle_job_queue_lookup_and_conflict_are_deterministic(
@@ -708,13 +783,13 @@ def test_comparison_persists_fingerprints_metrics_and_decision(
     decision = compared["result"]["promotion_evaluation"]
     assert decision["mode"] == "same_classes"
     assert decision["eligible"] is outperforms
-    assert compared["result"]["auto_rejected"] is not outperforms
+    assert compared["result"]["auto_rejected"] is False
     assert [reason["code"] for reason in decision["reasons"]] == (
         [] if outperforms else ["candidate_lost"]
     )
     progress = test_client.get("/ai-progress").json()
     assert progress["actions"]["can_promote"] is outperforms
-    assert (progress["comparison"] is not None) is outperforms
+    assert progress["comparison"] is not None
 
 
 @pytest.mark.parametrize(
@@ -1189,6 +1264,15 @@ def test_failed_candidate_auto_quarantines_only_selected_experimental_submission
     assert set(manifest["included_submission_ids"]) == trusted_ids | set(selected_ids)
     assert unselected_e["submission_id"] not in manifest["included_submission_ids"]
 
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_promotion_decision",
+        lambda *args: {
+            "eligible": False,
+            "mode": "expanded_classes",
+            "reasons": [{"code": "shared_class_regression", "message": "regression"}],
+        },
+    )
     compared = _run_comparison(
         test_client,
         lifecycle_context,
@@ -1223,12 +1307,21 @@ def test_failed_candidate_auto_quarantines_only_selected_experimental_submission
 
 
 def test_quarantined_submissions_can_be_restored_or_permanently_rejected(
-    test_client, db_connection, lifecycle_context, submission_factory
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
 ):
     restore_item = submission_factory("manual", "approved", "Milk")
     reject_item = submission_factory("manual", "approved", "Lemon")
     selected_ids = [restore_item["submission_id"], reject_item["submission_id"]]
     candidate = _run_successful_training(test_client, lifecycle_context, selected_ids)
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_promotion_decision",
+        lambda *args: {
+            "eligible": False,
+            "mode": "expanded_classes",
+            "reasons": [{"code": "added_class_quality", "message": "quality"}],
+        },
+    )
     compared = _run_comparison(
         test_client,
         lifecycle_context,
@@ -1488,7 +1581,8 @@ def test_invalid_promotion_and_rollback_leave_active_model_unchanged(
         test_client.post("/models/unknown/rollback"),
         test_client.post(f"/models/{candidate_version}/rollback"),
     ]
-    assert [response.status_code for response in attempts] == [404, 409, 409, 409, 404, 409]
+    assert [response.status_code for response in attempts] == [404, 400, 409, 409, 404, 409]
+    assert "did not outperform" in attempts[2].json()["detail"]
     assert _active_count(db_connection) == 1
     with db_connection.cursor() as cursor:
         cursor.execute("SELECT version FROM model_versions WHERE status = 'active';")
@@ -1541,6 +1635,7 @@ def test_stale_comparison_cannot_promote_against_a_new_active_model(
     assert progress["promotion_evaluation"]["stale"] is True
     assert progress["promotion_evaluation"]["reasons"][0]["code"] == "stale_comparison"
     assert progress["actions"]["can_promote"] is False
+    assert progress["latest_candidate"]["version"] == candidate_version
     assert _active_count(db_connection) == 1
     with db_connection.cursor() as cursor:
         cursor.execute("SELECT version FROM model_versions WHERE status = 'active';")
@@ -1688,6 +1783,11 @@ def test_expansion_policy_blocks_regression_low_quality_and_removed_classes(
     progress = test_client.get("/ai-progress").json()
     assert progress["latest_candidate"] is None
     assert progress["actions"]["can_promote"] is False
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT DISTINCT training_state FROM annotation_submissions;"
+        )
+        assert cursor.fetchall() == [("quarantined",)]
 
     monkeypatch.setattr(
         lifecycle_context.runtime,

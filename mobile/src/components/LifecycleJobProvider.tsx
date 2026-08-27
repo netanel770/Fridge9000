@@ -31,6 +31,12 @@ export function lifecyclePhaseLabel(job: LifecycleJob) {
   return "Working in background";
 }
 
+function conciseLifecycleError(message: string) {
+  const compact = message.replace(/\s+/g, " ").trim();
+  if (!compact) return "The model job failed. Please try again.";
+  return compact.length > 240 ? `${compact.slice(0, 237)}...` : compact;
+}
+
 export function LifecycleJobProvider({ children }: { children: ReactNode }) {
   const [job, setJob] = useState<LifecycleJob | null>(null);
   const [action, setAction] = useState<string | null>(null);
@@ -59,7 +65,7 @@ export function LifecycleJobProvider({ children }: { children: ReactNode }) {
           setError("Connection interrupted. Still checking the current lifecycle job.");
         }
       }
-      if (current.status === "failed") throw new Error(current.error?.message || `${label} failed.`);
+      if (current.status === "failed") throw new Error(conciseLifecycleError(current.error?.message || `${label} failed.`));
       if (current.kind === "COMPARE" && current.result?.auto_rejected === true) {
         const quarantined = Number(current.result.quarantined_submission_count || 0);
         setMessage(`Candidate did not meet the criteria. ${quarantined} submission${quarantined === 1 ? " was" : "s were"} quarantined.`);
@@ -67,7 +73,7 @@ export function LifecycleJobProvider({ children }: { children: ReactNode }) {
         setMessage(`${label} completed successfully.`);
       }
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : `${label} failed.`);
+      setError(conciseLifecycleError(caught instanceof Error ? caught.message : `${label} failed.`));
     } finally {
       busyRef.current = false;
       setAction(null);

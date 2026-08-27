@@ -255,6 +255,8 @@ export default function TeachFridgeScreen() {
   const selectionRequest = useRef(0);
   const contributionsRequest = useRef(0);
   const moderationRequest = useRef(0);
+  const progressRequest = useRef(0);
+  const trainingSelectionRequest = useRef(0);
   const handledRequestedScan = useRef(false);
 
   async function selectScan(scan: RecentScan) {
@@ -361,19 +363,24 @@ export default function TeachFridgeScreen() {
   }
 
   async function loadProgress() {
+    const requestId = ++progressRequest.current;
     setLoadingProgress(true);
     setProgressError("");
     try {
-      setProgressStats(await getAIProgress());
+      const progress = await getAIProgress();
+      if (progressRequest.current === requestId) setProgressStats(progress);
     } catch (caught) {
-      setProgressStats(null);
-      setProgressError(caught instanceof Error ? caught.message : "Could not load AI progress statistics.");
+      if (progressRequest.current === requestId) {
+        setProgressStats(null);
+        setProgressError(caught instanceof Error ? caught.message : "Could not load AI progress statistics.");
+      }
     } finally {
-      setLoadingProgress(false);
+      if (progressRequest.current === requestId) setLoadingProgress(false);
     }
   }
 
   async function loadTrainingSelection() {
+    const requestId = ++trainingSelectionRequest.current;
     setLoadingTrainingSelection(true);
     setTrainingSelectionError("");
     try {
@@ -384,6 +391,7 @@ export default function TeachFridgeScreen() {
       const details = await Promise.all(lifecycleSubmissions.map((submission) => getAnnotationSubmission(submission.id)));
       const eligible = details.filter((detail) => trainingState(detail.submission) === "eligible");
       const quarantined = details.filter((detail) => trainingState(detail.submission) === "quarantined");
+      if (trainingSelectionRequest.current !== requestId) return;
       setEligibleSubmissions(eligible);
       setQuarantinedSubmissions(quarantined);
       const eligibleIds = new Set(eligible.map((detail) => detail.submission.id));
@@ -391,13 +399,15 @@ export default function TeachFridgeScreen() {
       setSelectedTrainingSubmissions((current) => new Set([...current].filter((id) => eligibleIds.has(id))));
       setSelectedQuarantineSubmissions((current) => new Set([...current].filter((id) => quarantinedIds.has(id))));
     } catch (caught) {
-      setEligibleSubmissions([]);
-      setQuarantinedSubmissions([]);
-      setSelectedTrainingSubmissions(new Set());
-      setSelectedQuarantineSubmissions(new Set());
-      setTrainingSelectionError(caught instanceof Error ? caught.message : "Could not load eligible annotations.");
+      if (trainingSelectionRequest.current === requestId) {
+        setEligibleSubmissions([]);
+        setQuarantinedSubmissions([]);
+        setSelectedTrainingSubmissions(new Set());
+        setSelectedQuarantineSubmissions(new Set());
+        setTrainingSelectionError(caught instanceof Error ? caught.message : "Could not load eligible annotations.");
+      }
     } finally {
-      setLoadingTrainingSelection(false);
+      if (trainingSelectionRequest.current === requestId) setLoadingTrainingSelection(false);
     }
   }
 

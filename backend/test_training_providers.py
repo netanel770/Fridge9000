@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, call, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 import training_providers as providers
 from core.config import DEFAULT_KAGGLE_MACHINE_SHAPE
@@ -94,9 +94,26 @@ class TrainingProviderTests(unittest.TestCase):
         forbidden = SimpleNamespace(returncode=1, stdout="", stderr="403 Client Error: Forbidden")
         with patch.object(providers, "KAGGLE_API_TOKEN", "secret-token"), patch.object(providers, "KAGGLE_USERNAME", "owner"), patch.object(providers, "KAGGLE_KEY", ""), patch.object(providers, "KAGGLE_KERNEL_SLUG", "owner/kernel"), patch.object(providers.subprocess, "run", return_value=forbidden) as run:
             runner = providers.KaggleCommandRunner()
-            with self.assertRaisesRegex(providers.ProviderError, "private notebooks"):
+            with self.assertRaisesRegex(providers.ProviderError, "denied access"):
                 runner.run(["kernels", "status", "owner/kernel"], retry=True)
             run.assert_called_once()
+
+    def test_kernel_push_failure_is_never_retried(self):
+        failed = SimpleNamespace(returncode=1, stdout="", stderr="temporary service failure")
+        with patch.object(providers, "KAGGLE_API_TOKEN", "secret-token"), patch.object(providers, "KAGGLE_USERNAME", "owner"), patch.object(providers, "KAGGLE_KEY", ""), patch.object(providers, "KAGGLE_KERNEL_SLUG", "owner/kernel"), patch.object(providers.subprocess, "run", return_value=failed) as run:
+            runner = providers.KaggleCommandRunner()
+            with self.assertRaisesRegex(providers.ProviderError, "command failed"):
+                runner.run(["kernels", "push", "-p", "kernel-stage"], retry=False)
+            run.assert_called_once()
+
+    def test_remote_training_lock_rejects_a_second_submission(self):
+        connection = MagicMock()
+        cursor = connection.cursor.return_value.__enter__.return_value
+        cursor.fetchone.return_value = (False,)
+        with patch.object(providers.psycopg2, "connect", return_value=connection):
+            with self.assertRaisesRegex(providers.ProviderError, "already in progress"):
+                providers._acquire_remote_training_lock()
+        connection.close.assert_called_once()
 
     def test_status_mapping(self):
         self.assertEqual(providers.parse_kernel_status('Kernel has status "queued"'), "queued")
@@ -163,6 +180,19 @@ class TrainingProviderTests(unittest.TestCase):
             providers._wait_for_remote_dataset_files(runner, "owner/run", required, poll_seconds=0, settle_seconds=20)
         self.assertEqual(runner.run.call_count, 3)
         sleep.assert_any_call(20)
+
+    def test_remote_dataset_persistent_forbidden_stops_cleanly(self):
+        runner = SimpleNamespace(run=Mock(side_effect=providers.KaggleForbiddenError("denied")))
+        with patch.object(providers.time, "sleep"):
+            with self.assertRaisesRegex(providers.KaggleForbiddenError, "repeatedly denied"):
+                providers._wait_for_remote_dataset_files(
+                    runner,
+                    "owner/run",
+                    ("job.json",),
+                    poll_seconds=0,
+                    max_forbidden_checks=3,
+                )
+        self.assertEqual(runner.run.call_count, 3)
 
     def test_kaggle_resource_slug_obeys_length_limit_and_keeps_run_identity(self):
         resource = providers._kaggle_resource_slug(
