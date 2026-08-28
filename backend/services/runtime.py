@@ -532,11 +532,13 @@ def ensure_schema():
                     image_height INT NOT NULL
                         CONSTRAINT annotation_submissions_image_height_check CHECK (image_height > 0),
                     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-                    reviewed_at TIMESTAMP
+                    reviewed_at TIMESTAMP,
+                    archived_at TIMESTAMPTZ
                 );
 
                 ALTER TABLE annotation_submissions
-                    ADD COLUMN IF NOT EXISTS training_state TEXT NOT NULL DEFAULT 'eligible';
+                    ADD COLUMN IF NOT EXISTS training_state TEXT NOT NULL DEFAULT 'eligible',
+                    ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 
                 DO $$
                 BEGIN
@@ -1880,7 +1882,7 @@ def create_annotation_submission(scan_id: int, payload: Dict[str, Any]):
             return {"ok": True, "submission": submission, "annotations": annotations}
 
 
-def list_annotation_submissions(status: Optional[str] = None):
+def list_annotation_submissions(status: Optional[str] = None, include_archived: bool = False):
     if status is not None and status not in ANNOTATION_STATUSES:
         raise HTTPException(status_code=400, detail="Unsupported submission status")
     sql = """
@@ -1905,13 +1907,18 @@ def list_annotation_submissions(status: Optional[str] = None):
         FROM annotation_submissions s
     """
     params = []
+    predicates = []
+    if not include_archived:
+        predicates.append("s.archived_at IS NULL")
     if status == "used":
-        sql += " WHERE s.status = 'used' OR EXISTS (SELECT 1 FROM training_run_submission_usage u WHERE u.submission_id = s.id)"
+        predicates.append("(s.status = 'used' OR EXISTS (SELECT 1 FROM training_run_submission_usage u WHERE u.submission_id = s.id))")
     elif status == "approved":
-        sql += " WHERE s.status = 'approved' AND NOT EXISTS (SELECT 1 FROM training_run_submission_usage u WHERE u.submission_id = s.id)"
+        predicates.append("s.status = 'approved' AND NOT EXISTS (SELECT 1 FROM training_run_submission_usage u WHERE u.submission_id = s.id)")
     elif status is not None:
-        sql += " WHERE s.status = %s"
+        predicates.append("s.status = %s")
         params.append(status)
+    if predicates:
+        sql += " WHERE " + " AND ".join(f"({predicate})" for predicate in predicates)
     sql += " ORDER BY s.created_at DESC, s.id DESC;"
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -2600,8 +2607,8 @@ def update_annotation_submission(submission_id: int, payload: Dict[str, Any]):
 
 def update_quarantined_submission(submission_id: int, payload: Dict[str, Any]):
     action = str(payload.get("action") or "").strip().lower()
-    if action not in {"restore", "reject"}:
-        raise HTTPException(status_code=400, detail="Action must be restore or reject")
+    if action not in {"restore", "archive", "unarchive"}:
+        raise HTTPException(status_code=400, detail="Action must be restore, archive, or unarchive")
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -2617,14 +2624,27 @@ def update_quarantined_submission(submission_id: int, payload: Dict[str, Any]):
                 if submission["status"] not in {"approved", "used"}:
                     raise HTTPException(status_code=409, detail="Only approved quarantined submissions can be restored")
                 cur.execute(
-                    "UPDATE annotation_submissions SET training_state = 'eligible' WHERE id = %s RETURNING *;",
+                    "UPDATE annotation_submissions SET training_state = 'eligible', archived_at = NULL WHERE id = %s RETURNING *;",
                     (submission_id,),
                 )
-            else:
+            elif action == "archive":
+                if submission["archived_at"] is not None:
+                    raise HTTPException(status_code=409, detail="Submission is already archived")
                 cur.execute(
                     """
                     UPDATE annotation_submissions
-                    SET status = 'rejected', reviewed_at = NOW()
+                    SET archived_at = NOW()
+                    WHERE id = %s RETURNING *;
+                    """,
+                    (submission_id,),
+                )
+            else:
+                if submission["archived_at"] is None:
+                    raise HTTPException(status_code=409, detail="Submission is not archived")
+                cur.execute(
+                    """
+                    UPDATE annotation_submissions
+                    SET archived_at = NULL
                     WHERE id = %s RETURNING *;
                     """,
                     (submission_id,),

@@ -2090,12 +2090,12 @@ def test_failed_candidate_auto_quarantines_only_selected_experimental_submission
     }
 
 
-def test_quarantined_submissions_can_be_restored_or_permanently_rejected(
+def test_quarantined_submissions_can_be_archived_unarchived_and_restored(
     test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
 ):
     restore_item = submission_factory("manual", "approved", "Milk")
-    reject_item = submission_factory("manual", "approved", "Lemon")
-    selected_ids = [restore_item["submission_id"], reject_item["submission_id"]]
+    archive_item = submission_factory("manual", "approved", "Lemon")
+    selected_ids = [restore_item["submission_id"], archive_item["submission_id"]]
     candidate = _run_successful_training(test_client, lifecycle_context, selected_ids)
     monkeypatch.setattr(
         lifecycle_context.runtime,
@@ -2123,20 +2123,42 @@ def test_quarantined_submissions_can_be_restored_or_permanently_rejected(
         usage_count = cursor.fetchone()[0]
     assert usage_count == 2
 
-    restored = test_client.post(
-        f"/annotation-submissions/{restore_item['submission_id']}/quarantine",
-        json={"action": "restore"},
+    archive_url = f"/annotation-submissions/{archive_item['submission_id']}/quarantine"
+    archived = test_client.post(archive_url, json={"action": "archive"})
+    assert archived.status_code == 200
+    assert archived.json()["submission"]["training_state"] == "quarantined"
+    assert archived.json()["submission"]["status"] == "approved"
+    assert archived.json()["submission"]["archived_at"] is not None
+
+    default_ids = {
+        row["id"] for row in test_client.get("/annotation-submissions").json()
+    }
+    assert restore_item["submission_id"] in default_ids
+    assert archive_item["submission_id"] not in default_ids
+    included = test_client.get(
+        "/annotation-submissions?include_archived=true"
+    ).json()
+    archived_row = next(
+        row for row in included if row["id"] == archive_item["submission_id"]
     )
-    rejected = test_client.post(
-        f"/annotation-submissions/{reject_item['submission_id']}/quarantine",
-        json={"action": "reject"},
-    )
+    assert archived_row["training_state"] == "quarantined"
+    assert archived_row["archived_at"] is not None
+
+    unarchived = test_client.post(archive_url, json={"action": "unarchive"})
+    assert unarchived.status_code == 200
+    assert unarchived.json()["submission"]["training_state"] == "quarantined"
+    assert unarchived.json()["submission"]["archived_at"] is None
+    assert archive_item["submission_id"] in {
+        row["id"] for row in test_client.get("/annotation-submissions").json()
+    }
+
+    assert test_client.post(archive_url, json={"action": "archive"}).status_code == 200
+    restored = test_client.post(archive_url, json={"action": "restore"})
     assert restored.status_code == 200
     assert restored.json()["submission"]["training_state"] == "eligible"
     assert restored.json()["submission"]["status"] == "approved"
-    assert rejected.status_code == 200
-    assert rejected.json()["submission"]["training_state"] == "quarantined"
-    assert rejected.json()["submission"]["status"] == "rejected"
+    assert restored.json()["submission"]["archived_at"] is None
+    assert test_client.post(archive_url, json={"action": "reject"}).status_code == 400
 
     with db_connection.cursor() as cursor:
         cursor.execute(
@@ -2146,7 +2168,7 @@ def test_quarantined_submissions_can_be_restored_or_permanently_rejected(
         assert cursor.fetchone()[0] == usage_count
 
     assert test_client.post(
-        f"/annotation-submissions/{restore_item['submission_id']}/quarantine",
+        archive_url,
         json={"action": "restore"},
     ).status_code == 409
 

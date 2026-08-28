@@ -78,6 +78,7 @@ def test_init_sql_defines_complete_current_schema(test_database_url, monkeypatch
                     WHERE table_schema = 'public'
                       AND (table_name, column_name) IN (
                         ('annotation_submissions', 'training_state'),
+                        ('annotation_submissions', 'archived_at'),
                         ('training_run_submission_usage', 'is_experimental'),
                         ('training_run_annotation_usage', 'is_experimental'),
                         ('model_comparisons', 'validation_split_sha256'),
@@ -99,6 +100,7 @@ def test_init_sql_defines_complete_current_schema(test_database_url, monkeypatch
                 }
                 assert set(columns) == {
                     ("annotation_submissions", "training_state"),
+                    ("annotation_submissions", "archived_at"),
                     ("training_run_submission_usage", "is_experimental"),
                     ("training_run_annotation_usage", "is_experimental"),
                     ("model_comparisons", "validation_split_sha256"),
@@ -110,6 +112,11 @@ def test_init_sql_defines_complete_current_schema(test_database_url, monkeypatch
                 }
                 assert columns[("annotation_submissions", "training_state")]["nullable"] == "NO"
                 assert "eligible" in columns[("annotation_submissions", "training_state")]["default"]
+                assert columns[("annotation_submissions", "archived_at")] == {
+                    "nullable": "YES",
+                    "type": "timestamp with time zone",
+                    "default": None,
+                }
                 for usage_table in (
                     "training_run_submission_usage",
                     "training_run_annotation_usage",

@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS annotation_submissions (
     training_state IN ('eligible', 'experimental', 'trusted', 'quarantined')
   ),
   created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-  reviewed_at TIMESTAMP
+  reviewed_at TIMESTAMP,
+  archived_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_annotation_submissions_scan_id ON annotation_submissions(scan_id);

@@ -151,6 +151,7 @@ export type AnnotationSubmission = {
   image_height: number;
   created_at: string;
   reviewed_at?: string | null;
+  archived_at?: string | null;
   annotation_count?: number | string;
   training_status?: "used" | "not_used";
   training_state?: AnnotationTrainingState;

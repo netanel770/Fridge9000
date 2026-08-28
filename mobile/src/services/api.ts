@@ -315,8 +315,11 @@ export async function createAnnotationSubmission(
   return handleJsonResponse<CreateAnnotationSubmissionResponse>(res);
 }
 
-export async function getAnnotationSubmissions(status?: AnnotationStatus): Promise<AnnotationSubmission[]> {
-  const query = status ? `?status=${encodeURIComponent(status)}` : "";
+export async function getAnnotationSubmissions(status?: AnnotationStatus, includeArchived = false): Promise<AnnotationSubmission[]> {
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (includeArchived) params.set("include_archived", "true");
+  const query = params.size ? `?${params.toString()}` : "";
   const res = await fetch(`${API_BASE_URL}/annotation-submissions${query}`);
   return handleJsonResponse<AnnotationSubmission[]>(res);
 }
@@ -394,7 +397,7 @@ export async function moderateAnnotationSubmission(
 
 export async function manageQuarantinedSubmission(
   submissionId: number,
-  action: "restore" | "reject",
+  action: "restore" | "archive" | "unarchive",
 ): Promise<AnnotationSubmission> {
   const res = await fetch(`${API_BASE_URL}/annotation-submissions/${submissionId}/quarantine`, {
     method: "POST",

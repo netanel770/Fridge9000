@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Ionicons } from "@expo/vector-icons";
-import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
 
 import { AppButton, Card, EmptyState, ScreenHeader, StatusBadge } from "../src/components/ui";
@@ -247,6 +247,57 @@ function UniqueProductPerformance({
   </View>;
 }
 
+function AnnotationSubmissionPreview({
+  detail,
+  focusedAnnotationId,
+  onFocusAnnotation,
+}: {
+  detail: AnnotationSubmissionDetail;
+  focusedAnnotationId: number | null;
+  onFocusAnnotation: (annotationId: number) => void;
+}) {
+  const dimensionsValid = detail.submission.image_width > 0 && detail.submission.image_height > 0;
+  const imageWidth = dimensionsValid ? detail.submission.image_width : 1;
+  const imageHeight = dimensionsValid ? detail.submission.image_height : 1;
+  const annotationDetections = detail.annotations.map(annotationDetection);
+  const drawableDetections = dimensionsValid
+    ? annotationDetections.filter((detection) => hasDrawableBox(detection, imageWidth, imageHeight))
+    : [];
+  const drawableIds = new Set(drawableDetections.map((detection) => detection.id));
+  const missingBoxCount = annotationDetections.length - drawableDetections.length;
+
+  return <View style={styles.annotationSubmissionPreview}>
+    <DetectionImageViewer
+      imageUri={getScanImageUrl(detail.submission.scan_id)}
+      imageWidth={imageWidth}
+      imageHeight={imageHeight}
+      detections={drawableDetections}
+      highlightedDetectionId={focusedAnnotationId}
+      showLabels={false}
+      style={[styles.quarantineImage, { aspectRatio: imageWidth / imageHeight }]}
+    />
+    {missingBoxCount ? <Text style={styles.quarantineBoxNotice}>{missingBoxCount} annotation{missingBoxCount === 1 ? " has" : "s have"} no drawable box.</Text> : null}
+    {detail.annotations.map((annotation) => {
+      const focused = focusedAnnotationId === annotation.id;
+      const drawable = drawableIds.has(annotation.id);
+      return <Pressable
+        key={annotation.id}
+        accessibilityRole="radio"
+        accessibilityState={{ checked: focused }}
+        accessibilityLabel={`Focus annotation ${annotation.id}`}
+        onPress={() => onFocusAnnotation(annotation.id)}
+        style={[styles.quarantineAnnotation, focused && styles.quarantineAnnotationFocused]}
+      >
+        <View style={styles.quarantineAnnotationHeader}>
+          <Text style={styles.annotationTitle}>{contributionProductLabel(annotation)}</Text>
+          {focused ? <Ionicons name="locate" size={18} color={colors.amber} /> : null}
+        </View>
+        <Text style={styles.annotationDetail}>{actionTitle(annotation.action)} · Annotation #{annotation.id}{drawable ? "" : " · Box unavailable"}</Text>
+      </Pressable>;
+    })}
+  </View>;
+}
+
 export default function TeachFridgeScreen() {
   const { scanId: requestedScanIdParam, detectionId: requestedDetectionIdParam, addMissed, tab } = useLocalSearchParams<{ scanId?: string; detectionId?: string; addMissed?: string; tab?: string }>();
   const requestedScanId = Number(requestedScanIdParam);
@@ -315,6 +366,7 @@ export default function TeachFridgeScreen() {
   const [showTrainingSelector, setShowTrainingSelector] = useState(false);
   const [expandedTrainingLabel, setExpandedTrainingLabel] = useState<string | null>(null);
   const [expandedTrainingSubmission, setExpandedTrainingSubmission] = useState<number | null>(null);
+  const [focusedTrainingAnnotation, setFocusedTrainingAnnotation] = useState<number | null>(null);
   const [showTrainingHistory, setShowTrainingHistory] = useState(false);
   const [showRollbackSelector, setShowRollbackSelector] = useState(false);
   const [selectedRollbackVersion, setSelectedRollbackVersion] = useState<string | null>(null);
@@ -326,7 +378,7 @@ export default function TeachFridgeScreen() {
   const [expandedQuarantineLabel, setExpandedQuarantineLabel] = useState<string | null>(null);
   const [expandedQuarantineSubmission, setExpandedQuarantineSubmission] = useState<number | null>(null);
   const [focusedQuarantineAnnotation, setFocusedQuarantineAnnotation] = useState<number | null>(null);
-  const [quarantineReturnToTraining, setQuarantineReturnToTraining] = useState(false);
+  const [showArchivedQuarantine, setShowArchivedQuarantine] = useState(false);
   const [quarantineMutation, setQuarantineMutation] = useState<number | null>(null);
   const [quarantineError, setQuarantineError] = useState("");
   const [quarantineMessage, setQuarantineMessage] = useState("");
@@ -463,7 +515,7 @@ export default function TeachFridgeScreen() {
     setLoadingTrainingSelection(true);
     setTrainingSelectionError("");
     try {
-      const submissions = await getAnnotationSubmissions();
+      const submissions = await getAnnotationSubmissions(undefined, true);
       const lifecycleSubmissions = submissions.filter((submission) =>
         ["approved", "used"].includes(submission.status) && ["eligible", "quarantined"].includes(trainingState(submission))
       );
@@ -474,7 +526,7 @@ export default function TeachFridgeScreen() {
       setEligibleSubmissions(eligible);
       setQuarantinedSubmissions(quarantined);
       const eligibleIds = new Set(eligible.map((detail) => detail.submission.id));
-      const quarantinedIds = new Set(quarantined.map((detail) => detail.submission.id));
+      const quarantinedIds = new Set(quarantined.filter((detail) => !detail.submission.archived_at).map((detail) => detail.submission.id));
       setSelectedTrainingSubmissions((current) => new Set([...current].filter((id) => eligibleIds.has(id))));
       setSelectedQuarantineSubmissions((current) => new Set([...current].filter((id) => quarantinedIds.has(id))));
     } catch (caught) {
@@ -536,7 +588,7 @@ export default function TeachFridgeScreen() {
   }
 
   function openQuarantine(fromTraining = false) {
-    setQuarantineReturnToTraining(fromTraining);
+    setShowArchivedQuarantine(false);
     if (fromTraining) setShowTrainingSelector(false);
     setTimeout(() => setShowQuarantine(true), fromTraining ? 200 : 0);
   }
@@ -547,11 +599,10 @@ export default function TeachFridgeScreen() {
 
   function returnToTrainingSelection() {
     setShowQuarantine(false);
-    setQuarantineReturnToTraining(false);
     setTimeout(() => setShowTrainingSelector(true), 200);
   }
 
-  async function applyQuarantineAction(submissionId: number, action: "restore" | "reject") {
+  async function applyQuarantineAction(submissionId: number, action: "restore" | "archive" | "unarchive") {
     setQuarantineMutation(submissionId);
     setQuarantineError("");
     setQuarantineMessage("");
@@ -559,20 +610,19 @@ export default function TeachFridgeScreen() {
       await manageQuarantinedSubmission(submissionId, action);
       setExpandedQuarantineSubmission(null);
       setFocusedQuarantineAnnotation(null);
-      setQuarantineMessage(action === "restore" ? "Restored to eligible training data." : "Submission permanently rejected.");
+      setQuarantineMessage(
+        action === "restore"
+          ? "Returned to eligible training data."
+          : action === "archive"
+            ? "Submission archived from the active Quarantine workload."
+            : "Submission returned to the active Quarantine workload.",
+      );
       await Promise.all([loadTrainingSelection(), loadProgress(), loadContributions()]);
     } catch (caught) {
       setQuarantineError(caught instanceof Error ? caught.message : "Could not update the submission.");
     } finally {
       setQuarantineMutation(null);
     }
-  }
-
-  function confirmPermanentQuarantineRejection(submissionId: number) {
-    Alert.alert("Reject submission?", "It will remain excluded from future training.", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Reject", style: "destructive", onPress: () => applyQuarantineAction(submissionId, "reject") },
-    ]);
   }
 
   function openRollbackSelector() {
@@ -982,9 +1032,17 @@ export default function TeachFridgeScreen() {
     return [...groups.values()].sort((left, right) => left.label.localeCompare(right.label));
   }, [eligibleSubmissions]);
 
+  const activeQuarantinedSubmissions = useMemo(
+    () => quarantinedSubmissions.filter((detail) => !detail.submission.archived_at),
+    [quarantinedSubmissions],
+  );
+  const archivedQuarantineCount = quarantinedSubmissions.length - activeQuarantinedSubmissions.length;
+  const displayedQuarantinedSubmissions = showArchivedQuarantine
+    ? quarantinedSubmissions
+    : activeQuarantinedSubmissions;
   const quarantineLabelGroups = useMemo(() => {
     const groups = new Map<string, { label: string; submissions: AnnotationSubmissionDetail[] }>();
-    quarantinedSubmissions.forEach((detail) => {
+    displayedQuarantinedSubmissions.forEach((detail) => {
       const labels = new Map<string, string>();
       detail.annotations.forEach((annotation) => {
         const label = contributionProductLabel(annotation);
@@ -997,7 +1055,7 @@ export default function TeachFridgeScreen() {
       });
     });
     return [...groups.values()].sort((left, right) => left.label.localeCompare(right.label));
-  }, [quarantinedSubmissions]);
+  }, [displayedQuarantinedSubmissions]);
 
   function toggleTrainingGroup(submissions: AnnotationSubmissionDetail[]) {
     const ids = submissions.map((detail) => detail.submission.id);
@@ -1010,7 +1068,7 @@ export default function TeachFridgeScreen() {
   }
 
   function toggleQuarantineGroup(submissions: AnnotationSubmissionDetail[]) {
-    const ids = [...new Set(submissions.map((detail) => detail.submission.id))];
+    const ids = [...new Set(submissions.filter((detail) => !detail.submission.archived_at).map((detail) => detail.submission.id))];
     const allSelected = ids.length > 0 && ids.every((id) => selectedQuarantineSubmissions.has(id));
     setSelectedQuarantineSubmissions((current) => {
       const next = new Set(current);
@@ -1019,7 +1077,7 @@ export default function TeachFridgeScreen() {
     });
   }
 
-  async function restoreSelectedQuarantinedSubmissions() {
+  async function returnSelectedQuarantinedSubmissionsToTraining() {
     const selectedIds = [...selectedQuarantineSubmissions].sort((left, right) => left - right);
     if (!selectedIds.length || quarantineMutation !== null) return;
 
@@ -1031,10 +1089,10 @@ export default function TeachFridgeScreen() {
         await manageQuarantinedSubmission(submissionId, "restore");
       }
       setSelectedQuarantineSubmissions(new Set());
-      setQuarantineMessage(`${selectedIds.length} submission${selectedIds.length === 1 ? "" : "s"} restored and ready to select for training.`);
+      setQuarantineMessage(`${selectedIds.length} submission${selectedIds.length === 1 ? "" : "s"} returned and ready to select for training.`);
       await Promise.all([loadTrainingSelection(), loadProgress(), loadContributions()]);
     } catch (caught) {
-      setQuarantineError(caught instanceof Error ? caught.message : "Could not restore the selected submissions.");
+      setQuarantineError(caught instanceof Error ? caught.message : "Could not return the selected submissions to training.");
     } finally {
       setQuarantineMutation(null);
     }
@@ -1431,10 +1489,10 @@ export default function TeachFridgeScreen() {
                 <View style={styles.detectionCopy}><Text style={styles.quickActionTitle}>Training History</Text><Text style={styles.quickActionMeta}>{progressStats.training_history.length} recent runs</Text></View>
                 <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
               </Pressable>
-              <Pressable accessibilityRole="button" onPress={() => openQuarantine(false)} style={[styles.quickAction, quarantinedSubmissions.length > 0 && styles.quickActionDanger]}>
-                <View style={[styles.quickActionIcon, quarantinedSubmissions.length > 0 && styles.quickActionIconDanger]}><Ionicons name="archive-outline" size={20} color={quarantinedSubmissions.length > 0 ? colors.danger : colors.textMuted} /></View>
-                <View style={styles.detectionCopy}><Text style={[styles.quickActionTitle, quarantinedSubmissions.length > 0 && styles.quickActionTitleDanger]}>Quarantine</Text><Text style={styles.quickActionMeta}>{quarantinedSubmissions.length} submission{quarantinedSubmissions.length === 1 ? "" : "s"}</Text></View>
-                <Ionicons name="chevron-forward" size={18} color={quarantinedSubmissions.length > 0 ? colors.danger : colors.textMuted} />
+              <Pressable accessibilityRole="button" onPress={() => openQuarantine(false)} style={[styles.quickAction, activeQuarantinedSubmissions.length > 0 && styles.quickActionDanger]}>
+                <View style={[styles.quickActionIcon, activeQuarantinedSubmissions.length > 0 && styles.quickActionIconDanger]}><Ionicons name="archive-outline" size={20} color={activeQuarantinedSubmissions.length > 0 ? colors.danger : colors.textMuted} /></View>
+                <View style={styles.detectionCopy}><Text style={[styles.quickActionTitle, activeQuarantinedSubmissions.length > 0 && styles.quickActionTitleDanger]}>Quarantine</Text><Text style={styles.quickActionMeta}>{activeQuarantinedSubmissions.length} active</Text></View>
+                <Ionicons name="chevron-forward" size={18} color={activeQuarantinedSubmissions.length > 0 ? colors.danger : colors.textMuted} />
               </Pressable>
             </View>
 
@@ -1457,7 +1515,7 @@ export default function TeachFridgeScreen() {
             <View style={styles.imageHeader}><View><Text style={styles.imageTitle}>Select training data</Text><Text style={styles.imageSubtitle}>{selectedTrainingSubmissions.size} submissions · {selectedAnnotationCount} annotations selected</Text></View><Pressable accessibilityLabel="Close training selection" onPress={() => setShowTrainingSelector(false)} hitSlop={10}><Ionicons name="close" size={27} color={colors.navy} /></Pressable></View>
             <View style={styles.selectionControls}><Text style={styles.selectionAvailable}>{eligibleSubmissions.length} eligible submissions</Text><View style={styles.selectionControlButtons}><Pressable accessibilityRole="button" onPress={() => setSelectedTrainingSubmissions(new Set(eligibleSubmissions.map((detail) => detail.submission.id)))} style={styles.selectionControl}><Text style={styles.selectionControlText}>Select all</Text></Pressable><Pressable accessibilityRole="button" disabled={selectedTrainingSubmissions.size === 0} onPress={() => setSelectedTrainingSubmissions(new Set())} style={styles.selectionControl}><Text style={[styles.selectionControlText, selectedTrainingSubmissions.size === 0 && styles.selectionControlDisabled]}>Clear</Text></Pressable></View></View>
             <Text style={styles.sheetHelper}>Select whole submissions. Trusted data is included automatically.</Text>
-            {quarantinedSubmissions.length ? <Pressable accessibilityRole="button" onPress={openQuarantineFromTraining} style={styles.sheetQuarantineLink}><Ionicons name="archive-outline" size={18} color={colors.danger} /><Text style={styles.sheetQuarantineText}>Manage Quarantine ({quarantinedSubmissions.length})</Text><Ionicons name="chevron-forward" size={17} color={colors.danger} /></Pressable> : null}
+            {quarantinedSubmissions.length ? <Pressable accessibilityRole="button" onPress={openQuarantineFromTraining} style={styles.sheetQuarantineLink}><Ionicons name="archive-outline" size={18} color={colors.danger} /><Text style={styles.sheetQuarantineText}>Manage Quarantine ({activeQuarantinedSubmissions.length} active)</Text><Ionicons name="chevron-forward" size={17} color={colors.danger} /></Pressable> : null}
             <ScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
               {loadingTrainingSelection ? <View style={styles.loading}><ActivityIndicator color={colors.primary} /><Text style={styles.loadingText}>Loading annotations...</Text></View> : null}
               {trainingSelectionError ? <View style={styles.errorBox}><Text style={styles.errorText}>{trainingSelectionError}</Text><AppButton label="Try Again" variant="secondary" onPress={loadTrainingSelection} /></View> : null}
@@ -1474,11 +1532,14 @@ export default function TeachFridgeScreen() {
                     const detailExpanded = expandedTrainingSubmission === detail.submission.id;
                     return <View key={detail.submission.id} style={[styles.trainingSubmissionDetail, selected && styles.trainingSelectionRowSelected]}>
                       <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: selected }} onPress={() => toggleTrainingGroup([detail])} hitSlop={8}><Ionicons name={selected ? "checkbox" : "square-outline"} size={23} color={selected ? colors.primary : colors.textMuted} /></Pressable>
-                      <Pressable accessibilityRole="button" accessibilityState={{ expanded: detailExpanded }} onPress={() => setExpandedTrainingSubmission(detailExpanded ? null : detail.submission.id)} style={styles.trainingSubmissionOpen}>
+                      <Pressable accessibilityRole="button" accessibilityState={{ expanded: detailExpanded }} onPress={() => {
+                        setExpandedTrainingSubmission(detailExpanded ? null : detail.submission.id);
+                        setFocusedTrainingAnnotation(detailExpanded ? null : detail.annotations[0]?.id ?? null);
+                      }} style={styles.trainingSubmissionOpen}>
                         <View style={styles.detectionCopy}><Text style={styles.trainingSelectionTitle}>{labels.join(" · ")}</Text><Text style={styles.detectionMeta}>Submission #{detail.submission.id} · {detail.annotations.length} annotation{detail.annotations.length === 1 ? "" : "s"}</Text></View>
                         <Ionicons name={detailExpanded ? "chevron-up" : "chevron-down"} size={18} color={colors.textMuted} />
                       </Pressable>
-                      {detailExpanded ? <View style={styles.trainingSubmissionPreview}><Image source={{ uri: getScanImageUrl(detail.submission.scan_id) }} style={[styles.trainingPreviewImage, { aspectRatio: detail.submission.image_width / detail.submission.image_height }]} resizeMode="contain" />{detail.annotations.map((annotation) => <View key={annotation.id} style={styles.quarantineAnnotation}><Text style={styles.annotationTitle}>{contributionProductLabel(annotation)}</Text><Text style={styles.annotationDetail}>{actionTitle(annotation.action)}</Text></View>)}</View> : null}
+                      {detailExpanded ? <AnnotationSubmissionPreview detail={detail} focusedAnnotationId={focusedTrainingAnnotation} onFocusAnnotation={setFocusedTrainingAnnotation} /> : null}
                     </View>;
                   })}</View> : null}
                 </View>;
@@ -1533,14 +1594,16 @@ export default function TeachFridgeScreen() {
         <View style={styles.sheetBackdrop}>
           <View style={styles.sheet}>
             <View style={styles.imageHeader}>
-              <View><Text style={styles.imageTitle}>Quarantine</Text><Text style={styles.imageSubtitle}>{quarantinedSubmissions.length} submission{quarantinedSubmissions.length === 1 ? "" : "s"} excluded · {selectedQuarantineSubmissions.size} selected</Text></View>
+              <View><Text style={styles.imageTitle}>Quarantine</Text><Text style={styles.imageSubtitle}>{activeQuarantinedSubmissions.length} active · {archivedQuarantineCount} archived · {selectedQuarantineSubmissions.size} selected</Text></View>
               <Pressable accessibilityLabel="Close quarantine" onPress={() => setShowQuarantine(false)} hitSlop={10}><Ionicons name="close" size={27} color={colors.navy} /></Pressable>
             </View>
 
-            {quarantinedSubmissions.length ? <View style={styles.selectionControls}>
-              <Text style={styles.selectionAvailable}>Select submissions to restore for the next training run</Text>
+            <View style={styles.archiveToggleRow}><View style={styles.detectionCopy}><Text style={styles.selectionAvailable}>Show archived</Text><Text style={styles.archiveToggleHint}>Archived items remain quarantined and excluded from training.</Text></View><Switch accessibilityLabel="Show archived quarantined submissions" value={showArchivedQuarantine} onValueChange={setShowArchivedQuarantine} trackColor={{ false: colors.border, true: colors.primarySoft }} thumbColor={showArchivedQuarantine ? colors.primary : colors.textMuted} /></View>
+
+            {activeQuarantinedSubmissions.length ? <View style={styles.selectionControls}>
+              <Text style={styles.selectionAvailable}>Select submissions to return to training</Text>
               <View style={styles.selectionControlButtons}>
-                <Pressable accessibilityRole="button" onPress={() => setSelectedQuarantineSubmissions(new Set(quarantinedSubmissions.map((detail) => detail.submission.id)))} style={styles.selectionControl}><Text style={styles.selectionControlText}>Select all</Text></Pressable>
+                <Pressable accessibilityRole="button" onPress={() => setSelectedQuarantineSubmissions(new Set(activeQuarantinedSubmissions.map((detail) => detail.submission.id)))} style={styles.selectionControl}><Text style={styles.selectionControlText}>Select all</Text></Pressable>
                 <Pressable accessibilityRole="button" disabled={selectedQuarantineSubmissions.size === 0} onPress={() => setSelectedQuarantineSubmissions(new Set())} style={styles.selectionControl}><Text style={[styles.selectionControlText, selectedQuarantineSubmissions.size === 0 && styles.selectionControlDisabled]}>Clear</Text></Pressable>
               </View>
             </View> : null}
@@ -1551,12 +1614,13 @@ export default function TeachFridgeScreen() {
               {quarantineLabelGroups.length ? quarantineLabelGroups.map((group) => {
                 const expanded = expandedQuarantineLabel === group.label;
                 const groupIds = [...new Set(group.submissions.map((detail) => detail.submission.id))];
-                const selectedCount = groupIds.filter((id) => selectedQuarantineSubmissions.has(id)).length;
-                const allSelected = groupIds.length > 0 && selectedCount === groupIds.length;
+                const selectableGroupIds = [...new Set(group.submissions.filter((detail) => !detail.submission.archived_at).map((detail) => detail.submission.id))];
+                const selectedCount = selectableGroupIds.filter((id) => selectedQuarantineSubmissions.has(id)).length;
+                const allSelected = selectableGroupIds.length > 0 && selectedCount === selectableGroupIds.length;
                 return <View key={group.label} style={styles.trainingGroup}>
                   <View style={styles.trainingGroupRow}>
-                    <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: allSelected }} accessibilityLabel={`Select all quarantined ${group.label} submissions`} onPress={() => toggleQuarantineGroup(group.submissions)} hitSlop={8}>
-                      <Ionicons name={allSelected ? "checkbox" : selectedCount ? "remove-circle" : "square-outline"} size={25} color={selectedCount ? colors.primary : colors.textMuted} />
+                    <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: allSelected, disabled: selectableGroupIds.length === 0 }} accessibilityLabel={`Select all active quarantined ${group.label} submissions`} disabled={selectableGroupIds.length === 0} onPress={() => toggleQuarantineGroup(group.submissions)} hitSlop={8}>
+                      <Ionicons name={allSelected ? "checkbox" : selectedCount ? "remove-circle" : selectableGroupIds.length ? "square-outline" : "lock-closed-outline"} size={25} color={selectedCount ? colors.primary : colors.textMuted} />
                     </Pressable>
                     <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpandedQuarantineLabel(expanded ? null : group.label)} style={styles.trainingGroupOpen}>
                       <View style={styles.quarantineGroupIcon}><Ionicons name="archive-outline" size={19} color={colors.danger} /></View>
@@ -1568,66 +1632,32 @@ export default function TeachFridgeScreen() {
                   {expanded ? <View style={styles.trainingDrilldown}>{group.submissions.map((detail) => {
                     const submissionExpanded = expandedQuarantineSubmission === detail.submission.id;
                     const selected = selectedQuarantineSubmissions.has(detail.submission.id);
+                    const archived = Boolean(detail.submission.archived_at);
                     const labels = [...new Set(detail.annotations.map(contributionProductLabel))];
-                    return <View key={detail.submission.id} style={[styles.quarantineSubmission, selected && styles.trainingSelectionRowSelected]}>
+                    return <View key={detail.submission.id} style={[styles.quarantineSubmission, selected && styles.trainingSelectionRowSelected, archived && styles.quarantineSubmissionArchived]}>
                       <View style={styles.quarantineSubmissionRow}>
-                        <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: selected }} accessibilityLabel={`Select submission ${detail.submission.id}`} onPress={() => toggleQuarantineGroup([detail])} hitSlop={8}>
-                          <Ionicons name={selected ? "checkbox" : "square-outline"} size={23} color={selected ? colors.primary : colors.textMuted} />
+                        <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: selected, disabled: archived }} accessibilityLabel={archived ? `Archived submission ${detail.submission.id} cannot be selected` : `Select submission ${detail.submission.id}`} disabled={archived} onPress={() => toggleQuarantineGroup([detail])} hitSlop={8}>
+                          <Ionicons name={archived ? "lock-closed-outline" : selected ? "checkbox" : "square-outline"} size={23} color={selected ? colors.primary : colors.textMuted} />
                         </Pressable>
                         <Pressable accessibilityRole="button" accessibilityState={{ expanded: submissionExpanded }} onPress={() => {
                           setExpandedQuarantineSubmission(submissionExpanded ? null : detail.submission.id);
                           setFocusedQuarantineAnnotation(submissionExpanded ? null : detail.annotations[0]?.id ?? null);
                         }} style={styles.trainingGroupOpen}>
-                          <View style={styles.detectionCopy}><Text style={styles.trainingSelectionTitle}>Submission #{detail.submission.id}</Text><Text style={styles.detectionMeta}>{labels.join(" · ")} · {detail.annotations.length} annotation{detail.annotations.length === 1 ? "" : "s"}</Text></View>
+                          <View style={styles.detectionCopy}><View style={styles.quarantineSubmissionTitleRow}><Text style={styles.trainingSelectionTitle}>Submission #{detail.submission.id}</Text>{archived ? <StatusBadge label="ARCHIVED" tone="info" /> : null}</View><Text style={styles.detectionMeta}>{labels.join(" · ")} · {detail.annotations.length} annotation{detail.annotations.length === 1 ? "" : "s"}</Text></View>
                           <Ionicons name={submissionExpanded ? "chevron-up" : "chevron-down"} size={18} color={colors.textMuted} />
                         </Pressable>
                       </View>
 
-                      {submissionExpanded ? (() => {
-                        const annotationDetections = detail.annotations.map(annotationDetection);
-                        const drawableDetections = annotationDetections.filter((detection) => hasDrawableBox(detection, detail.submission.image_width, detail.submission.image_height));
-                        const missingBoxCount = annotationDetections.length - drawableDetections.length;
-                        return <View style={styles.quarantineDetails}>
-                          <DetectionImageViewer
-                            imageUri={getScanImageUrl(detail.submission.scan_id)}
-                            imageWidth={detail.submission.image_width}
-                            imageHeight={detail.submission.image_height}
-                            detections={drawableDetections}
-                            highlightedDetectionId={focusedQuarantineAnnotation}
-                            showLabels={false}
-                            style={[styles.quarantineImage, { aspectRatio: detail.submission.image_width / detail.submission.image_height }]}
-                          />
-                          {missingBoxCount ? <Text style={styles.quarantineBoxNotice}>{missingBoxCount} annotation{missingBoxCount === 1 ? " has" : "s have"} no drawable box.</Text> : null}
-                          {detail.annotations.map((annotation) => {
-                            const focused = focusedQuarantineAnnotation === annotation.id;
-                            const drawable = drawableDetections.some((detection) => detection.id === annotation.id);
-                            return <Pressable
-                              key={annotation.id}
-                              accessibilityRole="radio"
-                              accessibilityState={{ checked: focused }}
-                              accessibilityLabel={`Focus annotation ${annotation.id}`}
-                              onPress={() => setFocusedQuarantineAnnotation(annotation.id)}
-                              style={[styles.quarantineAnnotation, focused && styles.quarantineAnnotationFocused]}
-                            >
-                              <View style={styles.quarantineAnnotationHeader}>
-                                <Text style={styles.annotationTitle}>{contributionProductLabel(annotation)}</Text>
-                                {focused ? <Ionicons name="locate" size={18} color={colors.amber} /> : null}
-                              </View>
-                              <Text style={styles.annotationDetail}>{actionTitle(annotation.action)} · Annotation #{annotation.id}{drawable ? "" : " · Box unavailable"}</Text>
-                            </Pressable>;
-                          })}
-                          <View style={styles.quarantineActions}><View style={styles.detectionAction}><AppButton label="Reject permanently" variant="danger" icon="close-circle-outline" disabled={quarantineMutation !== null} onPress={() => confirmPermanentQuarantineRejection(detail.submission.id)} /></View><View style={styles.detectionAction}><AppButton label="Restore this" icon="refresh-outline" loading={quarantineMutation === detail.submission.id} disabled={quarantineMutation !== null} onPress={() => applyQuarantineAction(detail.submission.id, "restore")} /></View></View>
-                        </View>;
-                      })() : null}
+                      {submissionExpanded ? <View style={styles.quarantineDetails}><AnnotationSubmissionPreview detail={detail} focusedAnnotationId={focusedQuarantineAnnotation} onFocusAnnotation={setFocusedQuarantineAnnotation} /><AppButton label={archived ? "Unarchive" : "Archive"} icon={archived ? "arrow-up-circle-outline" : "archive-outline"} variant="secondary" loading={quarantineMutation === detail.submission.id} disabled={quarantineMutation !== null} onPress={() => applyQuarantineAction(detail.submission.id, archived ? "unarchive" : "archive")} /></View> : null}
                     </View>;
                   })}</View> : null}
                 </View>;
-              }) : <EmptyState icon="shield-checkmark-outline" title="Nothing quarantined" message="Rejected candidate data will appear here." />}
+              }) : <EmptyState icon="shield-checkmark-outline" title={archivedQuarantineCount && !showArchivedQuarantine ? "No active quarantine items" : "Nothing quarantined"} message={archivedQuarantineCount && !showArchivedQuarantine ? "Turn on Show archived to inspect archived submissions." : "Rejected candidate data will appear here."} />}
             </ScrollView>
 
-            {quarantinedSubmissions.length ? <AppButton label={`Restore ${selectedQuarantineSubmissions.size} selected`} icon="refresh-outline" loading={quarantineMutation === -1} disabled={quarantineMutation !== null || selectedQuarantineSubmissions.size === 0} onPress={restoreSelectedQuarantinedSubmissions} /> : null}
+            {activeQuarantinedSubmissions.length ? <AppButton label={`Return ${selectedQuarantineSubmissions.size} to training`} icon="refresh-outline" loading={quarantineMutation === -1} disabled={quarantineMutation !== null || selectedQuarantineSubmissions.size === 0} onPress={returnSelectedQuarantinedSubmissionsToTraining} /> : null}
             <AppButton label="Continue to Train Model" icon="school-outline" variant="secondary" disabled={Boolean(progressStats?.latest_candidate)} onPress={returnToTrainingSelection} />
-            {progressStats?.latest_candidate ? <Text style={styles.actionHint}>Training will unlock after the current candidate is resolved. Your quarantine selections can be restored now.</Text> : null}
+            {progressStats?.latest_candidate ? <Text style={styles.actionHint}>Training will unlock after the current candidate is resolved. Your quarantine selections can be returned to training now.</Text> : null}
           </View>
         </View>
       </Modal>
@@ -2039,12 +2069,14 @@ const styles = StyleSheet.create({
   quarantineCard: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, overflow: "hidden" },
   quarantineRow: { minHeight: 64, flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.md, backgroundColor: colors.surface },
   quarantineDetails: { gap: spacing.sm, padding: spacing.md, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surfaceMuted },
+  annotationSubmissionPreview: { width: "100%", gap: spacing.sm },
   quarantineImage: { width: "100%", maxHeight: 260, borderRadius: radius.lg, backgroundColor: colors.border },
   quarantineAnnotation: { padding: spacing.sm, borderRadius: radius.md, backgroundColor: colors.surface, borderWidth: 2, borderColor: "transparent" },
   quarantineAnnotationFocused: { borderColor: colors.amber },
   quarantineAnnotationHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.sm },
   quarantineBoxNotice: { color: colors.textMuted, fontSize: 12, fontWeight: "700" },
-  quarantineActions: { flexDirection: "row", gap: spacing.sm, marginTop: spacing.xs },
+  archiveToggleRow: { minHeight: 52, flexDirection: "row", alignItems: "center", gap: spacing.md, paddingHorizontal: spacing.sm, borderRadius: radius.lg, backgroundColor: colors.surfaceMuted },
+  archiveToggleHint: { color: colors.textMuted, fontSize: 11, lineHeight: 16, marginTop: 2 },
   modelCardHeader: { flexDirection: "row", alignItems: "flex-start", gap: spacing.md },
   modelDisplayName: { color: colors.navy, fontSize: 20, lineHeight: 25, fontWeight: "900" },
   modelVersionCompact: { color: colors.textMuted, fontSize: 12, lineHeight: 17, fontWeight: "700" },
@@ -2073,12 +2105,12 @@ const styles = StyleSheet.create({
   quickActionTitleDanger: { color: colors.danger },
   quickActionMeta: { color: colors.textMuted, fontSize: 11, marginTop: 2 },
   trainingSubmissionOpen: { flex: 1, flexDirection: "row", alignItems: "center", gap: spacing.sm },
-  trainingSubmissionPreview: { width: "100%", gap: spacing.sm, paddingTop: spacing.sm },
-  trainingPreviewImage: { width: "100%", maxHeight: 240, borderRadius: radius.md, backgroundColor: colors.border },
   quarantineGroupRow: { minHeight: 62, flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.md, backgroundColor: colors.surface },
   quarantineGroupIcon: { width: 34, height: 34, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: colors.dangerBg },
   quarantineSubmission: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, overflow: "hidden", backgroundColor: colors.surface },
+  quarantineSubmissionArchived: { opacity: 0.82, backgroundColor: colors.surfaceMuted },
   quarantineSubmissionRow: { minHeight: 56, flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.sm },
+  quarantineSubmissionTitleRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: spacing.xs },
   imageBackdrop: { flex: 1, backgroundColor: "rgba(15, 23, 42, 0.72)", alignItems: "center", justifyContent: "center", padding: spacing.lg },
   imageModal: { width: "100%", maxWidth: 520, backgroundColor: colors.surface, borderRadius: radius.xl, padding: spacing.lg, gap: spacing.md },
   imageHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.md },
