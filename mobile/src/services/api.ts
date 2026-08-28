@@ -319,7 +319,8 @@ export async function getAnnotationSubmissions(status?: AnnotationStatus, includ
   const params = new URLSearchParams();
   if (status) params.set("status", status);
   if (includeArchived) params.set("include_archived", "true");
-  const query = params.size ? `?${params.toString()}` : "";
+  const serializedParams = params.toString();
+  const query = serializedParams ? `?${serializedParams}` : "";
   const res = await fetch(`${API_BASE_URL}/annotation-submissions${query}`);
   return handleJsonResponse<AnnotationSubmission[]>(res);
 }
