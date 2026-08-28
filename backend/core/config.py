@@ -16,6 +16,10 @@ def _probability_setting(name: str, default: str) -> float:
         raise ValueError(f"{name} must be finite and between 0 and 1")
     return value
 
+
+def _training_setting(name: str, legacy_name: str, default: str) -> str:
+    return os.getenv(name, os.getenv(legacy_name, default))
+
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -40,8 +44,21 @@ KAGGLE_KERNEL_SLUG = os.getenv("KAGGLE_KERNEL_SLUG", "").strip()
 KAGGLE_MACHINE_SHAPE = os.getenv(
     "KAGGLE_MACHINE_SHAPE", DEFAULT_KAGGLE_MACHINE_SHAPE
 ).strip()
-KAGGLE_STARTING_WEIGHTS_PATH = Path(os.getenv("KAGGLE_STARTING_WEIGHTS_PATH", str(BACKEND_DIR / "yolo11s.pt")))
-KAGGLE_STARTING_MODEL_VERSION = os.getenv("KAGGLE_STARTING_MODEL_VERSION", "yolo11s-pretrained").strip()
+TRAINING_STARTING_WEIGHTS_PATH = Path(
+    _training_setting(
+        "TRAINING_STARTING_WEIGHTS_PATH",
+        "KAGGLE_STARTING_WEIGHTS_PATH",
+        str(BACKEND_DIR / "yolo11s.pt"),
+    )
+)
+TRAINING_STARTING_MODEL_VERSION = _training_setting(
+    "TRAINING_STARTING_MODEL_VERSION",
+    "KAGGLE_STARTING_MODEL_VERSION",
+    "yolo11s-pretrained",
+).strip()
+# Compatibility aliases for deployments that still import the old Kaggle-specific names.
+KAGGLE_STARTING_WEIGHTS_PATH = TRAINING_STARTING_WEIGHTS_PATH
+KAGGLE_STARTING_MODEL_VERSION = TRAINING_STARTING_MODEL_VERSION
 KAGGLE_CLI_PATH = os.getenv("KAGGLE_CLI_PATH", "kaggle").strip()
 KAGGLE_POLL_INTERVAL_SECONDS = int(os.getenv("KAGGLE_POLL_INTERVAL_SECONDS", "30"))
 KAGGLE_TIMEOUT_SECONDS = int(os.getenv("KAGGLE_TIMEOUT_SECONDS", "14400"))

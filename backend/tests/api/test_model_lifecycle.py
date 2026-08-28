@@ -87,6 +87,10 @@ def lifecycle_context(
     active_path = root / "active.pt"
     active_path.write_bytes(b"deterministic-fake-active-weights")
     active_hash = hashlib.sha256(active_path.read_bytes()).hexdigest()
+    foundation_path = root / "foundation.pt"
+    foundation_path.write_bytes(b"deterministic-fake-foundation-weights")
+    foundation_hash = hashlib.sha256(foundation_path.read_bytes()).hexdigest()
+    foundation_version = "yolo11s-pretrained"
 
     with db_connection.cursor() as cursor:
         cursor.execute(
@@ -106,6 +110,8 @@ def lifecycle_context(
     monkeypatch.setattr(runtime.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(providers, "DATABASE_URL", test_database_url)
     monkeypatch.setattr(providers, "BACKEND_DIR", root)
+    monkeypatch.setattr(providers, "TRAINING_STARTING_WEIGHTS_PATH", foundation_path)
+    monkeypatch.setattr(providers, "TRAINING_STARTING_MODEL_VERSION", foundation_version)
     monkeypatch.setattr(
         providers,
         "_prepare_local_combined_dataset",
@@ -131,6 +137,9 @@ def lifecycle_context(
         active_version=active_version,
         active_path=active_path,
         active_hash=active_hash,
+        foundation_path=foundation_path,
+        foundation_hash=foundation_hash,
+        foundation_version=foundation_version,
         database_url=test_database_url,
     )
 
@@ -480,9 +489,9 @@ def test_successful_training_records_eligibility_provenance_and_candidate(
         assert cursor.fetchone() == (2, 2)
 
     assert run["dataset_version"] == dataset_version
-    assert run["starting_model_version"] == lifecycle_context.active_version
-    assert Path(run["starting_weights_path"]) == lifecycle_context.active_path
-    assert run["starting_weights_sha256"] == lifecycle_context.active_hash
+    assert run["starting_model_version"] == lifecycle_context.foundation_version
+    assert Path(run["starting_weights_path"]) == lifecycle_context.foundation_path
+    assert run["starting_weights_sha256"] == lifecycle_context.foundation_hash
     assert run["training_parameters"] == {
         "epochs": 30,
         "imgsz": 640,
@@ -492,6 +501,7 @@ def test_successful_training_records_eligibility_provenance_and_candidate(
         "patience": 10,
         "seed": 0,
         "deterministic": True,
+        "comparison_active_model_version": lifecycle_context.active_version,
     }
     assert run["status"] == "completed"
     assert run["ended_at"] is not None
@@ -1807,6 +1817,16 @@ def test_rollback_released_submission_can_be_selected_again_without_losing_prove
             (submission_id,),
         )
         current_state = cursor.fetchone()[0]
+        cursor.execute(
+            """
+            SELECT starting_weights_path, starting_model_version,
+                   starting_weights_sha256,
+                   training_parameters->>'comparison_active_model_version'
+            FROM training_runs WHERE id = %s;
+            """,
+            (second_run_id,),
+        )
+        second_run_provenance = cursor.fetchone()
     assert set(usages) == {first_run_id, second_run_id}
     assert {value[0] for value in usages.values()} == {
         first_version,
@@ -1815,6 +1835,12 @@ def test_rollback_released_submission_can_be_selected_again_without_losing_prove
     assert {value[1] for value in usages.values()} == {True}
     assert annotation_run_ids == {first_run_id, second_run_id}
     assert current_state == "experimental"
+    assert second_run_provenance == (
+        str(lifecycle_context.foundation_path),
+        lifecycle_context.foundation_version,
+        lifecycle_context.foundation_hash,
+        lifecycle_context.active_version,
+    )
 
 
 def test_rejected_candidate_quarantines_only_its_experimental_batch(

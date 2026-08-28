@@ -9,7 +9,7 @@ import train_yolo_candidate as trainer
 
 class FakeTrainingModel:
     task = "detect"
-    names = {0: "apple", 1: "banana", 2: "milk"}
+    names = {0: "person", 1: "car"}
 
     def __init__(self, best_path: Path):
         self.best_path = best_path
@@ -29,12 +29,19 @@ class FakeCandidateModel:
         raise AssertionError("an invalid candidate must not be evaluated")
 
 
+class FakeActiveModel:
+    task = "detect"
+    names = {0: "apple", 1: "banana", 2: "milk"}
+
+
 class CandidateClassPreservationTests(unittest.TestCase):
     def test_combined_dataset_missing_active_class_is_rejected_before_training(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             active = root / "active.pt"
             active.write_bytes(b"unchanged-active-model")
+            foundation = root / "foundation.pt"
+            foundation.write_bytes(b"unchanged-foundation-model")
             data_yaml = root / "data.yaml"
             data_yaml.write_text(
                 "nc: 3\nnames:\n  0: apple\n  1: milk\n  2: lemon\n",
@@ -46,7 +53,10 @@ class CandidateClassPreservationTests(unittest.TestCase):
             args = SimpleNamespace(
                 dataset_dir=root,
                 dataset_version="invalid-combined-v1",
-                starting_weights=active,
+                starting_weights=foundation,
+                starting_model_version="foundation-v1",
+                active_model=active,
+                active_model_version="active-v1",
                 output_root=root / "candidates",
                 database_url="postgresql://unused/test",
                 epochs=1,
@@ -59,7 +69,6 @@ class CandidateClassPreservationTests(unittest.TestCase):
                 verbose=False,
             )
             with (
-                patch.object(trainer, "active_model_version", return_value="active-v1"),
                 patch.object(trainer, "create_training_run"),
                 patch.object(trainer, "complete_training_run") as complete,
                 patch.object(trainer, "fail_training_run", fail),
@@ -68,7 +77,11 @@ class CandidateClassPreservationTests(unittest.TestCase):
                     "validate_dataset",
                     return_value=({"content_sha256": "dataset-hash"}, data_yaml),
                 ),
-                patch.object(trainer, "YOLO", return_value=training_model),
+                patch.object(
+                    trainer,
+                    "YOLO",
+                    side_effect=[training_model, FakeActiveModel()],
+                ),
             ):
                 with self.assertRaisesRegex(ValueError, "banana"):
                     trainer.train_candidate(args)
@@ -77,12 +90,15 @@ class CandidateClassPreservationTests(unittest.TestCase):
             complete.assert_not_called()
             fail.assert_called_once()
             self.assertEqual(active.read_bytes(), b"unchanged-active-model")
+            self.assertEqual(foundation.read_bytes(), b"unchanged-foundation-model")
 
     def test_candidate_missing_active_class_is_not_registered(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             active = root / "active.pt"
             active.write_bytes(b"unchanged-active-model")
+            foundation = root / "foundation.pt"
+            foundation.write_bytes(b"unchanged-foundation-model")
             data_yaml = root / "data.yaml"
             data_yaml.write_text(
                 "nc: 4\nnames:\n  0: lemon\n  1: MILK\n  2: Apple\n  3: Banana\n",
@@ -96,7 +112,10 @@ class CandidateClassPreservationTests(unittest.TestCase):
             args = SimpleNamespace(
                 dataset_dir=root,
                 dataset_version="combined-v1",
-                starting_weights=active,
+                starting_weights=foundation,
+                starting_model_version="foundation-v1",
+                active_model=active,
+                active_model_version="active-v1",
                 output_root=root / "candidates",
                 database_url="postgresql://unused/test",
                 epochs=1,
@@ -110,7 +129,6 @@ class CandidateClassPreservationTests(unittest.TestCase):
             )
 
             with (
-                patch.object(trainer, "active_model_version", return_value="active-v1"),
                 patch.object(trainer, "create_training_run"),
                 patch.object(trainer, "complete_training_run", complete),
                 patch.object(trainer, "fail_training_run", fail),
@@ -120,7 +138,9 @@ class CandidateClassPreservationTests(unittest.TestCase):
                     return_value=({"content_sha256": "dataset-hash"}, data_yaml),
                 ),
                 patch.object(
-                    trainer, "YOLO", side_effect=[training_model, candidate_model]
+                    trainer,
+                    "YOLO",
+                    side_effect=[training_model, FakeActiveModel(), candidate_model],
                 ),
             ):
                 with self.assertRaisesRegex(ValueError, "banana, milk"):
@@ -132,6 +152,7 @@ class CandidateClassPreservationTests(unittest.TestCase):
             self.assertEqual(failed_summary["status"], "failed")
             self.assertIn("banana, milk", failed_summary["error"]["message"])
             self.assertEqual(active.read_bytes(), b"unchanged-active-model")
+            self.assertEqual(foundation.read_bytes(), b"unchanged-foundation-model")
             self.assertFalse(any((root / "candidates").rglob("candidate.pt")))
 
 

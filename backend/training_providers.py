@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
+import hashlib
 import importlib.util
+import json
 import math
 import os
 import re
@@ -26,15 +27,15 @@ try:
     from core.config import (
         BACKEND_DIR, DATABASE_URL, KAGGLE_API_TOKEN, KAGGLE_CLI_PATH, KAGGLE_COMMAND_TIMEOUT_SECONDS, LOCAL_BASE_DATASET_PATH,
         KAGGLE_DATASET_SLUG_PREFIX, KAGGLE_KERNEL_SLUG, KAGGLE_KEY, KAGGLE_MACHINE_SHAPE,
-        KAGGLE_POLL_INTERVAL_SECONDS, KAGGLE_STARTING_MODEL_VERSION, KAGGLE_STARTING_WEIGHTS_PATH,
-        KAGGLE_TIMEOUT_SECONDS, KAGGLE_USERNAME,
+        KAGGLE_POLL_INTERVAL_SECONDS, KAGGLE_TIMEOUT_SECONDS, KAGGLE_USERNAME,
+        TRAINING_STARTING_MODEL_VERSION, TRAINING_STARTING_WEIGHTS_PATH,
     )
 except ModuleNotFoundError:
     from backend.core.config import (
         BACKEND_DIR, DATABASE_URL, KAGGLE_API_TOKEN, KAGGLE_CLI_PATH, KAGGLE_COMMAND_TIMEOUT_SECONDS, LOCAL_BASE_DATASET_PATH,
         KAGGLE_DATASET_SLUG_PREFIX, KAGGLE_KERNEL_SLUG, KAGGLE_KEY, KAGGLE_MACHINE_SHAPE,
-        KAGGLE_POLL_INTERVAL_SECONDS, KAGGLE_STARTING_MODEL_VERSION, KAGGLE_STARTING_WEIGHTS_PATH,
-        KAGGLE_TIMEOUT_SECONDS, KAGGLE_USERNAME,
+        KAGGLE_POLL_INTERVAL_SECONDS, KAGGLE_TIMEOUT_SECONDS, KAGGLE_USERNAME,
+        TRAINING_STARTING_MODEL_VERSION, TRAINING_STARTING_WEIGHTS_PATH,
     )
 
 Progress = Callable[..., None]
@@ -50,6 +51,28 @@ class KaggleForbiddenError(ProviderError):
     """Kaggle denied a request; newly-created private resources may do this briefly."""
 
     pass
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _training_foundation(active: dict[str, Any]) -> dict[str, Any]:
+    starting_weights = TRAINING_STARTING_WEIGHTS_PATH.resolve()
+    if not TRAINING_STARTING_MODEL_VERSION:
+        raise ProviderError("TRAINING_STARTING_MODEL_VERSION must not be empty")
+    if not starting_weights.is_file() or starting_weights.stat().st_size == 0:
+        raise ProviderError(f"Configured pretrained detector weights are unavailable: {starting_weights}")
+    if starting_weights == active["resolved_path"]:
+        raise ProviderError("Training starting weights must be pretrained detector weights, not the active application model")
+    return {
+        "resolved_path": starting_weights,
+        "version": TRAINING_STARTING_MODEL_VERSION,
+    }
 
 
 def _kernel_metadata(
@@ -321,13 +344,16 @@ def local_training(
     from train_yolo_candidate import train_candidate
     dataset_dir, export_summary = _export(job_id, selected_submission_ids)
     active = _active_model()
+    foundation = _training_foundation(active)
     progress(phase="combining_local_dataset", dataset_version=export_summary["dataset_version"])
     dataset_dir = _prepare_local_combined_dataset(
         dataset_dir, export_summary["dataset_version"]
     )
     progress(phase="training_local", dataset_version=export_summary["dataset_version"])
     args = SimpleNamespace(
-        dataset_dir=dataset_dir, dataset_version=export_summary["dataset_version"], starting_weights=active["resolved_path"],
+        dataset_dir=dataset_dir, dataset_version=export_summary["dataset_version"],
+        starting_weights=foundation["resolved_path"], starting_model_version=foundation["version"],
+        active_model=active["resolved_path"], active_model_version=active["version"],
         output_root=BACKEND_DIR / "candidate_models", database_url=DATABASE_URL,
         epochs=int(os.getenv("MODEL_TRAIN_EPOCHS", "30")), imgsz=int(os.getenv("MODEL_TRAIN_IMGSZ", "640")),
         batch=int(os.getenv("MODEL_TRAIN_BATCH", "8")), device=os.getenv("MODEL_TRAIN_DEVICE", "cpu"),
@@ -487,12 +513,13 @@ def _release_remote_training_lock(connection) -> None:
 
 
 def _write_training_record(run_id: str, dataset_version: str, starting_weights: Path, starting_model_version: str, parameters: dict[str, Any]):
+    starting_weights_sha256 = _file_sha256(starting_weights)
     with psycopg2.connect(DATABASE_URL) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                """INSERT INTO training_runs(id,dataset_version,starting_weights_path,starting_model_version,training_parameters,status)
-                   VALUES (%s,%s,%s,%s,%s,'running');""",
-                (run_id, dataset_version, str(starting_weights), starting_model_version, Json(parameters)),
+                """INSERT INTO training_runs(id,dataset_version,starting_weights_path,starting_model_version,starting_weights_sha256,training_parameters,status)
+                   VALUES (%s,%s,%s,%s,%s,%s,'running');""",
+                (run_id, dataset_version, str(starting_weights), starting_model_version, starting_weights_sha256, Json(parameters)),
             )
 
 
@@ -546,8 +573,16 @@ def _register_remote(
         raise ProviderError("Remote comparison used a different active model")
     if comparison.get("candidate_model", {}).get("version") != candidate_version:
         raise ProviderError("Remote comparison candidate version mismatch")
-    if training.get("starting_model", {}).get("version") != KAGGLE_STARTING_MODEL_VERSION:
+    if training.get("starting_model", {}).get("version") != TRAINING_STARTING_MODEL_VERSION:
         raise ProviderError("Remote candidate used unexpected starting weights")
+    if training.get("starting_model", {}).get("sha256") != _file_sha256(
+        TRAINING_STARTING_WEIGHTS_PATH.resolve()
+    ):
+        raise ProviderError("Remote candidate starting-weights hash mismatch")
+    if training.get("active_model_for_comparison", {}).get("sha256") != _file_sha256(
+        active["resolved_path"]
+    ):
+        raise ProviderError("Remote comparison active-model hash mismatch")
     if manifest.get("base_dataset_slug") != f"{KAGGLE_USERNAME}/{KAGGLE_DATASET_SLUG_PREFIX}":
         raise ProviderError("Remote run used an unexpected base dataset")
     combined = manifest.get("combined_dataset") or {}
@@ -688,11 +723,8 @@ def kaggle_training(
         dataset_dir, export_summary = _export(job_id, selected_submission_ids)
         dataset_version = export_summary["dataset_version"]
         active = _active_model()
-        starting_weights = KAGGLE_STARTING_WEIGHTS_PATH.resolve()
-        if not starting_weights.is_file() or starting_weights.stat().st_size == 0:
-            raise ProviderError(f"Configured pretrained detector weights are unavailable: {starting_weights}")
-        if starting_weights == active["resolved_path"]:
-            raise ProviderError("Kaggle starting weights must be pretrained detector weights, not the active application model")
+        foundation = _training_foundation(active)
+        starting_weights = foundation["resolved_path"]
         candidate_version = f"fridge9000-detector-{run_id}"
         parameters = {
             "provider": "kaggle", "epochs": int(os.getenv("MODEL_TRAIN_EPOCHS", "30")),
@@ -702,7 +734,7 @@ def kaggle_training(
             "base_dataset_slug": f"{KAGGLE_USERNAME}/{KAGGLE_DATASET_SLUG_PREFIX}",
             "comparison_active_model_version": active["version"],
         }
-        _write_training_record(run_id, dataset_version, starting_weights, KAGGLE_STARTING_MODEL_VERSION, parameters)
+        _write_training_record(run_id, dataset_version, starting_weights, foundation["version"], parameters)
         record_created = True
         slug_suffix = re.sub(r"[^a-z0-9-]", "-", run_id.casefold()).strip("-")
         dataset_slug = _kaggle_resource_slug(KAGGLE_USERNAME, KAGGLE_DATASET_SLUG_PREFIX, slug_suffix)
@@ -721,7 +753,7 @@ def kaggle_training(
                 "training_run_id": run_id, "dataset_version": dataset_version,
                 "base_dataset_slug": f"{KAGGLE_USERNAME}/{KAGGLE_DATASET_SLUG_PREFIX}",
                 "active_model_version": active["version"], "candidate_model_version": candidate_version,
-                "starting_model_version": KAGGLE_STARTING_MODEL_VERSION,
+                "starting_model_version": foundation["version"],
                 **{key: parameters[key] for key in ("epochs", "imgsz", "batch", "seed", "patience", "workers", "train_fraction", "val_fraction", "test_fraction")},
                 "require_cuda": True,
             }

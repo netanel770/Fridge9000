@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 import psycopg2
-from psycopg2.extras import Json, RealDictCursor
+from psycopg2.extras import Json
 from ultralytics import YOLO
 
 try:
@@ -49,19 +49,6 @@ def write_json(path: Path, data: dict[str, Any]):
 def finite_metric(value: Any) -> float | None:
     number = float(value)
     return number if math.isfinite(number) else None
-
-
-def active_model_version(database_url: str, starting_weights: Path) -> str | None:
-    with psycopg2.connect(database_url) as connection:
-        with connection.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT version, model_path FROM model_versions WHERE status = 'active' LIMIT 1;")
-            active = cur.fetchone()
-    if not active:
-        return None
-    recorded_path = Path(active["model_path"])
-    if not recorded_path.is_absolute():
-        recorded_path = Path(__file__).resolve().parent / recorded_path
-    return active["version"] if recorded_path.resolve() == starting_weights.resolve() else None
 
 
 def create_training_run(database_url: str, run_id: str, summary: dict[str, Any], starting_model_version: str | None):
@@ -278,13 +265,15 @@ def train_candidate(args):
     if not re.fullmatch(r"[A-Za-z0-9._-]+", args.dataset_version):
         raise ValueError("dataset_version contains unsupported characters")
     dataset_dir = args.dataset_dir.resolve()
-    active_model = args.starting_weights.resolve()
+    starting_weights = args.starting_weights.resolve()
+    active_model = args.active_model.resolve()
     output_root = args.output_root.resolve()
     run_timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     run_id = f"train-{run_timestamp}-{uuid.uuid4().hex[:8]}"
     run_dir = output_root / args.dataset_version / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     summary_path = run_dir / "training_summary.json"
+    starting_hash_before = file_sha256(starting_weights) if starting_weights.is_file() else None
     active_hash_before = file_sha256(active_model) if active_model.is_file() else None
     parameters = {
         "epochs": args.epochs,
@@ -295,6 +284,7 @@ def train_candidate(args):
         "patience": args.patience,
         "seed": args.seed,
         "deterministic": True,
+        "comparison_active_model_version": args.active_model_version,
     }
     summary = {
         "status": "running",
@@ -303,8 +293,9 @@ def train_candidate(args):
         "dataset_version": args.dataset_version,
         "training_started_at": utc_now(),
         "training_completed_at": None,
-        "starting_weights": str(active_model),
-        "starting_weights_sha256": active_hash_before,
+        "starting_weights": str(starting_weights),
+        "starting_weights_sha256": starting_hash_before,
+        "starting_model_version": args.starting_model_version,
         "training_parameters": parameters,
         "candidate_model_path": None,
         "candidate_model_sha256": None,
@@ -319,20 +310,25 @@ def train_candidate(args):
     run_registered = False
 
     try:
-        starting_model_version = active_model_version(args.database_url, active_model)
-        summary["starting_model_version"] = starting_model_version
-        create_training_run(args.database_url, run_id, summary, starting_model_version)
+        create_training_run(args.database_url, run_id, summary, args.starting_model_version)
         run_registered = True
+        if not starting_weights.is_file():
+            raise FileNotFoundError(f"Starting weights not found: {starting_weights}")
         if not active_model.is_file():
-            raise FileNotFoundError(f"Starting weights not found: {active_model}")
+            raise FileNotFoundError(f"Active model not found: {active_model}")
+        if starting_weights == active_model:
+            raise ValueError("Starting weights must be separate from the active application model")
         manifest, data_yaml = validate_dataset(dataset_dir, args.dataset_version)
         summary["dataset_content_sha256"] = manifest.get("content_sha256")
         summary["included_submission_ids"] = manifest.get("included_submission_ids", [])
         summary["experimental_submission_ids"] = manifest.get("experimental_submission_ids")
-        model = YOLO(str(active_model))
+        model = YOLO(str(starting_weights))
         if model.task != "detect":
             raise ValueError(f"Starting weights must be an object-detection model, got task={model.task!r}")
-        active_classes = normalized_class_names(model.names, "active model")
+        active_detector = YOLO(str(active_model))
+        if active_detector.task != "detect":
+            raise ValueError(f"Active model must be an object-detection model, got task={active_detector.task!r}")
+        active_classes = normalized_class_names(active_detector.names, "active model")
         training_config = yaml.safe_load(data_yaml.read_text(encoding="utf-8")) or {}
         training_classes = normalized_class_names(
             training_config.get("names"), "combined training dataset"
@@ -362,8 +358,8 @@ def train_candidate(args):
         if not trained_best.is_file():
             raise RuntimeError("Ultralytics did not produce a best checkpoint")
         candidate_path = (run_dir / "candidate.pt").resolve()
-        if candidate_path == active_model:
-            raise RuntimeError("Candidate path resolved to the active model path")
+        if candidate_path in (starting_weights, active_model):
+            raise RuntimeError("Candidate path resolved to an input model path")
         shutil.copy2(trained_best, candidate_path)
 
         candidate = YOLO(str(candidate_path))
@@ -396,7 +392,9 @@ def train_candidate(args):
         summary["candidate_model_sha256"] = file_sha256(candidate_path)
         active_hash_after = file_sha256(active_model)
         if active_hash_before != active_hash_after:
-            raise RuntimeError("Active starting weights changed during candidate training")
+            raise RuntimeError("Active model changed during candidate training")
+        if starting_hash_before != file_sha256(starting_weights):
+            raise RuntimeError("Starting weights changed during candidate training")
         summary["active_model_sha256_after"] = active_hash_after
         summary["training_completed_at"] = utc_now()
         model_version = f"fridge9000-detector-{run_id}"
@@ -428,9 +426,13 @@ def train_candidate(args):
     finally:
         summary["training_completed_at"] = utc_now()
         summary["active_model_sha256_after"] = file_sha256(active_model) if active_model.is_file() else None
+        starting_hash_after = file_sha256(starting_weights) if starting_weights.is_file() else None
         if active_hash_before != summary["active_model_sha256_after"]:
             summary["status"] = "failed"
-            summary["error"] = {"type": "ActiveModelChanged", "message": "Active starting weights changed during candidate training"}
+            summary["error"] = {"type": "ActiveModelChanged", "message": "Active model changed during candidate training"}
+        if starting_hash_before != starting_hash_after:
+            summary["status"] = "failed"
+            summary["error"] = {"type": "StartingWeightsChanged", "message": "Starting weights changed during candidate training"}
         write_json(summary_path, summary)
 
 
@@ -439,7 +441,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-dir", required=True, type=Path)
     parser.add_argument("--dataset-version", required=True)
-    parser.add_argument("--starting-weights", type=Path, default=backend_root / "best.pt")
+    parser.add_argument("--starting-weights", type=Path, default=backend_root / "yolo11s.pt")
+    parser.add_argument("--starting-model-version", default="yolo11s-pretrained")
+    parser.add_argument("--active-model", required=True, type=Path)
+    parser.add_argument("--active-model-version", required=True)
     parser.add_argument("--output-root", type=Path, default=backend_root / "candidate_models")
     parser.add_argument("--database-url", default=os.getenv("DATABASE_URL", "postgresql://fridge:fridgepass@localhost:5432/fridge9000"))
     parser.add_argument("--epochs", type=int, default=30)

@@ -1,6 +1,7 @@
 import copy
 import json
 import math
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,10 +9,27 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, call, patch
 
 import training_providers as providers
-from core.config import DEFAULT_KAGGLE_MACHINE_SHAPE
+from core.config import DEFAULT_KAGGLE_MACHINE_SHAPE, _training_setting
 
 
 class TrainingProviderTests(unittest.TestCase):
+    def test_generic_training_setting_precedes_legacy_kaggle_fallback(self):
+        with patch.dict(
+            os.environ,
+            {"GENERIC_SETTING": "generic", "LEGACY_SETTING": "legacy"},
+            clear=False,
+        ):
+            self.assertEqual(
+                _training_setting("GENERIC_SETTING", "LEGACY_SETTING", "default"),
+                "generic",
+            )
+
+        with patch.dict(os.environ, {"LEGACY_SETTING": "legacy"}, clear=True):
+            self.assertEqual(
+                _training_setting("GENERIC_SETTING", "LEGACY_SETTING", "default"),
+                "legacy",
+            )
+
     def test_default_kaggle_machine_shape_is_tesla_t4(self):
         self.assertEqual(DEFAULT_KAGGLE_MACHINE_SHAPE, "NvidiaTeslaT4")
 
@@ -78,6 +96,25 @@ class TrainingProviderTests(unittest.TestCase):
         self.assertIs(providers.training_provider("kaggle"), providers.kaggle_training)
         with self.assertRaises(providers.ProviderError):
             providers.training_provider("unknown")
+
+    def test_training_foundation_is_provider_neutral_and_not_the_active_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            active = root / "active.pt"
+            active.write_bytes(b"active")
+            foundation = root / "foundation.pt"
+            foundation.write_bytes(b"foundation")
+            with (
+                patch.object(providers, "TRAINING_STARTING_WEIGHTS_PATH", foundation),
+                patch.object(providers, "TRAINING_STARTING_MODEL_VERSION", "foundation-v1"),
+            ):
+                result = providers._training_foundation(
+                    {"resolved_path": active, "version": "active-v1"}
+                )
+            self.assertEqual(
+                result,
+                {"resolved_path": foundation.resolve(), "version": "foundation-v1"},
+            )
 
     def test_missing_credentials_fail_without_command(self):
         with patch.object(providers, "KAGGLE_API_TOKEN", ""), patch.object(providers, "KAGGLE_USERNAME", ""), patch.object(providers, "KAGGLE_KEY", ""):
@@ -233,6 +270,8 @@ class TrainingProviderTests(unittest.TestCase):
             corrections.mkdir()
             active = root / "active.pt"
             active.write_bytes(b"active")
+            foundation = root / "foundation.pt"
+            foundation.write_bytes(b"foundation")
             with (
                 patch.object(
                     providers,
@@ -242,8 +281,9 @@ class TrainingProviderTests(unittest.TestCase):
                 patch.object(
                     providers,
                     "_active_model",
-                    return_value={"resolved_path": active},
+                    return_value={"resolved_path": active, "version": "active-v1"},
                 ),
+                patch.object(providers, "TRAINING_STARTING_WEIGHTS_PATH", foundation),
                 patch.object(providers, "LOCAL_BASE_DATASET_PATH", root / "missing"),
                 patch("train_yolo_candidate.train_candidate") as train_candidate,
             ):
@@ -253,6 +293,49 @@ class TrainingProviderTests(unittest.TestCase):
                 ):
                     providers.local_training("job-1", lambda **kwargs: None)
             train_candidate.assert_not_called()
+
+    def test_local_provider_keeps_foundation_and_active_model_separate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / "combined"
+            dataset.mkdir()
+            active = root / "active.pt"
+            active.write_bytes(b"active")
+            foundation = root / "foundation.pt"
+            foundation.write_bytes(b"foundation")
+            train_candidate = Mock(
+                return_value=(
+                    {
+                        "model_version": "candidate-v1",
+                        "training_run_id": "run-v1",
+                    },
+                    root / "summary.json",
+                )
+            )
+            with (
+                patch.object(
+                    providers,
+                    "_export",
+                    return_value=(dataset, {"dataset_version": "combined-v1"}),
+                ),
+                patch.object(
+                    providers,
+                    "_active_model",
+                    return_value={"resolved_path": active, "version": "active-v1"},
+                ),
+                patch.object(providers, "_prepare_local_combined_dataset", return_value=dataset),
+                patch.object(providers, "TRAINING_STARTING_WEIGHTS_PATH", foundation),
+                patch.object(providers, "TRAINING_STARTING_MODEL_VERSION", "foundation-v1"),
+                patch("train_yolo_candidate.train_candidate", train_candidate),
+            ):
+                providers.local_training("job-1", lambda **kwargs: None)
+
+            args = train_candidate.call_args.args[0]
+            self.assertEqual(args.starting_weights, foundation.resolve())
+            self.assertEqual(args.starting_model_version, "foundation-v1")
+            self.assertEqual(args.active_model, active)
+            self.assertEqual(args.active_model_version, "active-v1")
+            self.assertNotEqual(args.starting_weights, args.active_model.resolve())
 
     def test_local_combined_dataset_preserves_base_classes_and_adds_correction(self):
         with tempfile.TemporaryDirectory() as directory:
