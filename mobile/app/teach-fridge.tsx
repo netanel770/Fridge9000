@@ -1561,7 +1561,6 @@ export default function TeachFridgeScreen() {
                     const labels = [...new Set(detail.annotations.map(contributionProductLabel))];
                     const detailExpanded = expandedTrainingSubmission === detail.submission.id;
                     return <View key={detail.submission.id} style={[styles.trainingSubmissionDetail, selected && styles.trainingSelectionRowSelected]}>
-                      <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: selected }} onPress={() => toggleTrainingGroup([detail])} hitSlop={8}><Ionicons name={selected ? "checkbox" : "square-outline"} size={23} color={selected ? colors.primary : colors.textMuted} /></Pressable>
                       <Pressable accessibilityRole="button" accessibilityState={{ expanded: detailExpanded }} onPress={() => {
                         setExpandedTrainingSubmission(detailExpanded ? null : detail.submission.id);
                         setFocusedTrainingAnnotation(detailExpanded ? null : detail.annotations[0]?.id ?? null);
