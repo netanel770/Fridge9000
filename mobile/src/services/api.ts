@@ -10,6 +10,7 @@ import type {
   AnnotationItem,
   AIProgressResponse,
   LifecycleJob,
+  RollbackComparisonResponse,
   AnnotationStats,
   AnnotationStatus,
   AnnotationSubmission,
@@ -328,6 +329,11 @@ export async function getAnnotationStats(): Promise<AnnotationStats> {
 export async function getAIProgress(): Promise<AIProgressResponse> {
   const res = await fetch(`${API_BASE_URL}/ai-progress`);
   return handleJsonResponse<AIProgressResponse>(res);
+}
+
+export async function getRollbackTargetComparison(version: string): Promise<RollbackComparisonResponse> {
+  const res = await fetch(`${API_BASE_URL}/model-lifecycle/rollback-targets/${encodeURIComponent(version)}/compare`);
+  return handleJsonResponse<RollbackComparisonResponse>(res);
 }
 
 export async function startCandidateTraining(submissionIds?: number[]): Promise<LifecycleJob> {

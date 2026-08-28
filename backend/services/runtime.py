@@ -1952,6 +1952,86 @@ def get_annotation_submission_stats():
             return {"submissions": submissions, "annotations_by_action": actions}
 
 
+def _model_supported_classes(cur, model_id: int) -> List[str]:
+    """Return persisted detector classes without inferring from inventory data."""
+    cur.execute(
+        """
+        SELECT CASE
+            WHEN candidate_model_id = %s THEN class_comparison->'candidate_classes'
+            ELSE class_comparison->'active_classes'
+        END AS classes
+        FROM model_comparisons
+        WHERE active_model_id = %s OR candidate_model_id = %s
+        ORDER BY created_at DESC LIMIT 1;
+        """,
+        (model_id, model_id, model_id),
+    )
+    row = cur.fetchone()
+    classes = (row or {}).get("classes") or []
+    if not isinstance(classes, list):
+        return []
+    return [value.strip() for value in classes if isinstance(value, str) and value.strip()]
+
+
+def _candidate_lifecycle_state(candidate, comparison, promotion_evaluation):
+    if candidate is None:
+        return "none"
+    if comparison is None:
+        return "needs_comparison"
+    if promotion_evaluation.get("stale"):
+        return "comparison_stale"
+    reason_codes = {
+        reason.get("code")
+        for reason in promotion_evaluation.get("reasons", [])
+        if isinstance(reason, dict)
+    }
+    if reason_codes & {
+        "comparison_missing",
+        "missing_shared_classes",
+        "malformed_class_metrics",
+    }:
+        return "comparison_invalid"
+    return "eligible" if promotion_evaluation.get("eligible") else "not_eligible"
+
+
+def _rollback_targets(cur):
+    cur.execute(
+        """
+        SELECT m.id, m.version, m.status, m.created_at, m.dataset_version,
+               m.training_run_id,
+               (
+                   SELECT MAX(h.created_at)
+                   FROM model_activation_history h
+                   WHERE h.to_model_id = m.id
+               ) AS last_activated_at,
+               (
+                   SELECT MAX(h.created_at)
+                   FROM model_activation_history h
+                   WHERE h.from_model_id = m.id
+               ) AS archived_at
+        FROM model_versions m
+        WHERE m.status = 'archived'
+          AND EXISTS (
+              SELECT 1
+              FROM model_activation_history h
+              WHERE h.from_model_id = m.id OR h.to_model_id = m.id
+          )
+        ORDER BY COALESCE((
+            SELECT MAX(h.created_at)
+            FROM model_activation_history h
+            WHERE h.from_model_id = m.id OR h.to_model_id = m.id
+        ), m.created_at) DESC, m.id DESC;
+        """
+    )
+    targets = cur.fetchall()
+    for target in targets:
+        classes = _model_supported_classes(cur, target["id"])
+        target["supported_classes"] = classes
+        target["supported_product_count"] = len(classes)
+        target["classes_available"] = bool(classes)
+    return targets
+
+
 def get_ai_progress():
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -1964,22 +2044,7 @@ def get_ai_progress():
             )
             active = cur.fetchone()
 
-            active_classes = []
-            if active:
-                cur.execute(
-                    """
-                    SELECT CASE
-                        WHEN candidate_model_id = %s THEN class_comparison->'candidate_classes'
-                        ELSE class_comparison->'active_classes'
-                    END AS classes
-                    FROM model_comparisons
-                    WHERE active_model_id = %s OR candidate_model_id = %s
-                    ORDER BY created_at DESC LIMIT 1;
-                    """,
-                    (active["id"], active["id"], active["id"]),
-                )
-                class_row = cur.fetchone()
-                active_classes = (class_row or {}).get("classes") or []
+            active_classes = _model_supported_classes(cur, active["id"]) if active else []
 
             cur.execute(
                 """
@@ -2016,6 +2081,7 @@ def get_ai_progress():
                 """
             )
             archived_models = cur.fetchall()
+            rollback_targets = _rollback_targets(cur)
 
             cur.execute(
                 """
@@ -2051,7 +2117,12 @@ def get_ai_progress():
                        tr.ended_at,
                        tr.status,
                        tr.training_parameters,
-                       mv.version AS model_version
+                       mv.id AS model_id,
+                       mv.version AS model_version,
+                       (SELECT COUNT(*) FROM training_run_submission_usage su
+                        WHERE su.training_run_id = tr.id) AS submission_count,
+                       (SELECT COUNT(*) FROM training_run_annotation_usage au
+                        WHERE au.training_run_id = tr.id) AS annotation_count
                 FROM training_runs tr
                 LEFT JOIN model_versions mv
                     ON mv.training_run_id = tr.id
@@ -2070,13 +2141,25 @@ def get_ai_progress():
     if comparison:
         comparison["promotion_evaluation"] = promotion_evaluation
 
+    candidate_state = _candidate_lifecycle_state(
+        candidate, comparison, promotion_evaluation
+    )
+
     return {
         "active_model": active,
         "active_classes": active_classes,
+        "active_model_classes": {
+            "available": bool(active_classes),
+            "count": len(active_classes),
+            "classes": active_classes,
+        },
+        "candidate": candidate,
         "latest_candidate": candidate,
+        "candidate_state": candidate_state,
         "comparison": comparison,
         "promotion_evaluation": promotion_evaluation,
         "archived_models": archived_models,
+        "rollback_targets": rollback_targets,
         "contributions": contributions,
         "training_history": training_history,
         "actions": {
@@ -2089,7 +2172,7 @@ def get_ai_progress():
                 candidate is not None
                 and promotion_evaluation["eligible"]
             ),
-            "can_rollback": bool(archived_models),
+            "can_rollback": bool(rollback_targets),
         },
     }
 
@@ -2302,6 +2385,118 @@ def start_candidate_comparison(version: str):
         })
 
     return _start_lifecycle_job("COMPARE", operation)
+
+
+def _rollback_comparison_record(comparison_id: str):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT c.id, c.created_at, c.dataset_version,
+                       c.dataset_content_sha256, c.validation_split_sha256,
+                       c.evaluation_parameters, c.active_metrics,
+                       c.candidate_metrics, c.metric_differences,
+                       c.class_comparison, c.shared_class_comparison,
+                       c.added_class_metrics, c.comparison_rule,
+                       c.candidate_outperforms_active, c.summary_path,
+                       a.id AS active_model_id, a.version AS active_model_version,
+                       t.id AS rollback_target_id,
+                       t.version AS rollback_target_version
+                FROM model_comparisons c
+                JOIN model_versions a ON a.id = c.active_model_id
+                JOIN model_versions t ON t.id = c.candidate_model_id
+                WHERE c.id = %s;
+                """,
+                (comparison_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        raise RuntimeError("Persisted rollback comparison is unavailable")
+    classes = row["class_comparison"] or {}
+    return {
+        "comparison_id": row["id"],
+        "comparison_type": "rollback_target_vs_active",
+        "created_at": row["created_at"],
+        "dataset_version": row["dataset_version"],
+        "dataset_content_sha256": row["dataset_content_sha256"],
+        "validation_split_sha256": row["validation_split_sha256"],
+        "evaluation_parameters": row["evaluation_parameters"],
+        "active_model": {
+            "id": row["active_model_id"],
+            "version": row["active_model_version"],
+        },
+        "rollback_target": {
+            "id": row["rollback_target_id"],
+            "version": row["rollback_target_version"],
+        },
+        "active_metrics": row["active_metrics"],
+        "rollback_target_metrics": row["candidate_metrics"],
+        "metric_differences": row["metric_differences"],
+        "class_comparison": {
+            "active_classes": classes.get("active_classes", []),
+            "rollback_target_classes": classes.get("candidate_classes", []),
+            "shared_classes": classes.get("shared_classes", []),
+            "only_in_active": classes.get("removed_classes", []),
+            "only_in_rollback_target": classes.get("added_classes", []),
+        },
+        "shared_class_comparison": row["shared_class_comparison"],
+        "added_class_metrics": row["added_class_metrics"],
+        "comparison_rule": row["comparison_rule"],
+        "candidate_outperforms_active": row["candidate_outperforms_active"],
+        "summary_path": row["summary_path"],
+    }
+
+
+def get_rollback_target_comparison(version: str):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, version, dataset_version
+                FROM model_versions
+                WHERE status = 'active' LIMIT 1;
+                """
+            )
+            active = cur.fetchone()
+            cur.execute(
+                """
+                SELECT m.id, m.version, m.dataset_version
+                FROM model_versions m
+                WHERE m.version = %s
+                  AND m.status = 'archived'
+                  AND EXISTS (
+                      SELECT 1 FROM model_activation_history h
+                      WHERE h.from_model_id = m.id OR h.to_model_id = m.id
+                  );
+                """,
+                (version,),
+            )
+            target = cur.fetchone()
+    if not active:
+        raise HTTPException(status_code=409, detail="No current active model is registered")
+    if not target:
+        raise HTTPException(status_code=409, detail="A valid previous production model is required")
+
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM model_comparisons
+                WHERE active_model_id = %s
+                  AND candidate_model_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1;
+                """,
+                (active["id"], target["id"]),
+            )
+            cached = cur.fetchone()
+    if not cached:
+        return {"available": False, "comparison": None}
+    return {
+        "available": True,
+        "comparison": _rollback_comparison_record(cached["id"]),
+    }
 
 
 def get_lifecycle_job(job_id: str):

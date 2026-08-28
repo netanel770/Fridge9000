@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { StyleProp, ViewStyle } from "react-native";
 import { Image, StyleSheet, Text, View } from "react-native";
 
@@ -26,6 +26,11 @@ export function DetectionImageViewer({
   style,
 }: DetectionImageViewerProps) {
   const [viewSize, setViewSize] = useState({ width: 0, height: 0 });
+  const [imageUnavailable, setImageUnavailable] = useState(false);
+
+  useEffect(() => {
+    setImageUnavailable(false);
+  }, [imageUri]);
 
   return (
     <View
@@ -35,9 +40,19 @@ export function DetectionImageViewer({
         setViewSize((current) => current.width === width && current.height === height ? current : { width, height });
       }}
     >
-      <Image source={{ uri: imageUri }} style={StyleSheet.absoluteFillObject} resizeMode="contain" />
+      <Image
+        source={{ uri: imageUri }}
+        style={StyleSheet.absoluteFillObject}
+        resizeMode="contain"
+        onError={() => setImageUnavailable(true)}
+      />
+      {imageUnavailable ? (
+        <View accessibilityRole="text" style={styles.imageFallback}>
+          <Text style={styles.imageFallbackText}>Image unavailable</Text>
+        </View>
+      ) : null}
       <View pointerEvents="none" style={StyleSheet.absoluteFillObject}>
-        {detections.map((detection) => {
+        {!imageUnavailable ? detections.map((detection) => {
           if (detection.x1 == null || detection.y1 == null || detection.x2 == null || detection.y2 == null) return null;
           const projected = projectBoundingBox(
             { x1: detection.x1, y1: detection.y1, x2: detection.x2, y2: detection.y2 },
@@ -66,7 +81,7 @@ export function DetectionImageViewer({
               ) : null}
             </View>
           );
-        })}
+        }) : null}
       </View>
     </View>
   );
@@ -80,4 +95,6 @@ const styles = StyleSheet.create({
   label: { position: "absolute", top: 0, left: 0, maxWidth: "100%", backgroundColor: colors.primary, paddingHorizontal: 5, paddingVertical: 2 },
   highlightedLabel: { backgroundColor: colors.amber },
   labelText: { color: colors.primaryText, fontSize: 12, fontWeight: "800" },
+  imageFallback: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center", padding: 16 },
+  imageFallbackText: { color: colors.textMuted, fontSize: 13, fontWeight: "700" },
 });

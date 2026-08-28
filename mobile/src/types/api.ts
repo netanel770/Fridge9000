@@ -275,13 +275,37 @@ export type ModelComparisonSummary = {
   };
 };
 
+export type CandidateState =
+  | "none"
+  | "needs_comparison"
+  | "comparison_stale"
+  | "comparison_invalid"
+  | "not_eligible"
+  | "eligible";
+
+export type RollbackTarget = LifecycleModel & {
+  last_activated_at?: string | null;
+  archived_at?: string | null;
+  supported_classes: string[];
+  supported_product_count: number;
+  classes_available: boolean;
+};
+
 export type AIProgressResponse = {
   active_model: LifecycleModel;
   active_classes: string[];
+  active_model_classes: {
+    available: boolean;
+    count: number;
+    classes: string[];
+  };
+  candidate?: LifecycleModel | null;
+  candidate_state: CandidateState;
   latest_candidate?: LifecycleModel | null;
   comparison?: ModelComparisonSummary | null;
   promotion_evaluation: PromotionEvaluation;
   archived_models: LifecycleModel[];
+  rollback_targets: RollbackTarget[];
   contributions: {
     total_approved: number;
     used_in_training: number;
@@ -293,7 +317,11 @@ export type AIProgressResponse = {
     started_at: string;
     ended_at?: string | null;
     status: "running" | "completed" | "failed" | "interrupted";
+    model_id?: number | null;
     model_version?: string | null;
+    submission_count: number;
+    annotation_count: number;
+    training_parameters?: Record<string, unknown>;
   }[];
   actions: {
     can_train: boolean;
@@ -301,6 +329,38 @@ export type AIProgressResponse = {
     can_promote: boolean;
     can_rollback: boolean;
   };
+};
+
+export type RollbackComparison = {
+  comparison_id: string;
+  comparison_type: "rollback_target_vs_active";
+  created_at: string;
+  dataset_version: string;
+  dataset_content_sha256: string;
+  validation_split_sha256: string;
+  evaluation_parameters: Record<string, unknown>;
+  active_model: Pick<LifecycleModel, "id" | "version">;
+  rollback_target: Pick<LifecycleModel, "id" | "version">;
+  active_metrics: ModelMetrics;
+  rollback_target_metrics: ModelMetrics;
+  metric_differences: ModelMetrics;
+  class_comparison: {
+    active_classes: string[];
+    rollback_target_classes: string[];
+    shared_classes: string[];
+    only_in_active: string[];
+    only_in_rollback_target: string[];
+  };
+  shared_class_comparison: SharedClassComparison;
+  added_class_metrics: AddedClassMetrics;
+  comparison_rule: string;
+  candidate_outperforms_active: boolean;
+  summary_path?: string | null;
+};
+
+export type RollbackComparisonResponse = {
+  available: boolean;
+  comparison: RollbackComparison | null;
 };
 
 export type LifecycleJob = {

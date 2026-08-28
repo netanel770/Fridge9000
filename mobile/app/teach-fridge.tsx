@@ -8,8 +8,8 @@ import { DetectionImageViewer } from "../src/components/DetectionImageViewer";
 import { BoundingBoxEditor } from "../src/components/BoundingBoxEditor";
 import { ProductLabelInput, uniqueProductLabels } from "../src/components/ProductLabelInput";
 import { lifecyclePhaseLabel, useLifecycleJob } from "../src/components/LifecycleJobProvider";
-import { createAnnotationSubmission, getAIProgress, getAllInventory, getAnnotationSubmission, getAnnotationSubmissions, getRecentScans, getScan, getScanDetections, getScanImageUrl, manageQuarantinedSubmission, moderateAnnotationSubmission, promoteCandidate, rejectCandidate, rollbackModel, startCandidateComparison, startCandidateTraining, updateAnnotationBox, updateAnnotationLabel } from "../src/services/api";
-import type { AIProgressResponse, AnnotationItem, AnnotationStatus, AnnotationSubmission, AnnotationSubmissionDetail, AnnotationTrainingState, DetectionItem, InventoryItem, ModelMetrics, PromotionReason, RecentScan } from "../src/types/api";
+import { createAnnotationSubmission, getAIProgress, getAllInventory, getAnnotationSubmission, getAnnotationSubmissions, getRecentScans, getRollbackTargetComparison, getScan, getScanDetections, getScanImageUrl, manageQuarantinedSubmission, moderateAnnotationSubmission, promoteCandidate, rejectCandidate, rollbackModel, startCandidateComparison, startCandidateTraining, updateAnnotationBox, updateAnnotationLabel } from "../src/services/api";
+import type { AIProgressResponse, AnnotationItem, AnnotationStatus, AnnotationSubmission, AnnotationSubmissionDetail, AnnotationTrainingState, CandidateState, DetectionItem, InventoryItem, ModelMetrics, PromotionReason, RecentScan, RollbackComparisonResponse, RollbackTarget } from "../src/types/api";
 import { areImageDimensionsCompatible, getMinimumAnnotationBoxSize } from "../src/utils/imageCoordinates";
 import type { ImageBoundingBox } from "../src/utils/imageCoordinates";
 import { colors, radius, spacing, typography } from "../src/theme";
@@ -21,6 +21,7 @@ const CONTRIBUTION_FILTERS = ["All", "Pending", "Approved", "Rejected", "Used"] 
 type ContributionFilter = typeof CONTRIBUTION_FILTERS[number];
 type ContributionSort = "Newest" | "Oldest" | "Product";
 type Contribution = { submission: AnnotationSubmission; annotation: AnnotationItem };
+type ModelIdentity = { id?: number | null; version?: string | null };
 type BoxEditorTarget = {
   source: "suggestion" | "contribution" | "add";
   scanId: number;
@@ -56,6 +57,26 @@ function contributionProductLabel(annotation: AnnotationItem) {
   return annotation.final_label?.trim() || annotation.original_label?.trim() || "Unlabeled product";
 }
 
+function annotationDetection(annotation: AnnotationItem): DetectionItem {
+  return {
+    id: annotation.id,
+    label: contributionProductLabel(annotation),
+    confidence: annotation.original_confidence ?? 0,
+    x1: annotation.final_x1 ?? annotation.original_x1,
+    y1: annotation.final_y1 ?? annotation.original_y1,
+    x2: annotation.final_x2 ?? annotation.original_x2,
+    y2: annotation.final_y2 ?? annotation.original_y2,
+  };
+}
+
+function hasDrawableBox(detection: DetectionItem, imageWidth: number, imageHeight: number) {
+  const { x1, y1, x2, y2 } = detection;
+  if (![x1, y1, x2, y2, imageWidth, imageHeight].every((value) => value != null && Number.isFinite(value))) return false;
+  return imageWidth > 0 && imageHeight > 0
+    && Math.min(imageWidth, x2!) > Math.max(0, x1!)
+    && Math.min(imageHeight, y2!) > Math.max(0, y1!);
+}
+
 function contributionStatus(status: AnnotationStatus, used: boolean) {
   if (used || status === "used") return "USED IN TRAINING";
   if (status === "pending") return "PENDING REVIEW";
@@ -72,6 +93,41 @@ function trainingStateCopy(state: AnnotationTrainingState) {
   if (state === "experimental") return { label: "EXPERIMENTAL", tone: "warning" as const, explanation: "Currently being evaluated in a candidate." };
   if (state === "trusted") return { label: "TRUSTED", tone: "info" as const, explanation: "Part of the active model's trusted training baseline." };
   return { label: "QUARANTINED", tone: "danger" as const, explanation: "Excluded after its candidate was rejected." };
+}
+
+function candidateStateCopy(state: CandidateState) {
+  if (state === "needs_comparison") return { label: "NEEDS COMPARISON", tone: "warning" as const, description: "Compare this candidate with the active model before deciding." };
+  if (state === "comparison_stale") return { label: "COMPARISON STALE", tone: "warning" as const, description: "The active model changed. Run the candidate comparison again." };
+  if (state === "comparison_invalid") return { label: "COMPARISON INVALID", tone: "warning" as const, description: "The saved comparison is incomplete. Retry it before deciding." };
+  if (state === "not_eligible") return { label: "NOT ELIGIBLE", tone: "danger" as const, description: "This candidate did not pass the promotion policy." };
+  if (state === "eligible") return { label: "ELIGIBLE FOR PROMOTION", tone: "success" as const, description: "This candidate passed the promotion policy." };
+  return { label: "NO CANDIDATE", tone: "info" as const, description: "No candidate is currently under evaluation." };
+}
+
+const INITIAL_MODEL_VERSION = "fridge9000-production-initial";
+
+function singleAddedClass(classes: string[], baselineClasses: string[]) {
+  const baseline = new Set(baselineClasses.map((name) => name.trim().toLocaleLowerCase()));
+  const added = [...new Map(
+    classes
+      .map((name) => name.trim())
+      .filter((name) => name && !baseline.has(name.toLocaleLowerCase()))
+      .map((name) => [name.toLocaleLowerCase(), name]),
+  ).values()];
+  return added.length === 1 ? added[0] : null;
+}
+
+function readableModelName(model: ModelIdentity | null | undefined, meaningfulClass?: string | null) {
+  if (model?.version === INITIAL_MODEL_VERSION) return "Initial Model";
+  if (meaningfulClass) {
+    const product = meaningfulClass
+      .trim()
+      .split(/\s+/)
+      .map((part) => part ? `${part[0].toLocaleUpperCase()}${part.slice(1).toLocaleLowerCase()}` : part)
+      .join(" ");
+    if (product) return `${product} Model`;
+  }
+  return model?.id != null ? `Model ${model.id}` : "Model";
 }
 
 function formatMetric(value: number | null | undefined) {
@@ -244,9 +300,16 @@ export default function TeachFridgeScreen() {
   const [expandedTrainingLabel, setExpandedTrainingLabel] = useState<string | null>(null);
   const [expandedTrainingSubmission, setExpandedTrainingSubmission] = useState<number | null>(null);
   const [showTrainingHistory, setShowTrainingHistory] = useState(false);
+  const [showRollbackSelector, setShowRollbackSelector] = useState(false);
+  const [selectedRollbackVersion, setSelectedRollbackVersion] = useState<string | null>(null);
+  const [rollbackComparisonTarget, setRollbackComparisonTarget] = useState<RollbackTarget | null>(null);
+  const [rollbackComparison, setRollbackComparison] = useState<RollbackComparisonResponse | null>(null);
+  const [loadingRollbackComparison, setLoadingRollbackComparison] = useState<string | null>(null);
+  const [rollbackComparisonError, setRollbackComparisonError] = useState("");
   const [showQuarantine, setShowQuarantine] = useState(false);
   const [expandedQuarantineLabel, setExpandedQuarantineLabel] = useState<string | null>(null);
   const [expandedQuarantineSubmission, setExpandedQuarantineSubmission] = useState<number | null>(null);
+  const [focusedQuarantineAnnotation, setFocusedQuarantineAnnotation] = useState<number | null>(null);
   const [quarantineReturnToTraining, setQuarantineReturnToTraining] = useState(false);
   const [quarantineMutation, setQuarantineMutation] = useState<number | null>(null);
   const [quarantineError, setQuarantineError] = useState("");
@@ -413,7 +476,7 @@ export default function TeachFridgeScreen() {
 
   function confirmPromotion() {
     if (!progressStats?.latest_candidate || !progressStats.comparison) return;
-    Alert.alert("Promote candidate?", `Make ${progressStats.latest_candidate.version} the active production model? The current model will remain available for rollback.`, [
+    Alert.alert(`Promote ${candidateModelName}?`, `Make ${candidateModelName} the active production model? ${activeModelName} will remain available for rollback.`, [
       { text: "Cancel", style: "cancel" },
       { text: "Promote", onPress: async () => {
         setLifecycleMutation("Promote Candidate"); setMutationError(""); setMutationMessage("");
@@ -431,8 +494,8 @@ export default function TeachFridgeScreen() {
     if (!progressStats?.latest_candidate) return;
     const version = progressStats.latest_candidate.version;
     Alert.alert(
-      "Reject candidate?",
-      "This candidate will be rejected and its experimental submissions moved to Quarantine.",
+      `Reject ${candidateModelName}?`,
+      "This model will not become active. Its experimental annotations will move to Quarantine for review.",
       [
         { text: "Cancel", style: "cancel" },
         { text: "Reject", style: "destructive", onPress: async () => {
@@ -479,6 +542,7 @@ export default function TeachFridgeScreen() {
     try {
       await manageQuarantinedSubmission(submissionId, action);
       setExpandedQuarantineSubmission(null);
+      setFocusedQuarantineAnnotation(null);
       setQuarantineMessage(action === "restore" ? "Restored to eligible training data." : "Submission permanently rejected.");
       await Promise.all([loadTrainingSelection(), loadProgress(), loadContributions()]);
     } catch (caught) {
@@ -495,12 +559,42 @@ export default function TeachFridgeScreen() {
     ]);
   }
 
+  function openRollbackSelector() {
+    setSelectedRollbackVersion(null);
+    setRollbackComparisonTarget(null);
+    setRollbackComparison(null);
+    setRollbackComparisonError("");
+    setShowRollbackSelector(true);
+  }
+
+  async function viewRollbackComparison(target: RollbackTarget) {
+    setLoadingRollbackComparison(target.version);
+    setRollbackComparisonError("");
+    try {
+      const result = await getRollbackTargetComparison(target.version);
+      setRollbackComparisonTarget(target);
+      setRollbackComparison(result);
+    } catch (caught) {
+      setRollbackComparisonError(caught instanceof Error ? caught.message : "Could not load the cached comparison.");
+    } finally {
+      setLoadingRollbackComparison(null);
+    }
+  }
+
   function confirmRollback(version: string) {
-    Alert.alert("Rollback model?", `Restore ${version} as the active production model?`, [
+    const target = progressStats?.rollback_targets.find((model) => model.version === version);
+    const targetName = rollbackTargetDisplayName(target);
+    Alert.alert(`Roll back to ${targetName}?`, `Current active model: ${activeModelName}\n\nNew active model: ${targetName}\n\nThis will replace the model currently used for product detection.`, [
       { text: "Cancel", style: "cancel" },
-      { text: "Rollback", style: "destructive", onPress: async () => {
+      { text: "Confirm Rollback", style: "destructive", onPress: async () => {
         setLifecycleMutation("Rollback Model"); setMutationError(""); setMutationMessage("");
-        try { await rollbackModel(version); setMutationMessage(`Rolled back to ${version}.`); await loadProgress(); }
+        try {
+          await rollbackModel(version);
+          setMutationMessage(`Rolled back to ${targetName}.`);
+          setShowRollbackSelector(false);
+          setSelectedRollbackVersion(null);
+          await Promise.all([loadProgress(), loadTrainingSelection(), loadContributions()]);
+        }
         catch (caught) { setMutationError(caught instanceof Error ? caught.message : "Rollback failed."); }
         finally { setLifecycleMutation(null); }
       } },
@@ -805,6 +899,37 @@ export default function TeachFridgeScreen() {
     ...(progressStats?.comparison?.class_comparison.active_classes || []),
     ...(progressStats?.comparison?.class_comparison.candidate_classes || []),
   ]), [contributions, inventoryLabels, progressStats]);
+  const currentCandidate = progressStats?.candidate ?? progressStats?.latest_candidate ?? null;
+  const activeDistinctiveClasses = progressStats
+    ? progressStats.rollback_targets
+      .map((target) => singleAddedClass(progressStats.active_model_classes.classes, target.supported_classes))
+      .filter((name): name is string => Boolean(name))
+    : [];
+  const uniqueActiveDistinctiveClasses = [...new Map(activeDistinctiveClasses.map((name) => [name.toLocaleLowerCase(), name])).values()];
+  const activeModelName = readableModelName(
+    progressStats?.active_model,
+    uniqueActiveDistinctiveClasses.length === 1 ? uniqueActiveDistinctiveClasses[0] : null,
+  );
+  const candidateModelName = readableModelName(
+    currentCandidate,
+    progressStats?.comparison?.class_comparison.added_classes.length === 1
+      ? progressStats.comparison.class_comparison.added_classes[0]
+      : null,
+  );
+  const rollbackTargetDisplayName = (target: RollbackTarget | null | undefined) => readableModelName(
+    target,
+    target && progressStats
+      ? singleAddedClass(target.supported_classes, progressStats.active_model_classes.classes)
+      : null,
+  );
+  const modelNamesByVersion = new Map<string, string>();
+  if (progressStats) modelNamesByVersion.set(progressStats.active_model.version, activeModelName);
+  if (currentCandidate) modelNamesByVersion.set(currentCandidate.version, candidateModelName);
+  progressStats?.rollback_targets.forEach((target) => modelNamesByVersion.set(target.version, rollbackTargetDisplayName(target)));
+  const displayNameForModel = (model: ModelIdentity | null | undefined) => {
+    const knownName = model?.version ? modelNamesByVersion.get(model.version) : null;
+    return knownName || readableModelName(model);
+  };
 
   const visibleContributions = useMemo(() => {
     const query = contributionSearch.trim().toLocaleLowerCase();
@@ -1220,7 +1345,7 @@ export default function TeachFridgeScreen() {
       ) : (
         <View style={styles.suggestions}>
           <View style={styles.sectionHeading}>
-            <View><Text style={styles.sectionTitle}>AI Progress</Text><Text style={styles.sectionSubtitle}>Your active model and latest candidate.</Text></View>
+            <View><Text style={styles.sectionTitle}>AI Progress</Text><Text style={styles.sectionSubtitle}>Model status, training history, and product support.</Text></View>
             <Pressable accessibilityRole="button" onPress={() => { loadProgress(); loadTrainingSelection(); }} hitSlop={8}><Ionicons name="refresh" size={21} color={colors.primary} /></Pressable>
           </View>
           {loadingProgress ? <View style={styles.loading}><ActivityIndicator color={colors.primary} /><Text style={styles.loadingText}>Loading model progress...</Text></View> : null}
@@ -1230,32 +1355,31 @@ export default function TeachFridgeScreen() {
               <View style={styles.modelCardHeader}>
                 <View style={styles.detectionCopy}>
                   <Text style={styles.modelRole}>ACTIVE MODEL</Text>
-                  <Text style={styles.modelDisplayName}>Production model</Text>
-                  <Text style={styles.modelVersionCompact} numberOfLines={1} ellipsizeMode="middle">{progressStats.active_model.version}</Text>
+                  <Text style={styles.modelDisplayName}>{activeModelName}</Text>
                 </View>
                 <StatusBadge label="IN USE" tone="success" />
               </View>
 
               {lifecycle.job && (lifecycle.job.status === "queued" || lifecycle.job.status === "running") ? <View style={styles.jobStatus}><ActivityIndicator color={colors.primary} /><View style={styles.detectionCopy}><Text style={styles.jobTitle}>{lifecycle.action || (lifecycle.job.kind === "TRAIN" ? "Training new model" : "Comparing models")}</Text><Text style={styles.jobMeta}>{lifecyclePhaseLabel(lifecycle.job)}</Text></View></View> : null}
 
-              {progressStats.latest_candidate ? <>
+              {currentCandidate ? <>
                 <View style={styles.compactDivider} />
                 <View style={styles.candidateCompactRow}>
                   <View style={styles.detectionCopy}>
                     <Text style={styles.modelRole}>CANDIDATE</Text>
-                    <Text style={styles.modelDisplayName}>Candidate model</Text>
-                    <Text style={styles.modelVersionCompact} numberOfLines={1} ellipsizeMode="middle">{progressStats.latest_candidate.version}</Text>
+                    <Text style={styles.modelDisplayName}>{candidateModelName}</Text>
                   </View>
                   <StatusBadge
-                    label={!progressStats.comparison || progressStats.promotion_evaluation.stale ? "NEEDS COMPARISON" : progressStats.promotion_evaluation.eligible ? "READY" : "NOT READY"}
-                    tone={progressStats.promotion_evaluation.eligible && !progressStats.promotion_evaluation.stale ? "success" : "warning"}
+                    label={candidateStateCopy(progressStats.candidate_state).label}
+                    tone={candidateStateCopy(progressStats.candidate_state).tone}
                   />
                 </View>
+                <Text style={styles.actionHint}>{candidateStateCopy(progressStats.candidate_state).description}</Text>
 
                 {progressStats.comparison && !progressStats.promotion_evaluation.stale ? <View style={styles.comparisonCompact}>
                   <View style={styles.comparisonCompactHeader}>
                     <View style={styles.detectionCopy}>
-                      <Text style={styles.comparisonCompactTitle}>Model comparison</Text>
+                      <Text style={styles.comparisonCompactTitle}>{activeModelName} vs {candidateModelName}</Text>
                       <Text style={styles.comparisonCompactText}>{progressStats.promotion_evaluation.eligible
                         ? "Candidate passed the promotion policy."
                         : progressStats.promotion_evaluation.stale
@@ -1274,8 +1398,8 @@ export default function TeachFridgeScreen() {
                     />
                   </View>
                   <View style={styles.metricSummaryRow}>
-                    <View style={styles.metricSummaryItem}><Text style={styles.metricSummaryLabel}>ACTIVE mAP50–95</Text><Text style={styles.metricSummaryValue}>{formatMetric(progressStats.comparison.active_metrics.map50_95)}</Text></View>
-                    <View style={styles.metricSummaryItem}><Text style={styles.metricSummaryLabel}>CANDIDATE</Text><Text style={styles.metricSummaryValue}>{formatMetric(progressStats.comparison.candidate_metrics.map50_95)}</Text></View>
+                    <View style={styles.metricSummaryItem}><Text style={styles.metricSummaryLabel}>{activeModelName.toLocaleUpperCase()} mAP50–95</Text><Text style={styles.metricSummaryValue}>{formatMetric(progressStats.comparison.active_metrics.map50_95)}</Text></View>
+                    <View style={styles.metricSummaryItem}><Text style={styles.metricSummaryLabel}>{candidateModelName.toLocaleUpperCase()}</Text><Text style={styles.metricSummaryValue}>{formatMetric(progressStats.comparison.candidate_metrics.map50_95)}</Text></View>
                     <View style={styles.metricSummaryItem}><Text style={styles.metricSummaryLabel}>CHANGE</Text><Text style={[styles.metricSummaryValue, (progressStats.comparison.metric_differences.map50_95 ?? 0) > 0 ? styles.positiveDelta : (progressStats.comparison.metric_differences.map50_95 ?? 0) < 0 ? styles.negativeDelta : null]}>{formatMetricDifference(progressStats.comparison.metric_differences.map50_95)}</Text></View>
                   </View>
                   <Pressable accessibilityRole="button" accessibilityState={{ expanded: showModelDetails }} onPress={() => setShowModelDetails((shown) => !shown)} style={styles.comparisonDetailsToggle}><Text style={styles.comparisonDetailsText}>{showModelDetails ? "Hide comparison details" : "View comparison details"}</Text><Ionicons name={showModelDetails ? "chevron-up" : "chevron-down"} size={16} color={colors.primary} /></Pressable>
@@ -1284,25 +1408,26 @@ export default function TeachFridgeScreen() {
                     <View style={styles.metricCards}>
                       {METRIC_ROWS.map(({ key, label }) => {
                         const difference = progressStats.comparison?.metric_differences[key];
-                        return <View key={key} style={styles.metricCard}><View style={styles.metricCardHeading}><Text style={styles.metricCardName}>{label}</Text><Text style={[styles.metricVerdict, difference != null && difference > 0 ? styles.positiveDelta : difference != null && difference < 0 ? styles.negativeDelta : null]}>{metricVerdict(difference)}</Text></View><View style={styles.metricValues}><View><Text style={styles.metricValueLabel}>ACTIVE</Text><Text style={styles.metricValue}>{formatMetric(progressStats.comparison?.active_metrics[key])}</Text></View><View><Text style={styles.metricValueLabel}>CANDIDATE</Text><Text style={styles.metricValue}>{formatMetric(progressStats.comparison?.candidate_metrics[key])}</Text></View><Text style={[styles.metricCardDelta, difference != null && difference > 0 ? styles.positiveDelta : difference != null && difference < 0 ? styles.negativeDelta : null]}>{formatMetricDifference(difference)}</Text></View></View>;
+                        return <View key={key} style={styles.metricCard}><View style={styles.metricCardHeading}><Text style={styles.metricCardName}>{label}</Text><Text style={[styles.metricVerdict, difference != null && difference > 0 ? styles.positiveDelta : difference != null && difference < 0 ? styles.negativeDelta : null]}>{metricVerdict(difference)}</Text></View><View style={styles.metricValues}><View><Text style={styles.metricValueLabel}>{activeModelName.toLocaleUpperCase()}</Text><Text style={styles.metricValue}>{formatMetric(progressStats.comparison?.active_metrics[key])}</Text></View><View><Text style={styles.metricValueLabel}>{candidateModelName.toLocaleUpperCase()}</Text><Text style={styles.metricValue}>{formatMetric(progressStats.comparison?.candidate_metrics[key])}</Text></View><Text style={[styles.metricCardDelta, difference != null && difference > 0 ? styles.positiveDelta : difference != null && difference < 0 ? styles.negativeDelta : null]}>{formatMetricDifference(difference)}</Text></View></View>;
                       })}
                     </View>
                     {progressStats.promotion_evaluation.mode === "expanded_classes" ? <View style={styles.sharedComparison}><Text style={styles.sectionTitle}>Added products ({progressStats.comparison.class_comparison.added_classes.length})</Text><View style={styles.classList}>{progressStats.comparison.class_comparison.added_classes.map((name) => <View key={name} style={styles.classRow}><Text style={styles.className}>{name}</Text><Text style={styles.classMetric}>mAP50–95 {formatMetric(progressStats.comparison!.added_class_metrics.per_class[name]?.map50_95)}</Text></View>)}</View></View> : null}
                   </View> : null}
                 </View> : null}
-              </> : <View style={styles.lifecycleEmpty}><Ionicons name="flask-outline" size={19} color={colors.textMuted} /><Text style={styles.lifecycleEmptyText}>No candidate waiting for a decision.</Text></View>}
+              </> : <View style={styles.lifecycleEmpty}><Ionicons name="flask-outline" size={19} color={colors.textMuted} /><Text style={styles.lifecycleEmptyText}>No candidate currently under evaluation.</Text></View>}
 
               {lifecycle.message || mutationMessage ? <View style={styles.successBox}><Ionicons name="checkmark-circle" size={20} color={colors.successFg} /><Text style={styles.successText}>{mutationMessage || lifecycle.message}</Text></View> : null}
               {lifecycle.error || mutationError ? <View style={styles.errorBox}><Text style={styles.errorText}>{mutationError || lifecycle.error}</Text></View> : null}
             </Card>
 
             <View style={styles.primaryLifecycleAction}>
-              {progressStats.latest_candidate && (!progressStats.comparison || progressStats.promotion_evaluation.stale || progressStats.promotion_evaluation.reasons.some((reason) => ["comparison_missing", "missing_shared_classes", "malformed_class_metrics"].includes(reason.code))) ? <AppButton label={progressStats.comparison ? "Retry Comparison" : "Compare Candidate"} icon="analytics-outline" loading={lifecycle.action === "Compare Models"} disabled={lifecycle.busy || Boolean(lifecycleMutation) || !progressStats.actions.can_compare} onPress={() => lifecycle.runJob("Compare Models", () => startCandidateComparison(progressStats.latest_candidate!.version))} /> : null}
-              {progressStats.latest_candidate && progressStats.comparison && !progressStats.promotion_evaluation.stale && progressStats.promotion_evaluation.eligible ? <AppButton label="Promote Candidate" icon="rocket-outline" loading={lifecycleMutation === "Promote Candidate"} disabled={lifecycle.busy || Boolean(lifecycleMutation) || !progressStats.actions.can_promote} onPress={confirmPromotion} /> : null}
-              {progressStats.latest_candidate && !progressStats.actions.can_promote ? <AppButton label="Reject Candidate" icon="close-circle-outline" variant="secondary" loading={lifecycleMutation === "Reject Candidate"} disabled={lifecycle.busy || Boolean(lifecycleMutation)} onPress={confirmCandidateRejection} /> : null}
-              <AppButton label="Train a candidate" icon="school-outline" disabled={lifecycle.busy || Boolean(lifecycleMutation) || Boolean(progressStats.latest_candidate) || eligibleSubmissions.length === 0} onPress={() => setShowTrainingSelector(true)} />
-              {progressStats.actions.can_rollback ? <AppButton label="Rollback model" icon="arrow-undo-outline" variant="secondary" onPress={() => setShowTrainingHistory(true)} /> : null}
-              {progressStats.latest_candidate ? <Text style={styles.actionHint}>{progressStats.promotion_evaluation.stale || progressStats.promotion_evaluation.reasons.some((reason) => ["comparison_missing", "missing_shared_classes", "malformed_class_metrics"].includes(reason.code)) ? "Retry the comparison to resolve this candidate. You can manage and restore quarantined submissions now." : progressStats.comparison && !progressStats.promotion_evaluation.eligible ? "This candidate must be resolved before another training run. You can still manage Quarantine." : "Resolve the current candidate before training another model."}</Text> : eligibleSubmissions.length === 0 ? <Text style={styles.actionHint}>Restore or approve a submission to train.</Text> : null}
+              {currentCandidate && ["needs_comparison", "comparison_stale", "comparison_invalid"].includes(progressStats.candidate_state) ? <AppButton label={progressStats.candidate_state === "needs_comparison" ? "Compare Candidate" : "Retry Comparison"} icon="analytics-outline" loading={lifecycle.action === "Compare Models"} disabled={lifecycle.busy || Boolean(lifecycleMutation) || !progressStats.actions.can_compare} onPress={() => lifecycle.runJob("Compare Models", () => startCandidateComparison(currentCandidate.version))} /> : null}
+              {currentCandidate && progressStats.comparison && ["not_eligible", "eligible"].includes(progressStats.candidate_state) ? <AppButton label="View Comparison" icon="stats-chart-outline" variant="secondary" onPress={() => setShowModelDetails(true)} /> : null}
+              {currentCandidate && progressStats.candidate_state === "eligible" ? <AppButton label="Promote Candidate" icon="rocket-outline" loading={lifecycleMutation === "Promote Candidate"} disabled={lifecycle.busy || Boolean(lifecycleMutation) || !progressStats.actions.can_promote} onPress={confirmPromotion} /> : null}
+              {currentCandidate ? <AppButton label="Reject Candidate" icon="close-circle-outline" variant="danger" loading={lifecycleMutation === "Reject Candidate"} disabled={lifecycle.busy || Boolean(lifecycleMutation)} onPress={confirmCandidateRejection} /> : null}
+              {!currentCandidate ? <AppButton label="Train a candidate" icon="school-outline" disabled={lifecycle.busy || Boolean(lifecycleMutation) || eligibleSubmissions.length === 0} onPress={() => setShowTrainingSelector(true)} /> : null}
+              {progressStats.actions.can_rollback ? <AppButton label="Rollback Model" icon="arrow-undo-outline" variant="secondary" onPress={openRollbackSelector} /> : null}
+              {currentCandidate ? <Text style={styles.actionHint}>Resolve the current candidate before starting another training run. Quarantine remains available below.</Text> : eligibleSubmissions.length === 0 ? <Text style={styles.actionHint}>Restore or approve a submission to train.</Text> : null}
             </View>
 
             <View style={styles.quickActions}>
@@ -1319,8 +1444,8 @@ export default function TeachFridgeScreen() {
             </View>
 
             <Card>
-              <View style={styles.sectionHeading}><View><Text style={styles.sectionTitle}>Existing products</Text><Text style={styles.sectionSubtitle}>{progressStats.active_classes.length} classes in the active model</Text></View><Ionicons name="pricetags-outline" size={22} color={colors.primary} /></View>
-              {progressStats.active_classes.length ? <View style={styles.classChips}>{progressStats.active_classes.map((name) => <View key={name} style={styles.classChip}><Text style={styles.classChipText}>{name}</Text></View>)}</View> : <Text style={styles.actionHint}>Class names will appear after the first model comparison.</Text>}
+              <View style={styles.sectionHeading}><View><Text style={styles.sectionTitle}>Active Model Products</Text><Text style={styles.sectionSubtitle}>{progressStats.active_model_classes.available ? `${progressStats.active_model_classes.count} supported products` : "Product support metadata unavailable"}</Text></View><Ionicons name="pricetags-outline" size={22} color={colors.primary} /></View>
+              {progressStats.active_model_classes.available ? <View style={styles.classChips}>{progressStats.active_model_classes.classes.map((name) => <View key={name} style={styles.classChip}><Text style={styles.classChipText}>{name}</Text></View>)}</View> : <Text style={styles.actionHint}>Product-class metadata is unavailable for this model.</Text>}
             </Card>
           </> : null}
         </View>
@@ -1370,10 +1495,40 @@ export default function TeachFridgeScreen() {
       </Modal>
 
       <Modal visible={showTrainingHistory} transparent animationType="slide" statusBarTranslucent onRequestClose={() => setShowTrainingHistory(false)}>
-        <View style={styles.sheetBackdrop}><View style={styles.sheet}><View style={styles.imageHeader}><View><Text style={styles.imageTitle}>Training History</Text><Text style={styles.imageSubtitle}>Recent model runs and rollback options</Text></View><Pressable accessibilityLabel="Close training history" onPress={() => setShowTrainingHistory(false)} hitSlop={10}><Ionicons name="close" size={27} color={colors.navy} /></Pressable></View><ScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
-          {progressStats?.training_history.length ? <View style={styles.trainingHistory}>{progressStats.training_history.map((run) => <View key={run.training_run_id} style={styles.trainingRow}><View style={styles.trainingMarker}><Ionicons name={run.status === "completed" ? "checkmark" : run.status === "running" ? "hourglass-outline" : "close"} size={18} color={run.status === "completed" ? colors.successFg : run.status === "running" ? colors.warningFg : colors.danger} /></View><View style={styles.detectionCopy}><Text style={styles.trainingModel}>{run.model_version || "No model produced"}</Text><Text style={styles.trainingMeta}>{new Date(run.ended_at || run.started_at).toLocaleString("en-GB")}</Text></View><StatusBadge label={run.status.toUpperCase()} tone={run.status === "completed" ? "success" : run.status === "running" ? "warning" : "danger"} /></View>)}</View> : <EmptyState icon="time-outline" title="No training history" message="Completed runs will appear here." />}
-          {progressStats?.archived_models.length ? <View style={styles.rollbackSection}><Text style={styles.modelRole}>ROLLBACK</Text>{progressStats.archived_models.map((model) => <View key={model.id} style={styles.rollbackRow}><View style={styles.detectionCopy}><Text style={styles.modelVersion}>{model.version}</Text><Text style={styles.trainingMeta}>{new Date(model.created_at).toLocaleDateString("en-GB")}</Text></View><AppButton label="Rollback" icon="arrow-undo-outline" variant="danger" disabled={lifecycle.busy || Boolean(lifecycleMutation)} onPress={() => confirmRollback(model.version)} /></View>)}</View> : null}
+        <View style={styles.sheetBackdrop}><View style={styles.sheet}><View style={styles.imageHeader}><View><Text style={styles.imageTitle}>Training History</Text><Text style={styles.imageSubtitle}>Actual candidate training runs</Text></View><Pressable accessibilityLabel="Close training history" onPress={() => setShowTrainingHistory(false)} hitSlop={10}><Ionicons name="close" size={27} color={colors.navy} /></Pressable></View><ScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
+          {progressStats?.training_history.length ? <View style={styles.trainingHistory}>{progressStats.training_history.map((run) => <View key={run.training_run_id} style={styles.trainingRow}><View style={styles.trainingMarker}><Ionicons name={run.status === "completed" ? "checkmark" : run.status === "running" ? "hourglass-outline" : "close"} size={18} color={run.status === "completed" ? colors.successFg : run.status === "running" ? colors.warningFg : colors.danger} /></View><View style={styles.detectionCopy}><Text style={styles.trainingModel}>{run.model_version ? displayNameForModel({ id: run.model_id, version: run.model_version }) : "No model produced"}</Text><Text style={styles.trainingMeta}>{new Date(run.ended_at || run.started_at).toLocaleString("en-GB")}</Text><Text style={styles.trainingMeta}>{run.submission_count} submissions · {run.annotation_count} annotations</Text></View><StatusBadge label={run.status.toUpperCase()} tone={run.status === "completed" ? "success" : run.status === "running" ? "warning" : "danger"} /></View>)}</View> : <EmptyState icon="time-outline" title="No training history" message="Training runs will appear here." />}
         </ScrollView></View></View>
+      </Modal>
+
+      <Modal visible={showRollbackSelector} transparent animationType="slide" statusBarTranslucent onRequestClose={() => setShowRollbackSelector(false)}>
+        <View style={styles.sheetBackdrop}>
+          <View style={styles.sheet}>
+            {rollbackComparisonTarget ? <>
+              <View style={styles.imageHeader}>
+                <View><Text style={styles.imageTitle}>Compare Models</Text><Text style={styles.imageSubtitle}>Cached comparison against the current active model</Text></View>
+                <Pressable accessibilityLabel="Back to rollback models" onPress={() => { setRollbackComparisonTarget(null); setRollbackComparison(null); setRollbackComparisonError(""); }} hitSlop={10}><Ionicons name="arrow-back" size={25} color={colors.navy} /></Pressable>
+              </View>
+              <ScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
+                {rollbackComparisonError ? <View style={styles.errorBox}><Text style={styles.errorText}>{rollbackComparisonError}</Text></View> : null}
+                {rollbackComparison?.available && rollbackComparison.comparison ? <>
+                  <View style={styles.rollbackComparisonModels}><View style={styles.detectionCopy}><Text style={styles.modelRole}>CURRENT ACTIVE</Text><Text style={styles.modelVersion}>{displayNameForModel(rollbackComparison.comparison.active_model)}</Text></View><View style={styles.detectionCopy}><Text style={styles.modelRole}>PREVIOUS MODEL</Text><Text style={styles.modelVersion}>{displayNameForModel(rollbackComparison.comparison.rollback_target)}</Text></View></View>
+                  <Text style={styles.trainingMeta}>Historical comparison from {new Date(rollbackComparison.comparison.created_at).toLocaleString("en-GB")} · Dataset {rollbackComparison.comparison.dataset_version}</Text>
+                  <View style={styles.metricHeader}><Text style={styles.metricName}>METRIC</Text><Text style={styles.metricNumber}>ACTIVE</Text><Text style={styles.metricNumber}>PREVIOUS</Text><Text style={styles.metricDelta}>CHANGE</Text></View>
+                  {METRIC_ROWS.map(({ key, label }) => { const difference = rollbackComparison.comparison?.metric_differences[key]; return <View key={key} style={styles.metricRow}><Text style={styles.metricName}>{label}</Text><Text style={styles.metricNumber}>{formatMetric(rollbackComparison.comparison?.active_metrics[key])}</Text><Text style={styles.metricNumber}>{formatMetric(rollbackComparison.comparison?.rollback_target_metrics[key])}</Text><Text style={[styles.metricDelta, difference != null && difference > 0 ? styles.positiveDelta : difference != null && difference < 0 ? styles.negativeDelta : null]}>{formatMetricDifference(difference)}</Text></View>; })}
+                  <View style={styles.sharedComparison}><Text style={styles.sectionTitle}>Product Support</Text><Text style={styles.actionHint}>Shared products: {rollbackComparison.comparison.class_comparison.shared_classes.length}</Text><Text style={styles.actionHint}>Only in {activeModelName}: {rollbackComparison.comparison.class_comparison.only_in_active.length}</Text><Text style={styles.actionHint}>Only in {rollbackTargetDisplayName(rollbackComparisonTarget)}: {rollbackComparison.comparison.class_comparison.only_in_rollback_target.length}</Text></View>
+                </> : !rollbackComparisonError ? <EmptyState icon="information-circle-outline" title="No cached comparison" message={`No cached comparison is available between ${rollbackTargetDisplayName(rollbackComparisonTarget)} and ${activeModelName}. You can still select this model for rollback.`} /> : null}
+              </ScrollView>
+              <AppButton label="Back" variant="secondary" onPress={() => { setRollbackComparisonTarget(null); setRollbackComparison(null); setRollbackComparisonError(""); }} />
+            </> : <>
+              <View style={styles.imageHeader}><View><Text style={styles.imageTitle}>Select Model to Roll Back To</Text><Text style={styles.imageSubtitle}>Previous production models</Text></View><Pressable accessibilityLabel="Close rollback models" onPress={() => setShowRollbackSelector(false)} hitSlop={10}><Ionicons name="close" size={27} color={colors.navy} /></Pressable></View>
+              <ScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
+                {progressStats?.rollback_targets.length ? progressStats.rollback_targets.map((model) => { const selected = selectedRollbackVersion === model.version; const modelName = rollbackTargetDisplayName(model); return <View key={model.id} style={[styles.rollbackChoice, selected && styles.rollbackChoiceSelected]}><Pressable accessibilityRole="radio" accessibilityState={{ selected }} accessibilityLabel={`Select ${modelName} for rollback`} onPress={() => setSelectedRollbackVersion(model.version)} style={styles.rollbackChoiceMain}><Ionicons name={selected ? "radio-button-on" : "radio-button-off"} size={24} color={selected ? colors.primary : colors.textMuted} /><View style={styles.detectionCopy}><Text style={styles.modelVersion}>{modelName}</Text><Text style={styles.trainingMeta}>Previously active · {new Date(model.archived_at || model.last_activated_at || model.created_at).toLocaleDateString("en-GB")}</Text><Text style={styles.trainingMeta}>{model.classes_available ? `${model.supported_product_count} supported products` : "Product support metadata unavailable"}</Text></View></Pressable><AppButton label="Compare against active" icon="stats-chart-outline" variant="secondary" loading={loadingRollbackComparison === model.version} disabled={loadingRollbackComparison !== null} onPress={() => viewRollbackComparison(model)} /></View>; }) : <EmptyState icon="arrow-undo-outline" title="No previous production models" message="A previous active model will appear here when rollback is available." />}
+                {rollbackComparisonError ? <View style={styles.errorBox}><Text style={styles.errorText}>{rollbackComparisonError}</Text></View> : null}
+              </ScrollView>
+              <View style={styles.rollbackFooter}><View style={styles.detectionAction}><AppButton label="Cancel" variant="secondary" onPress={() => setShowRollbackSelector(false)} /></View><View style={styles.detectionAction}><AppButton label={selectedRollbackVersion ? `Rollback to ${rollbackTargetDisplayName(progressStats?.rollback_targets.find((model) => model.version === selectedRollbackVersion))}` : "Select a model"} icon="arrow-undo-outline" variant="danger" disabled={!selectedRollbackVersion || lifecycle.busy || Boolean(lifecycleMutation)} loading={lifecycleMutation === "Rollback Model"} onPress={() => selectedRollbackVersion && confirmRollback(selectedRollbackVersion)} /></View></View>
+            </>}
+          </View>
+        </View>
       </Modal>
 
       <Modal visible={showQuarantine} transparent animationType="slide" statusBarTranslucent onRequestClose={() => setShowQuarantine(false)}>
@@ -1421,13 +1576,51 @@ export default function TeachFridgeScreen() {
                         <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: selected }} accessibilityLabel={`Select submission ${detail.submission.id}`} onPress={() => toggleQuarantineGroup([detail])} hitSlop={8}>
                           <Ionicons name={selected ? "checkbox" : "square-outline"} size={23} color={selected ? colors.primary : colors.textMuted} />
                         </Pressable>
-                        <Pressable accessibilityRole="button" accessibilityState={{ expanded: submissionExpanded }} onPress={() => setExpandedQuarantineSubmission(submissionExpanded ? null : detail.submission.id)} style={styles.trainingGroupOpen}>
+                        <Pressable accessibilityRole="button" accessibilityState={{ expanded: submissionExpanded }} onPress={() => {
+                          setExpandedQuarantineSubmission(submissionExpanded ? null : detail.submission.id);
+                          setFocusedQuarantineAnnotation(submissionExpanded ? null : detail.annotations[0]?.id ?? null);
+                        }} style={styles.trainingGroupOpen}>
                           <View style={styles.detectionCopy}><Text style={styles.trainingSelectionTitle}>Submission #{detail.submission.id}</Text><Text style={styles.detectionMeta}>{labels.join(" · ")} · {detail.annotations.length} annotation{detail.annotations.length === 1 ? "" : "s"}</Text></View>
                           <Ionicons name={submissionExpanded ? "chevron-up" : "chevron-down"} size={18} color={colors.textMuted} />
                         </Pressable>
                       </View>
 
-                      {submissionExpanded ? <View style={styles.quarantineDetails}><Image source={{ uri: getScanImageUrl(detail.submission.scan_id) }} style={[styles.quarantineImage, { aspectRatio: detail.submission.image_width / detail.submission.image_height }]} resizeMode="contain" />{detail.annotations.map((annotation) => <View key={annotation.id} style={styles.quarantineAnnotation}><Text style={styles.annotationTitle}>{contributionProductLabel(annotation)}</Text><Text style={styles.annotationDetail}>{actionTitle(annotation.action)} · Annotation #{annotation.id}</Text></View>)}<View style={styles.quarantineActions}><View style={styles.detectionAction}><AppButton label="Reject permanently" variant="danger" icon="close-circle-outline" disabled={quarantineMutation !== null} onPress={() => confirmPermanentQuarantineRejection(detail.submission.id)} /></View><View style={styles.detectionAction}><AppButton label="Restore this" icon="refresh-outline" loading={quarantineMutation === detail.submission.id} disabled={quarantineMutation !== null} onPress={() => applyQuarantineAction(detail.submission.id, "restore")} /></View></View></View> : null}
+                      {submissionExpanded ? (() => {
+                        const annotationDetections = detail.annotations.map(annotationDetection);
+                        const drawableDetections = annotationDetections.filter((detection) => hasDrawableBox(detection, detail.submission.image_width, detail.submission.image_height));
+                        const missingBoxCount = annotationDetections.length - drawableDetections.length;
+                        return <View style={styles.quarantineDetails}>
+                          <DetectionImageViewer
+                            imageUri={getScanImageUrl(detail.submission.scan_id)}
+                            imageWidth={detail.submission.image_width}
+                            imageHeight={detail.submission.image_height}
+                            detections={drawableDetections}
+                            highlightedDetectionId={focusedQuarantineAnnotation}
+                            showLabels={false}
+                            style={[styles.quarantineImage, { aspectRatio: detail.submission.image_width / detail.submission.image_height }]}
+                          />
+                          {missingBoxCount ? <Text style={styles.quarantineBoxNotice}>{missingBoxCount} annotation{missingBoxCount === 1 ? " has" : "s have"} no drawable box.</Text> : null}
+                          {detail.annotations.map((annotation) => {
+                            const focused = focusedQuarantineAnnotation === annotation.id;
+                            const drawable = drawableDetections.some((detection) => detection.id === annotation.id);
+                            return <Pressable
+                              key={annotation.id}
+                              accessibilityRole="radio"
+                              accessibilityState={{ checked: focused }}
+                              accessibilityLabel={`Focus annotation ${annotation.id}`}
+                              onPress={() => setFocusedQuarantineAnnotation(annotation.id)}
+                              style={[styles.quarantineAnnotation, focused && styles.quarantineAnnotationFocused]}
+                            >
+                              <View style={styles.quarantineAnnotationHeader}>
+                                <Text style={styles.annotationTitle}>{contributionProductLabel(annotation)}</Text>
+                                {focused ? <Ionicons name="locate" size={18} color={colors.amber} /> : null}
+                              </View>
+                              <Text style={styles.annotationDetail}>{actionTitle(annotation.action)} · Annotation #{annotation.id}{drawable ? "" : " · Box unavailable"}</Text>
+                            </Pressable>;
+                          })}
+                          <View style={styles.quarantineActions}><View style={styles.detectionAction}><AppButton label="Reject permanently" variant="danger" icon="close-circle-outline" disabled={quarantineMutation !== null} onPress={() => confirmPermanentQuarantineRejection(detail.submission.id)} /></View><View style={styles.detectionAction}><AppButton label="Restore this" icon="refresh-outline" loading={quarantineMutation === detail.submission.id} disabled={quarantineMutation !== null} onPress={() => applyQuarantineAction(detail.submission.id, "restore")} /></View></View>
+                        </View>;
+                      })() : null}
                     </View>;
                   })}</View> : null}
                 </View>;
@@ -1816,6 +2009,11 @@ const styles = StyleSheet.create({
   jobMeta: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
   rollbackSection: { borderTopWidth: 1, borderTopColor: colors.border, marginTop: spacing.lg, paddingTop: spacing.md },
   rollbackRow: { flexDirection: "row", alignItems: "center", gap: spacing.sm, marginTop: spacing.md },
+  rollbackChoice: { gap: spacing.sm, padding: spacing.md, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, backgroundColor: colors.surface },
+  rollbackChoiceSelected: { borderColor: colors.primary, backgroundColor: colors.primarySoft },
+  rollbackChoiceMain: { flexDirection: "row", alignItems: "center", gap: spacing.sm, minHeight: 48 },
+  rollbackFooter: { flexDirection: "row", gap: spacing.sm },
+  rollbackComparisonModels: { flexDirection: "row", gap: spacing.lg, padding: spacing.md, borderRadius: radius.lg, backgroundColor: colors.surfaceMuted },
   actionBreakdown: { marginTop: spacing.lg, gap: spacing.xs },
   actionRow: { minHeight: 66, flexDirection: "row", alignItems: "center", gap: spacing.md, borderTopWidth: 1, borderTopColor: colors.border, paddingVertical: spacing.sm },
   actionIcon: { width: 40, height: 40, borderRadius: 13, backgroundColor: colors.primarySoft, alignItems: "center", justifyContent: "center" },
@@ -1846,7 +2044,10 @@ const styles = StyleSheet.create({
   quarantineRow: { minHeight: 64, flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.md, backgroundColor: colors.surface },
   quarantineDetails: { gap: spacing.sm, padding: spacing.md, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surfaceMuted },
   quarantineImage: { width: "100%", maxHeight: 260, borderRadius: radius.lg, backgroundColor: colors.border },
-  quarantineAnnotation: { padding: spacing.sm, borderRadius: radius.md, backgroundColor: colors.surface },
+  quarantineAnnotation: { padding: spacing.sm, borderRadius: radius.md, backgroundColor: colors.surface, borderWidth: 2, borderColor: "transparent" },
+  quarantineAnnotationFocused: { borderColor: colors.amber },
+  quarantineAnnotationHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.sm },
+  quarantineBoxNotice: { color: colors.textMuted, fontSize: 12, fontWeight: "700" },
   quarantineActions: { flexDirection: "row", gap: spacing.sm, marginTop: spacing.xs },
   modelCardHeader: { flexDirection: "row", alignItems: "flex-start", gap: spacing.md },
   modelDisplayName: { color: colors.navy, fontSize: 20, lineHeight: 25, fontWeight: "900" },

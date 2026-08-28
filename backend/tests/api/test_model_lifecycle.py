@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import psycopg2
 import pytest
+from psycopg2.extras import Json
 
 from backend.class_aware_metrics import build_class_aware_comparison
 
@@ -533,6 +534,8 @@ def test_successful_training_records_eligibility_provenance_and_candidate(
     body = progress.json()
     assert body["active_model"]["id"] == lifecycle_context.active_id
     assert body["latest_candidate"]["id"] == candidate["id"]
+    assert body["candidate"] == body["latest_candidate"]
+    assert body["candidate_state"] == "needs_comparison"
     assert body["comparison"] is None
     assert body["contributions"] == {
         "total_approved": 2,
@@ -540,11 +543,40 @@ def test_successful_training_records_eligibility_provenance_and_candidate(
         "approved_waiting": 0,
     }
     assert body["training_history"][0]["status"] == "completed"
+    assert body["training_history"][0]["submission_count"] == 2
+    assert body["training_history"][0]["annotation_count"] == 2
     assert body["actions"]["can_train"] is False
     assert body["actions"]["can_compare"] is True
     assert body["actions"]["can_promote"] is False
     assert body["promotion_evaluation"]["eligible"] is False
     assert body["promotion_evaluation"]["reasons"][0]["code"] == "comparison_missing"
+
+
+def test_ai_progress_clearly_reports_no_candidate(test_client, lifecycle_context):
+    progress = test_client.get("/ai-progress")
+    assert progress.status_code == 200
+    body = progress.json()
+    assert body["active_model"] == {
+        "id": lifecycle_context.active_id,
+        "version": lifecycle_context.active_version,
+        "status": "active",
+        "created_at": body["active_model"]["created_at"],
+        "dataset_version": None,
+        "training_run_id": None,
+        "precision": None,
+        "recall": None,
+        "map50": None,
+        "map50_95": None,
+    }
+    assert body["candidate"] is None
+    assert body["latest_candidate"] is None
+    assert body["candidate_state"] == "none"
+    assert body["active_model_classes"] == {
+        "available": False,
+        "count": 0,
+        "classes": [],
+    }
+    assert body["rollback_targets"] == []
 
 
 def test_failed_training_preserves_active_model_and_has_no_usage(
@@ -790,6 +822,9 @@ def test_comparison_persists_fingerprints_metrics_and_decision(
     )
     progress = test_client.get("/ai-progress").json()
     assert progress["actions"]["can_promote"] is outperforms
+    assert progress["candidate_state"] == (
+        "eligible" if outperforms else "not_eligible"
+    )
     assert progress["comparison"] is not None
 
 
@@ -802,6 +837,17 @@ def test_losing_candidate_blocks_training_until_explicit_rejection(
     ]
     trained = _run_successful_training(test_client, lifecycle_context)
     candidate_version = trained["result"]["model_version"]
+
+    # Reconciliation (including the startup path) must retain the unresolved
+    # candidate's selected data as experimental.
+    lifecycle_context.runtime.ensure_schema()
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT training_state FROM annotation_submissions WHERE id = ANY(%s);",
+            ([item["submission_id"] for item in selected],),
+        )
+        assert {row[0] for row in cursor.fetchall()} == {"experimental"}
+    db_connection.commit()
 
     blocked = test_client.post("/model-lifecycle/train")
     assert blocked.status_code == 409
@@ -1074,7 +1120,13 @@ def test_promotion_and_rollback_preserve_single_active_and_history(
     active_metrics = {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.5}
     candidate_metrics = {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.6}
     compared = _run_comparison(
-        test_client, lifecycle_context, candidate_version, active_metrics, candidate_metrics
+        test_client,
+        lifecycle_context,
+        candidate_version,
+        active_metrics,
+        candidate_metrics,
+        active_classes=["Apple", "Milk"],
+        candidate_classes=["Apple", "Milk", "Lemon"],
     )
     comparison_id = compared["result"]["comparison_id"]
 
@@ -1159,6 +1211,86 @@ def test_promotion_and_rollback_preserve_single_active_and_history(
         lifecycle_context.active_id,
         None,
     )
+    db_connection.commit()
+
+    historical_provenance = {
+        "dataset_version": "historical-initial-vs-lemon",
+        "dataset_content_sha256": "historical-content-hash",
+        "validation_split_sha256": "historical-validation-hash",
+        "evaluation_parameters": {
+            "provider": "historical",
+            "split": "validation-from-original-comparison",
+        },
+    }
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE model_comparisons
+            SET dataset_version = %s,
+                dataset_content_sha256 = %s,
+                validation_split_sha256 = %s,
+                evaluation_parameters = %s
+            WHERE id = %s;
+            """,
+            (
+                historical_provenance["dataset_version"],
+                historical_provenance["dataset_content_sha256"],
+                historical_provenance["validation_split_sha256"],
+                Json(historical_provenance["evaluation_parameters"]),
+                comparison_id,
+            ),
+        )
+        cursor.execute("SELECT COUNT(*) FROM model_comparisons;")
+        comparison_count_before_lookup = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT version, status FROM model_versions ORDER BY id;"
+        )
+        statuses_before_lookup = cursor.fetchall()
+        cursor.execute(
+            "SELECT id, training_state FROM annotation_submissions ORDER BY id;"
+        )
+        annotation_states_before_lookup = cursor.fetchall()
+    db_connection.commit()
+    with lifecycle_context.runtime._LIFECYCLE_JOB_LOCK:
+        jobs_before_lookup = dict(lifecycle_context.runtime._LIFECYCLE_JOBS)
+
+    with (
+        patch.object(
+            lifecycle_context.runtime,
+            "_dataset_directory",
+            side_effect=AssertionError("historical cache lookup must not inspect datasets"),
+        ),
+        patch.object(
+            lifecycle_context.comparison,
+            "compare",
+            side_effect=AssertionError("historical cache lookup must not evaluate models"),
+        ),
+    ):
+        cached = test_client.get(
+            f"/model-lifecycle/rollback-targets/{candidate_version}/compare"
+        )
+
+    assert cached.status_code == 200
+    result = cached.json()
+    assert result["available"] is True
+    assert result["comparison"]["comparison_id"] == comparison_id
+    assert result["comparison"]["active_model"]["version"] == lifecycle_context.active_version
+    assert result["comparison"]["rollback_target"]["version"] == candidate_version
+    for field, value in historical_provenance.items():
+        assert result["comparison"][field] == value
+    assert result["comparison"]["class_comparison"]["only_in_rollback_target"] == ["Lemon"]
+
+    with lifecycle_context.runtime._LIFECYCLE_JOB_LOCK:
+        assert lifecycle_context.runtime._LIFECYCLE_JOBS == jobs_before_lookup
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM model_comparisons;")
+        assert cursor.fetchone()[0] == comparison_count_before_lookup
+        cursor.execute("SELECT version, status FROM model_versions ORDER BY id;")
+        assert cursor.fetchall() == statuses_before_lookup
+        cursor.execute(
+            "SELECT id, training_state FROM annotation_submissions ORDER BY id;"
+        )
+        assert cursor.fetchall() == annotation_states_before_lookup
     db_connection.commit()
 
     # Startup reconciliation must be idempotent and must not trust data merely
@@ -1300,6 +1432,391 @@ def test_rollback_reconciles_shared_and_model_specific_training_lineage(
     assert _active_count(db_connection) == 1
 
 
+def test_ai_progress_rollback_targets_and_comparison_are_pair_safe_and_reusable(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    submission_factory("assisted", "approved", "Apple")
+    submission_factory("manual", "approved", "Milk")
+    trained = _run_successful_training(test_client, lifecycle_context)
+    active_version = trained["result"]["model_version"]
+    active_metrics = {
+        "precision": 0.72, "recall": 0.71, "map50": 0.74, "map50_95": 0.55
+    }
+    candidate_metrics = {
+        "precision": 0.82, "recall": 0.80, "map50": 0.84, "map50_95": 0.66
+    }
+    promoted_comparison = _run_comparison(
+        test_client,
+        lifecycle_context,
+        active_version,
+        active_metrics,
+        candidate_metrics,
+        active_classes=["Apple", "Milk"],
+        candidate_classes=["Apple", "Milk", "Yogurt"],
+        active_per_class={
+            name: active_metrics for name in ["Apple", "Milk"]
+        },
+        candidate_per_class={
+            name: candidate_metrics for name in ["Apple", "Milk", "Yogurt"]
+        },
+    )
+    promoted_comparison_id = promoted_comparison["result"]["comparison_id"]
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (
+            SimpleNamespace(task="detect"),
+            str(Path(record["model_path"]).resolve()),
+        ),
+    )
+    promoted = test_client.post(
+        f"/models/{active_version}/promote",
+        json={"comparison_id": promoted_comparison_id},
+    )
+    assert promoted.status_code == 200
+
+    unused_path = lifecycle_context.root / "unused-model.pt"
+    unused_path.write_bytes(b"unused")
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO model_versions(version, model_path, status)
+            VALUES ('arbitrary-archive', %s, 'archived'),
+                   ('never-production-rejected', %s, 'rejected'),
+                   ('unresolved-candidate', %s, 'candidate');
+            """,
+            (str(unused_path), str(unused_path), str(unused_path)),
+        )
+    db_connection.commit()
+
+    progress = test_client.get("/ai-progress").json()
+    assert progress["active_model"]["version"] == active_version
+    assert progress["active_model_classes"] == {
+        "available": True,
+        "count": 3,
+        "classes": ["Apple", "Milk", "Yogurt"],
+    }
+    assert [row["version"] for row in progress["rollback_targets"]] == [
+        lifecycle_context.active_version
+    ]
+    target = progress["rollback_targets"][0]
+    assert target["status"] == "archived"
+    assert target["classes_available"] is True
+    assert target["supported_product_count"] == 2
+    assert target["supported_classes"] == ["Apple", "Milk"]
+    assert len(progress["training_history"]) == 1
+    assert progress["training_history"][0]["model_version"] == active_version
+    for invalid_version in (
+        active_version,
+        "arbitrary-archive",
+        "never-production-rejected",
+        "unresolved-candidate",
+    ):
+        invalid = test_client.post(
+            f"/model-lifecycle/rollback-targets/{invalid_version}/compare"
+        )
+        assert invalid.status_code == 409
+
+    rollback_active_metrics = {
+        "precision": 0.81, "recall": 0.79, "map50": 0.83, "map50_95": 0.65
+    }
+    rollback_target_metrics = {
+        "precision": 0.70, "recall": 0.69, "map50": 0.72, "map50_95": 0.53
+    }
+    comparison_url = (
+        f"/model-lifecycle/rollback-targets/"
+        f"{lifecycle_context.active_version}/compare"
+    )
+    with lifecycle_context.runtime._LIFECYCLE_JOB_LOCK:
+        jobs_before_lookup = dict(lifecycle_context.runtime._LIFECYCLE_JOBS)
+    with patch.object(
+        lifecycle_context.comparison,
+        "compare",
+        side_effect=AssertionError("cache miss must not run model evaluation"),
+    ):
+        missing = test_client.get(comparison_url)
+    assert missing.status_code == 200
+    assert missing.json() == {"available": False, "comparison": None}
+    with lifecycle_context.runtime._LIFECYCLE_JOB_LOCK:
+        assert lifecycle_context.runtime._LIFECYCLE_JOBS == jobs_before_lookup
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM model_comparisons;")
+        assert cursor.fetchone()[0] == 1
+        cursor.execute(
+            """
+            SELECT dataset_version, dataset_content_sha256,
+                   validation_split_sha256, evaluation_parameters
+            FROM model_comparisons WHERE id = %s;
+            """,
+            (promoted_comparison_id,),
+        )
+        dataset_version, content_hash, validation_hash, parameters = cursor.fetchone()
+        cursor.execute(
+            "SELECT id FROM model_versions WHERE version = %s;",
+            (active_version,),
+        )
+        active_id = cursor.fetchone()[0]
+
+    class_aware = build_class_aware_comparison(
+        _evaluation(["Apple", "Milk", "Yogurt"], rollback_active_metrics),
+        _evaluation(["Apple", "Milk"], rollback_target_metrics),
+    )
+    differences = {
+        key: rollback_target_metrics[key] - rollback_active_metrics[key]
+        for key in rollback_active_metrics
+    }
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO model_comparisons(
+                id, dataset_version, dataset_content_sha256,
+                validation_split_sha256, active_model_id, candidate_model_id,
+                evaluation_parameters, active_metrics, candidate_metrics,
+                metric_differences, class_comparison,
+                shared_class_comparison, added_class_metrics,
+                comparison_rule, candidate_outperforms_active
+            ) VALUES (
+                'cached-rollback-comparison', %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s,
+                'informational rollback comparison', FALSE
+            );
+            """,
+            (
+                dataset_version, content_hash, validation_hash,
+                active_id, lifecycle_context.active_id,
+                Json(parameters), Json(rollback_active_metrics),
+                Json(rollback_target_metrics), Json(differences),
+                Json(class_aware["class_comparison"]),
+                Json(class_aware["shared_class_comparison"]),
+                Json(class_aware["added_class_metrics"]),
+            ),
+        )
+    db_connection.commit()
+
+    response = test_client.post(
+        comparison_url,
+        json={"active_version": "client-must-not-control-this"},
+    )
+    assert response.status_code == 200
+    assert response.json()["available"] is True
+    result = response.json()["comparison"]
+    assert result["comparison_type"] == "rollback_target_vs_active"
+    assert result["comparison_id"] == "cached-rollback-comparison"
+    assert result["active_model"]["version"] == active_version
+    assert result["rollback_target"]["version"] == lifecycle_context.active_version
+    assert result["rollback_target_metrics"] == rollback_target_metrics
+    assert result["class_comparison"] == {
+        "active_classes": ["Apple", "Milk", "Yogurt"],
+        "rollback_target_classes": ["Apple", "Milk"],
+        "shared_classes": ["Apple", "Milk"],
+        "only_in_active": ["Yogurt"],
+        "only_in_rollback_target": [],
+    }
+    assert [
+        row["version"] for row in test_client.get("/ai-progress").json()["rollback_targets"]
+    ] == [lifecycle_context.active_version]
+
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT version, status FROM model_versions;")
+        statuses = dict(cursor.fetchall())
+        cursor.execute("SELECT COUNT(*) FROM model_comparisons;")
+        comparison_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM model_activation_history;")
+        activation_count = cursor.fetchone()[0]
+    assert statuses[active_version] == "active"
+    assert statuses[lifecycle_context.active_version] == "archived"
+    assert statuses["arbitrary-archive"] == "archived"
+    assert statuses["never-production-rejected"] == "rejected"
+    assert statuses["unresolved-candidate"] == "candidate"
+    assert comparison_count == 2
+    assert activation_count == 1
+
+
+def test_rollback_comparison_preserves_current_candidate_and_annotation_states(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    submission_factory("assisted", "approved", "Apple")
+    submission_factory("manual", "approved", "Milk")
+    baseline = _run_successful_training(test_client, lifecycle_context)
+    baseline_version = baseline["result"]["model_version"]
+    metrics = {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.5}
+    better = {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.6}
+    compared = _run_comparison(
+        test_client, lifecycle_context, baseline_version, metrics, better
+    )
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (
+            SimpleNamespace(task="detect"),
+            str(Path(record["model_path"]).resolve()),
+        ),
+    )
+    assert test_client.post(
+        f"/models/{baseline_version}/promote",
+        json={"comparison_id": compared["result"]["comparison_id"]},
+    ).status_code == 200
+
+    selected = [
+        submission_factory("manual", "approved", "Lemon"),
+        submission_factory("manual", "approved", "Orange"),
+    ]
+    quarantined = submission_factory("manual", "approved", "Bread")
+    candidate = _run_successful_training(
+        test_client,
+        lifecycle_context,
+        [row["submission_id"] for row in selected],
+    )
+    candidate_version = candidate["result"]["model_version"]
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE annotation_submissions SET training_state = 'quarantined' WHERE id = %s;",
+            (quarantined["submission_id"],),
+        )
+    db_connection.commit()
+    before = test_client.get("/ai-progress").json()
+    assert before["candidate_state"] == "needs_comparison"
+
+    with db_connection.cursor() as cursor:
+        cursor.execute("SELECT COUNT(*) FROM model_comparisons;")
+        comparison_count = cursor.fetchone()[0]
+    with lifecycle_context.runtime._LIFECYCLE_JOB_LOCK:
+        jobs_before_lookup = dict(lifecycle_context.runtime._LIFECYCLE_JOBS)
+    with patch.object(
+        lifecycle_context.comparison,
+        "compare",
+        side_effect=AssertionError("cache lookup must not evaluate models"),
+    ):
+        response = test_client.get(
+            f"/model-lifecycle/rollback-targets/{lifecycle_context.active_version}/compare"
+        )
+    assert response.status_code == 200
+    assert response.json() == {"available": False, "comparison": None}
+    with lifecycle_context.runtime._LIFECYCLE_JOB_LOCK:
+        assert lifecycle_context.runtime._LIFECYCLE_JOBS == jobs_before_lookup
+
+    after = test_client.get("/ai-progress").json()
+    assert after["active_model"]["version"] == baseline_version
+    assert after["candidate"]["version"] == candidate_version
+    assert after["candidate_state"] == before["candidate_state"]
+    assert after["promotion_evaluation"] == before["promotion_evaluation"]
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, training_state FROM annotation_submissions WHERE id = ANY(%s);",
+            ([row["submission_id"] for row in selected] + [quarantined["submission_id"]],),
+        )
+        states = dict(cursor.fetchall())
+        cursor.execute(
+            "SELECT status FROM model_versions WHERE version = %s;",
+            (candidate_version,),
+        )
+        candidate_status = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM model_comparisons;")
+        final_comparison_count = cursor.fetchone()[0]
+    assert {states[row["submission_id"]] for row in selected} == {"experimental"}
+    assert states[quarantined["submission_id"]] == "quarantined"
+    assert candidate_status == "candidate"
+    assert final_comparison_count == comparison_count
+
+
+def test_rollback_released_submission_can_be_selected_again_without_losing_provenance(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    contribution = submission_factory("manual", "approved", "Lemon")
+    submission_id = contribution["submission_id"]
+    companion = submission_factory("manual", "approved", "Milk")
+    selected_ids = [submission_id, companion["submission_id"]]
+    first = _run_successful_training(
+        test_client, lifecycle_context, selected_ids
+    )
+    first_version = first["result"]["model_version"]
+    first_run_id = first["result"]["training_run_id"]
+    compared = _run_comparison(
+        test_client,
+        lifecycle_context,
+        first_version,
+        {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.5},
+        {"precision": 0.8, "recall": 0.8, "map50": 0.8, "map50_95": 0.6},
+    )
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (
+            SimpleNamespace(task="detect"),
+            str(Path(record["model_path"]).resolve()),
+        ),
+    )
+    promoted = test_client.post(
+        f"/models/{first_version}/promote",
+        json={"comparison_id": compared["result"]["comparison_id"]},
+    )
+    assert promoted.status_code == 200
+
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT training_state FROM annotation_submissions WHERE id = %s;",
+            (submission_id,),
+        )
+        assert cursor.fetchone()[0] == "trusted"
+    db_connection.commit()
+
+    rolled_back = test_client.post(
+        f"/models/{lifecycle_context.active_version}/rollback"
+    )
+    assert rolled_back.status_code == 200
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT training_state FROM annotation_submissions WHERE id = %s;",
+            (submission_id,),
+        )
+        assert cursor.fetchone()[0] == "eligible"
+    db_connection.commit()
+
+    second = _run_successful_training(
+        test_client, lifecycle_context, selected_ids
+    )
+    second_run_id = second["result"]["training_run_id"]
+    assert second_run_id != first_run_id
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT u.training_run_id, m.version, u.is_experimental
+            FROM training_run_submission_usage u
+            JOIN model_versions m ON m.id = u.model_version_id
+            WHERE u.submission_id = %s
+            ORDER BY u.used_at, u.training_run_id;
+            """,
+            (submission_id,),
+        )
+        usages = {
+            row[0]: (row[1], row[2])
+            for row in cursor.fetchall()
+        }
+        cursor.execute(
+            """
+            SELECT training_run_id
+            FROM training_run_annotation_usage
+            WHERE submission_id = %s
+            ORDER BY used_at, training_run_id;
+            """,
+            (submission_id,),
+        )
+        annotation_run_ids = {row[0] for row in cursor.fetchall()}
+        cursor.execute(
+            "SELECT training_state FROM annotation_submissions WHERE id = %s;",
+            (submission_id,),
+        )
+        current_state = cursor.fetchone()[0]
+    assert set(usages) == {first_run_id, second_run_id}
+    assert {value[0] for value in usages.values()} == {
+        first_version,
+        second["result"]["model_version"],
+    }
+    assert {value[1] for value in usages.values()} == {True}
+    assert annotation_run_ids == {first_run_id, second_run_id}
+    assert current_state == "experimental"
+
+
 def test_rejected_candidate_quarantines_only_its_experimental_batch(
     test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
 ):
@@ -1384,6 +1901,20 @@ def test_rejected_candidate_quarantines_only_its_experimental_batch(
         experimental_d["submission_id"]: True,
     }
     assert annotation_usage == usage
+
+    # Switching active archived models must not release rejected experimental
+    # data from quarantine.
+    assert test_client.post(
+        f"/models/{lifecycle_context.active_version}/rollback"
+    ).status_code == 200
+    assert test_client.post(f"/models/{first_version}/rollback").status_code == 200
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT training_state FROM annotation_submissions WHERE id = %s;",
+            (experimental_d["submission_id"],),
+        )
+        assert cursor.fetchone()[0] == "quarantined"
+    db_connection.commit()
 
     experimental_e = submission_factory("manual", "approved", "Orange")
     third = _run_successful_training(test_client, lifecycle_context)
@@ -1847,6 +2378,7 @@ def test_stale_comparison_cannot_promote_against_a_new_active_model(
     progress = test_client.get("/ai-progress").json()
     assert progress["comparison"]["id"] == comparison_id
     assert progress["promotion_evaluation"]["stale"] is True
+    assert progress["candidate_state"] == "comparison_stale"
     assert progress["promotion_evaluation"]["reasons"][0]["code"] == "stale_comparison"
     assert progress["actions"]["can_promote"] is False
     assert progress["latest_candidate"]["version"] == candidate_version
@@ -2041,6 +2573,7 @@ def test_malformed_expansion_metrics_fail_closed_everywhere(
     progress = test_client.get("/ai-progress").json()
     assert progress["promotion_evaluation"]["eligible"] is False
     assert progress["promotion_evaluation"]["reasons"][0]["code"] == "malformed_class_metrics"
+    assert progress["candidate_state"] == "comparison_invalid"
     assert progress["actions"]["can_promote"] is False
     monkeypatch.setattr(
         lifecycle_context.runtime,
