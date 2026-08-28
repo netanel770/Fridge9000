@@ -547,6 +547,10 @@ def test_successful_training_records_eligibility_provenance_and_candidate(
     assert body["candidate"] == body["latest_candidate"]
     assert body["candidate_state"] == "needs_comparison"
     assert body["comparison"] is None
+    assert body["model_display_names"] == {
+        lifecycle_context.active_version: "Initial Model",
+        candidate["version"]: "Model 2",
+    }
     assert body["contributions"] == {
         "total_approved": 2,
         "used_in_training": 2,
@@ -1501,6 +1505,13 @@ def test_ai_progress_rollback_targets_and_comparison_are_pair_safe_and_reusable(
 
     progress = test_client.get("/ai-progress").json()
     assert progress["active_model"]["version"] == active_version
+    assert progress["model_display_names"] == {
+        lifecycle_context.active_version: "Initial Model",
+        active_version: "Model 2",
+        "arbitrary-archive": "Model 3",
+        "never-production-rejected": "Model 4",
+        "unresolved-candidate": "Model 5",
+    }
     assert progress["active_model_classes"] == {
         "available": True,
         "count": 3,
@@ -1615,6 +1626,8 @@ def test_ai_progress_rollback_targets_and_comparison_are_pair_safe_and_reusable(
     assert result["active_model"]["version"] == active_version
     assert result["rollback_target"]["version"] == lifecycle_context.active_version
     assert result["rollback_target_metrics"] == rollback_target_metrics
+    assert result["shared_class_comparison"] == class_aware["shared_class_comparison"]
+    assert result["added_class_metrics"] == class_aware["added_class_metrics"]
     assert result["class_comparison"] == {
         "active_classes": ["Apple", "Milk", "Yogurt"],
         "rollback_target_classes": ["Apple", "Milk"],

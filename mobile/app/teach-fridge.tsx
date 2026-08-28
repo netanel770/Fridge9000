@@ -9,7 +9,7 @@ import { BoundingBoxEditor } from "../src/components/BoundingBoxEditor";
 import { ProductLabelInput, uniqueProductLabels } from "../src/components/ProductLabelInput";
 import { lifecyclePhaseLabel, useLifecycleJob } from "../src/components/LifecycleJobProvider";
 import { createAnnotationSubmission, getAIProgress, getAllInventory, getAnnotationSubmission, getAnnotationSubmissions, getRecentScans, getRollbackTargetComparison, getScan, getScanDetections, getScanImageUrl, manageQuarantinedSubmission, moderateAnnotationSubmission, promoteCandidate, rejectCandidate, rollbackModel, startCandidateComparison, startCandidateTraining, updateAnnotationBox, updateAnnotationLabel } from "../src/services/api";
-import type { AIProgressResponse, AnnotationItem, AnnotationStatus, AnnotationSubmission, AnnotationSubmissionDetail, AnnotationTrainingState, CandidateState, DetectionItem, InventoryItem, ModelMetrics, PromotionReason, RecentScan, RollbackComparisonResponse, RollbackTarget } from "../src/types/api";
+import type { AddedClassMetrics, AIProgressResponse, AnnotationItem, AnnotationStatus, AnnotationSubmission, AnnotationSubmissionDetail, AnnotationTrainingState, CandidateState, DetectionItem, InventoryItem, ModelMetrics, PromotionReason, RecentScan, RollbackComparisonResponse, RollbackTarget, SharedClassComparison } from "../src/types/api";
 import { areImageDimensionsCompatible, getMinimumAnnotationBoxSize } from "../src/utils/imageCoordinates";
 import type { ImageBoundingBox } from "../src/utils/imageCoordinates";
 import { colors, radius, spacing, typography } from "../src/theme";
@@ -106,28 +106,10 @@ function candidateStateCopy(state: CandidateState) {
 
 const INITIAL_MODEL_VERSION = "fridge9000-production-initial";
 
-function singleAddedClass(classes: string[], baselineClasses: string[]) {
-  const baseline = new Set(baselineClasses.map((name) => name.trim().toLocaleLowerCase()));
-  const added = [...new Map(
-    classes
-      .map((name) => name.trim())
-      .filter((name) => name && !baseline.has(name.toLocaleLowerCase()))
-      .map((name) => [name.toLocaleLowerCase(), name]),
-  ).values()];
-  return added.length === 1 ? added[0] : null;
-}
-
-function readableModelName(model: ModelIdentity | null | undefined, meaningfulClass?: string | null) {
+function readableModelName(model: ModelIdentity | null | undefined, displayNames: Record<string, string>) {
+  if (model?.version && displayNames[model.version]) return displayNames[model.version];
   if (model?.version === INITIAL_MODEL_VERSION) return "Initial Model";
-  if (meaningfulClass) {
-    const product = meaningfulClass
-      .trim()
-      .split(/\s+/)
-      .map((part) => part ? `${part[0].toLocaleUpperCase()}${part.slice(1).toLocaleLowerCase()}` : part)
-      .join(" ");
-    if (product) return `${product} Model`;
-  }
-  return model?.id != null ? `Model ${model.id}` : "Model";
+  return "Model";
 }
 
 function formatMetric(value: number | null | undefined) {
@@ -157,79 +139,113 @@ function promotionReasonText(reason: PromotionReason) {
   return reason.message;
 }
 
-function metricVerdict(difference: number | null | undefined) {
-  if (difference == null) return "Not available";
-  if (Math.abs(difference) < 0.0005) return "Roughly equal";
-  return difference > 0 ? "Candidate better" : "Active better";
-}
-
-function sharedMap50_95Difference(progress: AIProgressResponse) {
-  const policyDifference = progress.promotion_evaluation.metrics.shared_map50_95_difference;
-  if (typeof policyDifference === "number" && Number.isFinite(policyDifference)) {
-    return policyDifference;
-  }
-
-  const comparisonDifference = progress.comparison?.shared_class_comparison.metric_differences?.map50_95;
-  return typeof comparisonDifference === "number" && Number.isFinite(comparisonDifference)
-    ? comparisonDifference
-    : null;
-}
-
-function sharedRegressionBadge(progress: AIProgressResponse): {
-  label: string;
-  tone: "success" | "danger" | "warning";
-} {
-  const reasons = progress.promotion_evaluation.reasons;
-
-  if (
-    progress.promotion_evaluation.stale ||
-    reasons.some((reason) => reason.code === "stale_comparison")
-  ) {
-    return { label: "COMPARISON STALE", tone: "warning" };
-  }
-
-  if (reasons.some((reason) => reason.code === "malformed_class_metrics")) {
-    return { label: "COMPARISON INVALID", tone: "warning" };
-  }
-
-  if (
-    reasons.some(
-      (reason) =>
-        reason.code === "comparison_missing" ||
-        reason.code === "missing_shared_classes",
-    )
-  ) {
-    return { label: "COMPARISON INCOMPLETE", tone: "warning" };
-  }
-
-  const difference = sharedMap50_95Difference(progress);
-  const maximumRegression =
-    progress.promotion_evaluation.thresholds.max_shared_map50_95_regression;
-
-  if (
-    difference == null ||
-    !Number.isFinite(maximumRegression) ||
-    maximumRegression < 0
-  ) {
-    return { label: "COMPARISON UNAVAILABLE", tone: "warning" };
-  }
-
-  if (
-    reasons.some((reason) => reason.code === "shared_class_regression") ||
-    difference < -maximumRegression
-  ) {
-    return { label: "REGRESSION TOO HIGH", tone: "danger" };
-  }
-
-  return { label: "WITHIN ALLOWED REGRESSION", tone: "success" };
-}
-
 const METRIC_ROWS: { key: keyof ModelMetrics; label: string }[] = [
   { key: "precision", label: "Precision" },
   { key: "recall", label: "Recall" },
   { key: "map50", label: "mAP50" },
   { key: "map50_95", label: "mAP50–95" },
 ];
+
+function MetricComparisonTable({
+  title,
+  description,
+  activeLabel,
+  comparedLabel,
+  activeMetrics,
+  comparedMetrics,
+  differences,
+}: {
+  title: string;
+  description?: string;
+  activeLabel: string;
+  comparedLabel: string;
+  activeMetrics?: ModelMetrics;
+  comparedMetrics?: ModelMetrics;
+  differences?: ModelMetrics;
+}) {
+  if (!activeMetrics || !comparedMetrics) {
+    return <View style={styles.comparisonSection}><Text style={styles.comparisonSectionTitle}>{title}</Text>{description ? <Text style={styles.comparisonSectionDescription}>{description}</Text> : null}<Text style={styles.metricsUnavailable}>Metrics unavailable in this comparison</Text></View>;
+  }
+  return <View style={styles.comparisonSection}>
+    <Text style={styles.comparisonSectionTitle}>{title}</Text>
+    {description ? <Text style={styles.comparisonSectionDescription}>{description}</Text> : null}
+    <View style={styles.metricHeader}><Text style={styles.metricName}>METRIC</Text><Text style={styles.metricNumber}>{activeLabel.toLocaleUpperCase()}</Text><Text style={styles.metricNumber}>{comparedLabel.toLocaleUpperCase()}</Text><Text style={styles.metricDelta}>CHANGE</Text></View>
+    {METRIC_ROWS.map(({ key, label }) => {
+      const difference = differences?.[key];
+      return <View key={key} style={styles.metricRow}><Text style={styles.metricName}>{label}</Text><Text style={styles.metricNumber}>{formatMetric(activeMetrics[key])}</Text><Text style={styles.metricNumber}>{formatMetric(comparedMetrics[key])}</Text><Text style={[styles.metricDelta, difference != null && difference > 0 ? styles.positiveDelta : difference != null && difference < 0 ? styles.negativeDelta : null]}>{formatMetricDifference(difference)}</Text></View>;
+    })}
+  </View>;
+}
+
+function SharedProductPerformance({
+  comparison,
+  fallbackClasses,
+  comparedLabel,
+}: {
+  comparison: SharedClassComparison;
+  fallbackClasses: string[];
+  comparedLabel: string;
+}) {
+  const classes = comparison.classes?.length
+    ? comparison.classes
+    : comparison.class_names?.length
+      ? comparison.class_names
+      : fallbackClasses;
+  return <>
+    <MetricComparisonTable
+      title="Shared Product Performance"
+      description={`${classes.length} product${classes.length === 1 ? "" : "s"} supported by both models`}
+      activeLabel="Active"
+      comparedLabel={comparedLabel}
+      activeMetrics={comparison.available ? comparison.active_metrics : undefined}
+      comparedMetrics={comparison.available ? comparison.candidate_metrics : undefined}
+      differences={comparison.available ? comparison.metric_differences : undefined}
+    />
+    <View style={styles.classChips}>{classes.map((name) => <View key={name} style={styles.classChip}><Text style={styles.classChipText}>{name}</Text></View>)}</View>
+    {comparison.unavailable_classes?.length ? <Text style={styles.metricsUnavailable}>Metrics unavailable for: {comparison.unavailable_classes.join(", ")}</Text> : null}
+  </>;
+}
+
+function metricsForProduct(metrics: AddedClassMetrics | undefined, product: string) {
+  const key = Object.keys(metrics?.per_class || {}).find((name) => name.toLocaleLowerCase() === product.toLocaleLowerCase());
+  return key ? metrics?.per_class[key] : undefined;
+}
+
+function UniqueProductPerformance({
+  title,
+  products,
+  metrics,
+  supportedBy,
+  unsupportedBy,
+  cached = false,
+}: {
+  title: string;
+  products: string[];
+  metrics?: AddedClassMetrics;
+  supportedBy: string;
+  unsupportedBy: string;
+  cached?: boolean;
+}) {
+  const hasPerClassMetrics = products.some((product) => {
+    const values = metricsForProduct(metrics, product);
+    return values && METRIC_ROWS.some(({ key }) => values[key] != null);
+  });
+  return <View style={styles.comparisonSection}>
+    <Text style={styles.comparisonSectionTitle}>{title}</Text>
+    {!products.length ? <Text style={styles.comparisonSectionDescription}>None</Text> : null}
+    {!hasPerClassMetrics && products.length > 0 && metrics?.aggregate ? <View style={styles.productMetrics}><Text style={styles.productMetricHeading}>Aggregate across {products.length} product{products.length === 1 ? "" : "s"}</Text>{METRIC_ROWS.map(({ key, label }) => <View key={key} style={styles.productMetricRow}><Text style={styles.productMetricLabel}>{label}</Text><Text style={styles.productMetricValue}>{formatMetric(metrics.aggregate?.[key])}</Text></View>)}</View> : null}
+    {products.map((product) => {
+      const productMetrics = metricsForProduct(metrics, product);
+      const available = productMetrics && METRIC_ROWS.some(({ key }) => productMetrics[key] != null);
+      return <View key={product} style={styles.productCapability}>
+        <Text style={styles.productName}>{product}</Text>
+        <Text style={styles.productSupport}>{supportedBy}: Supported</Text>
+        {available ? <View style={styles.productMetrics}>{METRIC_ROWS.map(({ key, label }) => <View key={key} style={styles.productMetricRow}><Text style={styles.productMetricLabel}>{label}</Text><Text style={styles.productMetricValue}>{formatMetric(productMetrics[key])}</Text></View>)}</View> : <Text style={styles.metricsUnavailable}>{cached ? "Metrics unavailable in this cached comparison" : "Metrics unavailable in this comparison"}</Text>}
+        <Text style={styles.productUnsupported}>{unsupportedBy}: Not supported</Text>
+      </View>;
+    })}
+  </View>;
+}
 
 export default function TeachFridgeScreen() {
   const { scanId: requestedScanIdParam, detectionId: requestedDetectionIdParam, addMissed, tab } = useLocalSearchParams<{ scanId?: string; detectionId?: string; addMissed?: string; tab?: string }>();
@@ -900,35 +916,12 @@ export default function TeachFridgeScreen() {
     ...(progressStats?.comparison?.class_comparison.candidate_classes || []),
   ]), [contributions, inventoryLabels, progressStats]);
   const currentCandidate = progressStats?.candidate ?? progressStats?.latest_candidate ?? null;
-  const activeDistinctiveClasses = progressStats
-    ? progressStats.rollback_targets
-      .map((target) => singleAddedClass(progressStats.active_model_classes.classes, target.supported_classes))
-      .filter((name): name is string => Boolean(name))
-    : [];
-  const uniqueActiveDistinctiveClasses = [...new Map(activeDistinctiveClasses.map((name) => [name.toLocaleLowerCase(), name])).values()];
-  const activeModelName = readableModelName(
-    progressStats?.active_model,
-    uniqueActiveDistinctiveClasses.length === 1 ? uniqueActiveDistinctiveClasses[0] : null,
-  );
-  const candidateModelName = readableModelName(
-    currentCandidate,
-    progressStats?.comparison?.class_comparison.added_classes.length === 1
-      ? progressStats.comparison.class_comparison.added_classes[0]
-      : null,
-  );
-  const rollbackTargetDisplayName = (target: RollbackTarget | null | undefined) => readableModelName(
-    target,
-    target && progressStats
-      ? singleAddedClass(target.supported_classes, progressStats.active_model_classes.classes)
-      : null,
-  );
-  const modelNamesByVersion = new Map<string, string>();
-  if (progressStats) modelNamesByVersion.set(progressStats.active_model.version, activeModelName);
-  if (currentCandidate) modelNamesByVersion.set(currentCandidate.version, candidateModelName);
-  progressStats?.rollback_targets.forEach((target) => modelNamesByVersion.set(target.version, rollbackTargetDisplayName(target)));
+  const modelDisplayNames = progressStats?.model_display_names || {};
+  const activeModelName = readableModelName(progressStats?.active_model, modelDisplayNames);
+  const candidateModelName = readableModelName(currentCandidate, modelDisplayNames);
+  const rollbackTargetDisplayName = (target: RollbackTarget | null | undefined) => readableModelName(target, modelDisplayNames);
   const displayNameForModel = (model: ModelIdentity | null | undefined) => {
-    const knownName = model?.version ? modelNamesByVersion.get(model.version) : null;
-    return knownName || readableModelName(model);
+    return readableModelName(model, modelDisplayNames);
   };
 
   const visibleContributions = useMemo(() => {
@@ -1098,7 +1091,7 @@ export default function TeachFridgeScreen() {
           {canEdit ? <View style={styles.detectionAction}><AppButton label="Edit label" icon="create-outline" variant="ghost" onPress={() => openContributionEditor(contribution)} /></View> : null}
           {canEditBox ? <View style={styles.detectionAction}><AppButton label="Edit box" icon="crop-outline" variant="ghost" onPress={() => openContributionBoxEditor(contribution)} /></View> : null}
         </View>
-        {latestUsage ? <View style={styles.usedModelBox}><Ionicons name="sparkles" size={20} color={colors.successFg} /><View style={styles.detectionCopy}><Text style={styles.usedModelTitle}>Used in model {latestUsage.model_version}</Text><Text style={styles.usedModelMeta}>Used for training · This contribution is read-only.</Text></View></View> : null}
+        {latestUsage ? <View style={styles.usedModelBox}><Ionicons name="sparkles" size={20} color={colors.successFg} /><View style={styles.detectionCopy}><Text style={styles.usedModelTitle}>Used in {displayNameForModel({ version: latestUsage.model_version })}</Text><Text style={styles.usedModelMeta}>Used for training · This contribution is read-only.</Text></View></View> : null}
         {!latestUsage && submission.status === "used" ? <Text style={styles.readOnlyText}>Used for AI learning · Read-only</Text> : null}
       </Card>
     );
@@ -1404,14 +1397,16 @@ export default function TeachFridgeScreen() {
                   </View>
                   <Pressable accessibilityRole="button" accessibilityState={{ expanded: showModelDetails }} onPress={() => setShowModelDetails((shown) => !shown)} style={styles.comparisonDetailsToggle}><Text style={styles.comparisonDetailsText}>{showModelDetails ? "Hide comparison details" : "View comparison details"}</Text><Ionicons name={showModelDetails ? "chevron-up" : "chevron-down"} size={16} color={colors.primary} /></Pressable>
                   {showModelDetails ? <View style={styles.comparisonDetails}>
-                    {progressStats.promotion_evaluation.reasons.length ? <View style={[styles.readinessBox, progressStats.promotion_evaluation.eligible ? styles.readinessReady : styles.readinessBlocked]}><Ionicons name={progressStats.promotion_evaluation.eligible ? "checkmark-circle" : "alert-circle"} size={20} color={progressStats.promotion_evaluation.eligible ? colors.successFg : colors.warningFg} /><View style={styles.detectionCopy}>{progressStats.promotion_evaluation.reasons.map((reason, index) => <Text key={`${reason.code}-${index}`} style={styles.readinessReason}>• {promotionReasonText(reason)}</Text>)}</View></View> : null}
-                    <View style={styles.metricCards}>
-                      {METRIC_ROWS.map(({ key, label }) => {
-                        const difference = progressStats.comparison?.metric_differences[key];
-                        return <View key={key} style={styles.metricCard}><View style={styles.metricCardHeading}><Text style={styles.metricCardName}>{label}</Text><Text style={[styles.metricVerdict, difference != null && difference > 0 ? styles.positiveDelta : difference != null && difference < 0 ? styles.negativeDelta : null]}>{metricVerdict(difference)}</Text></View><View style={styles.metricValues}><View><Text style={styles.metricValueLabel}>{activeModelName.toLocaleUpperCase()}</Text><Text style={styles.metricValue}>{formatMetric(progressStats.comparison?.active_metrics[key])}</Text></View><View><Text style={styles.metricValueLabel}>{candidateModelName.toLocaleUpperCase()}</Text><Text style={styles.metricValue}>{formatMetric(progressStats.comparison?.candidate_metrics[key])}</Text></View><Text style={[styles.metricCardDelta, difference != null && difference > 0 ? styles.positiveDelta : difference != null && difference < 0 ? styles.negativeDelta : null]}>{formatMetricDifference(difference)}</Text></View></View>;
-                      })}
+                    <View style={styles.comparisonRoles}><View style={styles.detectionCopy}><Text style={styles.modelRole}>CURRENT ACTIVE</Text><Text style={styles.modelVersion}>{activeModelName}</Text></View><View style={styles.detectionCopy}><Text style={styles.modelRole}>CANDIDATE</Text><Text style={styles.modelVersion}>{candidateModelName}</Text></View></View>
+                    <MetricComparisonTable title="Overall Performance" activeLabel="Active" comparedLabel="Candidate" activeMetrics={progressStats.comparison.active_metrics} comparedMetrics={progressStats.comparison.candidate_metrics} differences={progressStats.comparison.metric_differences} />
+                    <SharedProductPerformance comparison={progressStats.comparison.shared_class_comparison} fallbackClasses={progressStats.comparison.class_comparison.shared_classes} comparedLabel="Candidate" />
+                    <UniqueProductPerformance title="Products Added by Candidate" products={progressStats.comparison.class_comparison.added_classes} metrics={progressStats.comparison.added_class_metrics} supportedBy="Candidate" unsupportedBy="Current Active" />
+                    {progressStats.comparison.class_comparison.removed_classes.length ? <View style={styles.classPreservationFailure}><Ionicons name="warning" size={21} color={colors.danger} /><View style={styles.detectionCopy}><Text style={styles.classPreservationTitle}>Class preservation failure</Text><Text style={styles.classPreservationText}>Missing from candidate: {progressStats.comparison.class_comparison.removed_classes.join(", ")}</Text></View></View> : null}
+                    <View style={styles.comparisonSection}>
+                      <Text style={styles.comparisonSectionTitle}>Promotion Evaluation</Text>
+                      <View style={styles.promotionResult}><StatusBadge label={progressStats.promotion_evaluation.eligible ? "ELIGIBLE" : "NOT ELIGIBLE"} tone={progressStats.promotion_evaluation.eligible ? "success" : "danger"} /><Text style={styles.comparisonSectionDescription}>Backend-authoritative promotion result</Text></View>
+                      {progressStats.promotion_evaluation.reasons.length ? <View style={[styles.readinessBox, progressStats.promotion_evaluation.eligible ? styles.readinessReady : styles.readinessBlocked]}><Ionicons name={progressStats.promotion_evaluation.eligible ? "checkmark-circle" : "alert-circle"} size={20} color={progressStats.promotion_evaluation.eligible ? colors.successFg : colors.warningFg} /><View style={styles.detectionCopy}>{progressStats.promotion_evaluation.reasons.map((reason, index) => <Text key={`${reason.code}-${index}`} style={styles.readinessReason}>• {promotionReasonText(reason)}</Text>)}</View></View> : null}
                     </View>
-                    {progressStats.promotion_evaluation.mode === "expanded_classes" ? <View style={styles.sharedComparison}><Text style={styles.sectionTitle}>Added products ({progressStats.comparison.class_comparison.added_classes.length})</Text><View style={styles.classList}>{progressStats.comparison.class_comparison.added_classes.map((name) => <View key={name} style={styles.classRow}><Text style={styles.className}>{name}</Text><Text style={styles.classMetric}>mAP50–95 {formatMetric(progressStats.comparison!.added_class_metrics.per_class[name]?.map50_95)}</Text></View>)}</View></View> : null}
                   </View> : null}
                 </View> : null}
               </> : <View style={styles.lifecycleEmpty}><Ionicons name="flask-outline" size={19} color={colors.textMuted} /><Text style={styles.lifecycleEmptyText}>No candidate currently under evaluation.</Text></View>}
@@ -1511,11 +1506,14 @@ export default function TeachFridgeScreen() {
               <ScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
                 {rollbackComparisonError ? <View style={styles.errorBox}><Text style={styles.errorText}>{rollbackComparisonError}</Text></View> : null}
                 {rollbackComparison?.available && rollbackComparison.comparison ? <>
-                  <View style={styles.rollbackComparisonModels}><View style={styles.detectionCopy}><Text style={styles.modelRole}>CURRENT ACTIVE</Text><Text style={styles.modelVersion}>{displayNameForModel(rollbackComparison.comparison.active_model)}</Text></View><View style={styles.detectionCopy}><Text style={styles.modelRole}>PREVIOUS MODEL</Text><Text style={styles.modelVersion}>{displayNameForModel(rollbackComparison.comparison.rollback_target)}</Text></View></View>
+                  <View style={styles.rollbackComparisonModels}><View style={styles.detectionCopy}><Text style={styles.modelRole}>CURRENT ACTIVE</Text><Text style={styles.modelVersion}>{displayNameForModel(rollbackComparison.comparison.active_model)}</Text></View><View style={styles.detectionCopy}><Text style={styles.modelRole}>PREVIOUS PRODUCTION</Text><Text style={styles.modelVersion}>{displayNameForModel(rollbackComparison.comparison.rollback_target)}</Text></View></View>
                   <Text style={styles.trainingMeta}>Historical comparison from {new Date(rollbackComparison.comparison.created_at).toLocaleString("en-GB")} · Dataset {rollbackComparison.comparison.dataset_version}</Text>
-                  <View style={styles.metricHeader}><Text style={styles.metricName}>METRIC</Text><Text style={styles.metricNumber}>ACTIVE</Text><Text style={styles.metricNumber}>PREVIOUS</Text><Text style={styles.metricDelta}>CHANGE</Text></View>
-                  {METRIC_ROWS.map(({ key, label }) => { const difference = rollbackComparison.comparison?.metric_differences[key]; return <View key={key} style={styles.metricRow}><Text style={styles.metricName}>{label}</Text><Text style={styles.metricNumber}>{formatMetric(rollbackComparison.comparison?.active_metrics[key])}</Text><Text style={styles.metricNumber}>{formatMetric(rollbackComparison.comparison?.rollback_target_metrics[key])}</Text><Text style={[styles.metricDelta, difference != null && difference > 0 ? styles.positiveDelta : difference != null && difference < 0 ? styles.negativeDelta : null]}>{formatMetricDifference(difference)}</Text></View>; })}
-                  <View style={styles.sharedComparison}><Text style={styles.sectionTitle}>Product Support</Text><Text style={styles.actionHint}>Shared products: {rollbackComparison.comparison.class_comparison.shared_classes.length}</Text><Text style={styles.actionHint}>Only in {activeModelName}: {rollbackComparison.comparison.class_comparison.only_in_active.length}</Text><Text style={styles.actionHint}>Only in {rollbackTargetDisplayName(rollbackComparisonTarget)}: {rollbackComparison.comparison.class_comparison.only_in_rollback_target.length}</Text></View>
+                  <MetricComparisonTable title="Overall Performance" activeLabel="Active" comparedLabel="Previous" activeMetrics={rollbackComparison.comparison.active_metrics} comparedMetrics={rollbackComparison.comparison.rollback_target_metrics} differences={rollbackComparison.comparison.metric_differences} />
+                  <SharedProductPerformance comparison={rollbackComparison.comparison.shared_class_comparison} fallbackClasses={rollbackComparison.comparison.class_comparison.shared_classes} comparedLabel="Previous" />
+                  <UniqueProductPerformance title="Products only in Current Active" products={rollbackComparison.comparison.class_comparison.only_in_active} supportedBy="Current Active" unsupportedBy="Previous Production" cached />
+                  <UniqueProductPerformance title="Products only in Previous Model" products={rollbackComparison.comparison.class_comparison.only_in_rollback_target} metrics={rollbackComparison.comparison.added_class_metrics} supportedBy="Previous Production" unsupportedBy="Current Active" cached />
+                  <Text style={styles.rollbackInformational}>This cached historical comparison is informational and does not affect rollback availability.</Text>
+                  <AppButton label={`Roll Back to ${rollbackTargetDisplayName(rollbackComparisonTarget)}`} icon="arrow-undo-outline" variant="danger" disabled={lifecycle.busy || Boolean(lifecycleMutation)} loading={lifecycleMutation === "Rollback Model"} onPress={() => confirmRollback(rollbackComparisonTarget.version)} />
                 </> : !rollbackComparisonError ? <EmptyState icon="information-circle-outline" title="No cached comparison" message={`No cached comparison is available between ${rollbackTargetDisplayName(rollbackComparisonTarget)} and ${activeModelName}. You can still select this model for rollback.`} /> : null}
               </ScrollView>
               <AppButton label="Back" variant="secondary" onPress={() => { setRollbackComparisonTarget(null); setRollbackComparison(null); setRollbackComparisonError(""); }} />
@@ -1965,7 +1963,6 @@ const styles = StyleSheet.create({
   selectionControlDisabled: { color: colors.textMuted },
   trainingSelectionRowSelected: { borderColor: colors.primary, backgroundColor: colors.primarySoft },
   trainingSelectionTitle: { color: colors.navy, fontSize: 14, lineHeight: 19, fontWeight: "900" },
-  comparisonHeading: { flexDirection: "row", alignItems: "flex-start", gap: spacing.md, marginBottom: spacing.md },
   metricHeader: { flexDirection: "row", alignItems: "center", paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.border },
   metricRow: { flexDirection: "row", alignItems: "center", minHeight: 44, borderBottomWidth: 1, borderBottomColor: colors.border },
   metricName: { flex: 1.15, color: colors.textSecondary, fontSize: 12, fontWeight: "700" },
@@ -1973,30 +1970,29 @@ const styles = StyleSheet.create({
   metricDelta: { flex: 0.9, color: colors.textMuted, fontSize: 12, fontWeight: "800", textAlign: "right" },
   positiveDelta: { color: colors.successFg },
   negativeDelta: { color: colors.danger },
-  comparisonSummary: { color: colors.textSecondary, fontSize: 13, fontWeight: "600", lineHeight: 19, marginTop: spacing.md },
-  sharedComparison: { borderTopWidth: 1, borderTopColor: colors.border, marginTop: spacing.lg, paddingTop: spacing.lg },
+  comparisonSection: { borderTopWidth: 1, borderTopColor: colors.border, marginTop: spacing.md, paddingTop: spacing.md },
+  comparisonSectionTitle: { color: colors.navy, fontSize: 14, fontWeight: "900", textTransform: "uppercase", letterSpacing: 0.5 },
+  comparisonSectionDescription: { color: colors.textMuted, fontSize: 12, lineHeight: 17, marginTop: spacing.xs },
+  comparisonRoles: { flexDirection: "row", gap: spacing.lg, padding: spacing.md, borderRadius: radius.lg, backgroundColor: colors.surface },
+  metricsUnavailable: { color: colors.textMuted, fontSize: 12, fontStyle: "italic", lineHeight: 17, marginTop: spacing.sm },
+  productCapability: { gap: spacing.xs, marginTop: spacing.sm, padding: spacing.md, borderRadius: radius.lg, backgroundColor: colors.surface },
+  productName: { color: colors.navy, fontSize: 15, fontWeight: "900" },
+  productSupport: { color: colors.textSecondary, fontSize: 12, fontWeight: "700" },
+  productUnsupported: { color: colors.textMuted, fontSize: 12, fontWeight: "700", marginTop: spacing.xs },
+  productMetrics: { gap: spacing.xs, marginTop: spacing.xs },
+  productMetricHeading: { color: colors.textSecondary, fontSize: 12, fontWeight: "800" },
+  productMetricRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.md },
+  productMetricLabel: { color: colors.textMuted, fontSize: 12 },
+  productMetricValue: { color: colors.navy, fontSize: 12, fontWeight: "900" },
+  classPreservationFailure: { flexDirection: "row", alignItems: "flex-start", gap: spacing.sm, padding: spacing.md, borderRadius: radius.lg, backgroundColor: colors.dangerBg },
+  classPreservationTitle: { color: colors.danger, fontSize: 14, fontWeight: "900", textTransform: "uppercase" },
+  classPreservationText: { color: colors.danger, fontSize: 12, lineHeight: 17, marginTop: 2 },
+  promotionResult: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: spacing.sm, marginTop: spacing.sm },
+  rollbackInformational: { color: colors.textMuted, fontSize: 12, lineHeight: 17, padding: spacing.sm, borderRadius: radius.md, backgroundColor: colors.surfaceMuted },
   readinessBox: { marginTop: spacing.sm, flexDirection: "row", alignItems: "flex-start", gap: spacing.sm, borderRadius: radius.lg, padding: spacing.md },
   readinessReady: { backgroundColor: colors.successBg },
   readinessBlocked: { backgroundColor: colors.warningBg },
-  readinessTitle: { color: colors.navy, fontSize: 15, fontWeight: "900" },
   readinessReason: { color: colors.textSecondary, fontSize: 13, lineHeight: 18 },
-  metricCards: { gap: spacing.sm, marginTop: spacing.lg },
-  metricCard: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, padding: spacing.md, gap: spacing.sm, backgroundColor: colors.surfaceMuted },
-  metricCardHeading: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: spacing.sm },
-  metricCardName: { color: colors.navy, fontSize: 15, fontWeight: "900" },
-  metricVerdict: { color: colors.textMuted, fontSize: 12, fontWeight: "800" },
-  metricValues: { flexDirection: "row", flexWrap: "wrap", alignItems: "flex-end", justifyContent: "space-between", gap: spacing.md },
-  metricValueLabel: { color: colors.textMuted, fontSize: 10, fontWeight: "800", letterSpacing: 0.6 },
-  metricValue: { color: colors.navy, fontSize: 17, fontWeight: "900", marginTop: 2 },
-  metricCardDelta: { color: colors.textMuted, fontSize: 14, fontWeight: "900" },
-  classList: { gap: spacing.sm, marginTop: spacing.md },
-  classRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: spacing.md, minHeight: 44, padding: spacing.sm, borderRadius: radius.md, backgroundColor: colors.primarySoft },
-  className: { flex: 1, flexShrink: 1, color: colors.navy, fontSize: 14, fontWeight: "800" },
-  classMetric: { color: colors.textSecondary, fontSize: 12, fontWeight: "700", textAlign: "right" },
-  removedClasses: { flexDirection: "row", alignItems: "flex-start", gap: spacing.sm, marginTop: spacing.md, padding: spacing.md, borderRadius: radius.lg, backgroundColor: colors.dangerBg },
-  removedTitle: { color: colors.danger, fontSize: 14, fontWeight: "900" },
-  removedText: { color: colors.danger, fontSize: 13, lineHeight: 18, fontWeight: "600" },
-  technicalDetails: { gap: spacing.xs, marginTop: spacing.sm, padding: spacing.md, borderRadius: radius.lg, backgroundColor: colors.surfaceMuted },
   trainingHistory: { marginTop: spacing.md },
   trainingRow: { flexDirection: "row", alignItems: "center", gap: spacing.sm, paddingVertical: spacing.md, borderTopWidth: 1, borderTopColor: colors.border },
   trainingMarker: { width: 34, height: 34, borderRadius: 12, backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center" },

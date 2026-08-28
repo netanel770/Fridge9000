@@ -306,6 +306,7 @@ export type AIProgressResponse = {
   promotion_evaluation: PromotionEvaluation;
   archived_models: LifecycleModel[];
   rollback_targets: RollbackTarget[];
+  model_display_names: Record<string, string>;
   contributions: {
     total_approved: number;
     used_in_training: number;

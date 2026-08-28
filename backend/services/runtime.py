@@ -2085,6 +2085,24 @@ def get_ai_progress():
 
             cur.execute(
                 """
+                SELECT version
+                FROM model_versions
+                ORDER BY created_at, id;
+                """
+            )
+            chronological_models = cur.fetchall()
+            model_display_names = {}
+            next_model_number = 2
+            for model in chronological_models:
+                version = model["version"]
+                if version == "fridge9000-production-initial":
+                    model_display_names[version] = "Initial Model"
+                else:
+                    model_display_names[version] = f"Model {next_model_number}"
+                    next_model_number += 1
+
+            cur.execute(
+                """
                 SELECT
                     COUNT(*) FILTER (
                         WHERE s.status IN ('approved', 'used')
@@ -2160,6 +2178,7 @@ def get_ai_progress():
         "promotion_evaluation": promotion_evaluation,
         "archived_models": archived_models,
         "rollback_targets": rollback_targets,
+        "model_display_names": model_display_names,
         "contributions": contributions,
         "training_history": training_history,
         "actions": {
