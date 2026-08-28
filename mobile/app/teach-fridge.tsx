@@ -1560,14 +1560,20 @@ export default function TeachFridgeScreen() {
                     const selected = selectedTrainingSubmissions.has(detail.submission.id);
                     const detailExpanded = expandedTrainingSubmission === detail.submission.id;
                     return <View key={detail.submission.id} style={[styles.trainingSubmissionDetail, selected && styles.trainingSelectionRowSelected]}>
-                      <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: selected }} accessibilityLabel={`Select submission ${detail.submission.id}`} onPress={() => toggleTrainingGroup([detail])} hitSlop={8}><Ionicons name={selected ? "checkbox" : "square-outline"} size={23} color={selected ? colors.primary : colors.textMuted} /></Pressable>
-                      <Pressable accessibilityRole="button" accessibilityState={{ expanded: detailExpanded }} accessibilityLabel={`${detailExpanded ? "Collapse" : "Expand"} submission ${detail.submission.id}`} onPress={() => {
-                        setExpandedTrainingSubmission(detailExpanded ? null : detail.submission.id);
-                        setFocusedTrainingAnnotation(detailExpanded ? null : detail.annotations[0]?.id ?? null);
-                      }} style={styles.trainingSubmissionOpen}>
-                        <View style={styles.detectionCopy}><Text style={styles.trainingSelectionTitle}>Submission #{detail.submission.id} · {detail.annotations.length} annotation{detail.annotations.length === 1 ? "" : "s"}</Text></View>
-                        <Ionicons name={detailExpanded ? "chevron-up" : "chevron-down"} size={18} color={colors.textMuted} />
-                      </Pressable>
+                      <View style={styles.trainingSubmissionRow}>
+                        <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: selected }} accessibilityLabel={`Select submission ${detail.submission.id}`} onPress={() => toggleTrainingGroup([detail])} hitSlop={8}>
+                          <Ionicons name={selected ? "checkbox" : "square-outline"} size={23} color={selected ? colors.primary : colors.textMuted} />
+                        </Pressable>
+                        <Pressable accessibilityRole="button" accessibilityState={{ expanded: detailExpanded }} accessibilityLabel={`${detailExpanded ? "Collapse" : "Expand"} submission ${detail.submission.id}`} onPress={() => {
+                          setExpandedTrainingSubmission(detailExpanded ? null : detail.submission.id);
+                          setFocusedTrainingAnnotation(detailExpanded ? null : detail.annotations[0]?.id ?? null);
+                        }} style={styles.trainingSubmissionOpen}>
+                          <View style={styles.detectionCopy}>
+                            <Text style={styles.trainingSelectionTitle}>Submission #{detail.submission.id} · {detail.annotations.length} annotation{detail.annotations.length === 1 ? "" : "s"}</Text>
+                          </View>
+                          <Ionicons name={detailExpanded ? "chevron-up" : "chevron-down"} size={18} color={colors.textMuted} />
+                        </Pressable>
+                      </View>
                       {detailExpanded ? <View style={styles.quarantineDetails}><AnnotationSubmissionPreview detail={detail} focusedAnnotationId={focusedTrainingAnnotation} onFocusAnnotation={setFocusedTrainingAnnotation} /><AppButton label="Move to Quarantine" icon="archive-outline" variant="secondary" loading={quarantineMutation === detail.submission.id} disabled={quarantineMutation !== null} onPress={() => moveSubmissionToQuarantine(detail.submission.id)} /></View> : null}
                     </View>;
                   })}</View> : null}
@@ -2093,7 +2099,8 @@ const styles = StyleSheet.create({
   trainingGroupTitle: { color: colors.navy, fontSize: 15, fontWeight: "900" },
   trainingGroupMeta: { color: colors.textMuted, fontSize: 12, marginTop: 2 },
   trainingDrilldown: { gap: spacing.sm, padding: spacing.sm, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surfaceMuted },
-  trainingSubmissionDetail: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: spacing.sm, padding: spacing.sm, borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, backgroundColor: colors.surface },
+  trainingSubmissionDetail: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, overflow: "hidden", backgroundColor: colors.surface },
+  trainingSubmissionRow: { minHeight: 56, flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.sm },
   trainingThumbnail: { width: 72, maxHeight: 72, borderRadius: radius.md, backgroundColor: colors.border },
   wholeSubmissionNote: { color: colors.primary, fontSize: 11, fontWeight: "800", marginTop: 3 },
   quarantineCard: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, overflow: "hidden" },
@@ -2134,7 +2141,7 @@ const styles = StyleSheet.create({
   quickActionTitle: { color: colors.navy, fontSize: 13, fontWeight: "900" },
   quickActionTitleDanger: { color: colors.danger },
   quickActionMeta: { color: colors.textMuted, fontSize: 11, marginTop: 2 },
-  trainingSubmissionOpen: { flex: 1, flexDirection: "row", alignItems: "center", gap: spacing.sm },
+  trainingSubmissionOpen: { flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: spacing.sm },
   quarantineGroupRow: { minHeight: 62, flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.md, backgroundColor: colors.surface },
   quarantineGroupIcon: { width: 34, height: 34, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: colors.dangerBg },
   quarantineSubmission: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.lg, overflow: "hidden", backgroundColor: colors.surface },
