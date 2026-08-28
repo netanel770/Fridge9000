@@ -2607,8 +2607,8 @@ def update_annotation_submission(submission_id: int, payload: Dict[str, Any]):
 
 def update_quarantined_submission(submission_id: int, payload: Dict[str, Any]):
     action = str(payload.get("action") or "").strip().lower()
-    if action not in {"restore", "archive", "unarchive"}:
-        raise HTTPException(status_code=400, detail="Action must be restore, archive, or unarchive")
+    if action not in {"quarantine", "restore", "archive", "unarchive"}:
+        raise HTTPException(status_code=400, detail="Action must be quarantine, restore, archive, or unarchive")
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -2618,9 +2618,18 @@ def update_quarantined_submission(submission_id: int, payload: Dict[str, Any]):
             submission = cur.fetchone()
             if not submission:
                 raise HTTPException(status_code=404, detail="Annotation submission not found")
-            if submission["training_state"] != "quarantined":
+            if action == "quarantine":
+                if submission["training_state"] != "eligible":
+                    raise HTTPException(status_code=409, detail="Only eligible submissions can be quarantined")
+                if submission["status"] not in {"approved", "used"}:
+                    raise HTTPException(status_code=409, detail="Only approved eligible submissions can be quarantined")
+                cur.execute(
+                    "UPDATE annotation_submissions SET training_state = 'quarantined', archived_at = NULL WHERE id = %s RETURNING *;",
+                    (submission_id,),
+                )
+            elif submission["training_state"] != "quarantined":
                 raise HTTPException(status_code=409, detail="Only quarantined submissions can be managed")
-            if action == "restore":
+            elif action == "restore":
                 if submission["status"] not in {"approved", "used"}:
                     raise HTTPException(status_code=409, detail="Only approved quarantined submissions can be restored")
                 cur.execute(

@@ -2167,10 +2167,22 @@ def test_quarantined_submissions_can_be_archived_unarchived_and_restored(
         )
         assert cursor.fetchone()[0] == usage_count
 
-    assert test_client.post(
-        archive_url,
-        json={"action": "restore"},
-    ).status_code == 409
+    quarantined = test_client.post(archive_url, json={"action": "quarantine"})
+    assert quarantined.status_code == 200
+    assert quarantined.json()["submission"]["training_state"] == "quarantined"
+    assert quarantined.json()["submission"]["archived_at"] is None
+    assert archive_item["submission_id"] in {
+        row["id"] for row in test_client.get("/annotation-submissions").json()
+    }
+
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT COUNT(*) FROM training_run_submission_usage WHERE submission_id = ANY(%s);",
+            (selected_ids,),
+        )
+        assert cursor.fetchone()[0] == usage_count
+
+    assert test_client.post(archive_url, json={"action": "quarantine"}).status_code == 409
 
 
 def test_selected_batch_becomes_trusted_on_promotion_and_joins_next_baseline(

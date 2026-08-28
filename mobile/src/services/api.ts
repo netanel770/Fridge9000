@@ -397,7 +397,7 @@ export async function moderateAnnotationSubmission(
 
 export async function manageQuarantinedSubmission(
   submissionId: number,
-  action: "restore" | "archive" | "unarchive",
+  action: "quarantine" | "restore" | "archive" | "unarchive",
 ): Promise<AnnotationSubmission> {
   const res = await fetch(`${API_BASE_URL}/annotation-submissions/${submissionId}/quarantine`, {
     method: "POST",

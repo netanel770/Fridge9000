@@ -363,6 +363,7 @@ export default function TeachFridgeScreen() {
   const [selectedQuarantineSubmissions, setSelectedQuarantineSubmissions] = useState<Set<number>>(new Set());
   const [loadingTrainingSelection, setLoadingTrainingSelection] = useState(false);
   const [trainingSelectionError, setTrainingSelectionError] = useState("");
+  const [trainingSelectionMessage, setTrainingSelectionMessage] = useState("");
   const [showTrainingSelector, setShowTrainingSelector] = useState(false);
   const [expandedTrainingLabel, setExpandedTrainingLabel] = useState<string | null>(null);
   const [expandedTrainingSubmission, setExpandedTrainingSubmission] = useState<number | null>(null);
@@ -510,12 +511,12 @@ export default function TeachFridgeScreen() {
     }
   }
 
-  async function loadTrainingSelection() {
+  async function loadTrainingSelection(includeArchived = showArchivedQuarantine) {
     const requestId = ++trainingSelectionRequest.current;
     setLoadingTrainingSelection(true);
     setTrainingSelectionError("");
     try {
-      const submissions = await getAnnotationSubmissions(undefined, true);
+      const submissions = await getAnnotationSubmissions(undefined, includeArchived);
       const lifecycleSubmissions = submissions.filter((submission) =>
         ["approved", "used"].includes(submission.status) && ["eligible", "quarantined"].includes(trainingState(submission))
       );
@@ -589,6 +590,7 @@ export default function TeachFridgeScreen() {
 
   function openQuarantine(fromTraining = false) {
     setShowArchivedQuarantine(false);
+    void loadTrainingSelection(false);
     if (fromTraining) setShowTrainingSelector(false);
     setTimeout(() => setShowQuarantine(true), fromTraining ? 200 : 0);
   }
@@ -600,6 +602,33 @@ export default function TeachFridgeScreen() {
   function returnToTrainingSelection() {
     setShowQuarantine(false);
     setTimeout(() => setShowTrainingSelector(true), 200);
+  }
+
+  function toggleArchivedQuarantine(includeArchived: boolean) {
+    setShowArchivedQuarantine(includeArchived);
+    void loadTrainingSelection(includeArchived);
+  }
+
+  async function moveSubmissionToQuarantine(submissionId: number) {
+    setQuarantineMutation(submissionId);
+    setTrainingSelectionError("");
+    setTrainingSelectionMessage("");
+    try {
+      await manageQuarantinedSubmission(submissionId, "quarantine");
+      setSelectedTrainingSubmissions((current) => {
+        const next = new Set(current);
+        next.delete(submissionId);
+        return next;
+      });
+      setExpandedTrainingSubmission(null);
+      setFocusedTrainingAnnotation(null);
+      setTrainingSelectionMessage("Submission moved to Quarantine.");
+      await Promise.all([loadTrainingSelection(), loadProgress(), loadContributions()]);
+    } catch (caught) {
+      setTrainingSelectionError(caught instanceof Error ? caught.message : "Could not move the submission to Quarantine.");
+    } finally {
+      setQuarantineMutation(null);
+    }
   }
 
   async function applyQuarantineAction(submissionId: number, action: "restore" | "archive" | "unarchive") {
@@ -1518,7 +1547,8 @@ export default function TeachFridgeScreen() {
             {quarantinedSubmissions.length ? <Pressable accessibilityRole="button" onPress={openQuarantineFromTraining} style={styles.sheetQuarantineLink}><Ionicons name="archive-outline" size={18} color={colors.danger} /><Text style={styles.sheetQuarantineText}>Manage Quarantine ({activeQuarantinedSubmissions.length} active)</Text><Ionicons name="chevron-forward" size={17} color={colors.danger} /></Pressable> : null}
             <ScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
               {loadingTrainingSelection ? <View style={styles.loading}><ActivityIndicator color={colors.primary} /><Text style={styles.loadingText}>Loading annotations...</Text></View> : null}
-              {trainingSelectionError ? <View style={styles.errorBox}><Text style={styles.errorText}>{trainingSelectionError}</Text><AppButton label="Try Again" variant="secondary" onPress={loadTrainingSelection} /></View> : null}
+              {trainingSelectionMessage ? <View style={styles.successBox}><Ionicons name="checkmark-circle" size={20} color={colors.successFg} /><Text style={styles.successText}>{trainingSelectionMessage}</Text></View> : null}
+              {trainingSelectionError ? <View style={styles.errorBox}><Text style={styles.errorText}>{trainingSelectionError}</Text><AppButton label="Try Again" variant="secondary" onPress={() => loadTrainingSelection()} /></View> : null}
               {!loadingTrainingSelection && !trainingSelectionError && trainingLabelGroups.length === 0 ? <EmptyState icon="checkmark-done-outline" title="Nothing ready to train" message="Approve a contribution first." /> : null}
               {trainingLabelGroups.map((group) => {
                 const ids = group.submissions.map((detail) => detail.submission.id);
@@ -1539,7 +1569,7 @@ export default function TeachFridgeScreen() {
                         <View style={styles.detectionCopy}><Text style={styles.trainingSelectionTitle}>{labels.join(" · ")}</Text><Text style={styles.detectionMeta}>Submission #{detail.submission.id} · {detail.annotations.length} annotation{detail.annotations.length === 1 ? "" : "s"}</Text></View>
                         <Ionicons name={detailExpanded ? "chevron-up" : "chevron-down"} size={18} color={colors.textMuted} />
                       </Pressable>
-                      {detailExpanded ? <AnnotationSubmissionPreview detail={detail} focusedAnnotationId={focusedTrainingAnnotation} onFocusAnnotation={setFocusedTrainingAnnotation} /> : null}
+                      {detailExpanded ? <View style={styles.quarantineDetails}><AnnotationSubmissionPreview detail={detail} focusedAnnotationId={focusedTrainingAnnotation} onFocusAnnotation={setFocusedTrainingAnnotation} /><AppButton label="Move to Quarantine" icon="archive-outline" variant="secondary" loading={quarantineMutation === detail.submission.id} disabled={quarantineMutation !== null} onPress={() => moveSubmissionToQuarantine(detail.submission.id)} /></View> : null}
                     </View>;
                   })}</View> : null}
                 </View>;
@@ -1598,7 +1628,7 @@ export default function TeachFridgeScreen() {
               <Pressable accessibilityLabel="Close quarantine" onPress={() => setShowQuarantine(false)} hitSlop={10}><Ionicons name="close" size={27} color={colors.navy} /></Pressable>
             </View>
 
-            <View style={styles.archiveToggleRow}><View style={styles.detectionCopy}><Text style={styles.selectionAvailable}>Show archived</Text><Text style={styles.archiveToggleHint}>Archived items remain quarantined and excluded from training.</Text></View><Switch accessibilityLabel="Show archived quarantined submissions" value={showArchivedQuarantine} onValueChange={setShowArchivedQuarantine} trackColor={{ false: colors.border, true: colors.primarySoft }} thumbColor={showArchivedQuarantine ? colors.primary : colors.textMuted} /></View>
+            <View style={styles.archiveToggleRow}><View style={styles.detectionCopy}><Text style={styles.selectionAvailable}>Show archived</Text><Text style={styles.archiveToggleHint}>Archived items remain quarantined and excluded from training.</Text></View><Switch accessibilityLabel="Show archived quarantined submissions" value={showArchivedQuarantine} disabled={loadingTrainingSelection} onValueChange={toggleArchivedQuarantine} trackColor={{ false: colors.border, true: colors.primarySoft }} thumbColor={showArchivedQuarantine ? colors.primary : colors.textMuted} /></View>
 
             {activeQuarantinedSubmissions.length ? <View style={styles.selectionControls}>
               <Text style={styles.selectionAvailable}>Select submissions to return to training</Text>
@@ -1611,6 +1641,7 @@ export default function TeachFridgeScreen() {
             <ScrollView style={styles.sheetScroll} contentContainerStyle={styles.sheetContent}>
               {quarantineMessage ? <View style={styles.successBox}><Ionicons name="checkmark-circle" size={20} color={colors.successFg} /><Text style={styles.successText}>{quarantineMessage}</Text></View> : null}
               {quarantineError ? <View style={styles.errorBox}><Text style={styles.errorText}>{quarantineError}</Text></View> : null}
+              {trainingSelectionError ? <View style={styles.errorBox}><Text style={styles.errorText}>{trainingSelectionError}</Text><AppButton label="Try Again" variant="secondary" onPress={() => loadTrainingSelection(showArchivedQuarantine)} /></View> : null}
               {quarantineLabelGroups.length ? quarantineLabelGroups.map((group) => {
                 const expanded = expandedQuarantineLabel === group.label;
                 const groupIds = [...new Set(group.submissions.map((detail) => detail.submission.id))];
