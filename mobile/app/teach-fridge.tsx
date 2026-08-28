@@ -1560,10 +1560,12 @@ export default function TeachFridgeScreen() {
                     const selected = selectedTrainingSubmissions.has(detail.submission.id);
                     const detailExpanded = expandedTrainingSubmission === detail.submission.id;
                     return <View key={detail.submission.id} style={[styles.trainingSubmissionDetail, selected && styles.trainingSelectionRowSelected]}>
+                      <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: selected }} accessibilityLabel={`Select submission ${detail.submission.id}`} onPress={() => toggleTrainingGroup([detail])} hitSlop={8}><Ionicons name={selected ? "checkbox" : "square-outline"} size={23} color={selected ? colors.primary : colors.textMuted} /></Pressable>
                       <Pressable accessibilityRole="button" accessibilityState={{ expanded: detailExpanded }} accessibilityLabel={`${detailExpanded ? "Collapse" : "Expand"} submission ${detail.submission.id}`} onPress={() => {
                         setExpandedTrainingSubmission(detailExpanded ? null : detail.submission.id);
                         setFocusedTrainingAnnotation(detailExpanded ? null : detail.annotations[0]?.id ?? null);
                       }} style={styles.trainingSubmissionOpen}>
+                        <View style={styles.detectionCopy}><Text style={styles.trainingSelectionTitle}>Submission #{detail.submission.id} · {detail.annotations.length} annotation{detail.annotations.length === 1 ? "" : "s"}</Text></View>
                         <Ionicons name={detailExpanded ? "chevron-up" : "chevron-down"} size={18} color={colors.textMuted} />
                       </Pressable>
                       {detailExpanded ? <View style={styles.quarantineDetails}><AnnotationSubmissionPreview detail={detail} focusedAnnotationId={focusedTrainingAnnotation} onFocusAnnotation={setFocusedTrainingAnnotation} /><AppButton label="Move to Quarantine" icon="archive-outline" variant="secondary" loading={quarantineMutation === detail.submission.id} disabled={quarantineMutation !== null} onPress={() => moveSubmissionToQuarantine(detail.submission.id)} /></View> : null}
