@@ -13,7 +13,6 @@ import type { RollbackComparisonState } from "../../hooks/useRollbackComparison"
 import type { TrainingSelectionState } from "../../hooks/useTrainingSelection";
 import { candidateStateCopy, formatMetric, formatMetricDifference, promotionReasonText, readableModelName } from "../../modelUtils";
 import { styles } from "../../styles";
-import { MetricComparisonTable } from "./MetricComparisonTable";
 import { SharedProductPerformance } from "./SharedProductPerformance";
 import { UniqueProductPerformance } from "./UniqueProductPerformance";
 
@@ -59,7 +58,6 @@ export function AiProgressTab({ progress, training, quarantine, rollback, action
               <UniqueProductPerformance title="Performance on Added Products" products={progress.stats.comparison.class_comparison.added_classes} metrics={progress.stats.comparison.added_class_metrics} supportedBy="Candidate" unsupportedBy="Current Active" />
               {progress.stats.comparison.class_comparison.removed_classes.length ? <View style={styles.classPreservationFailure}><Ionicons name="warning" size={21} color={colors.danger} /><View style={styles.detectionCopy}><Text style={styles.classPreservationTitle}>Class preservation failure</Text><Text style={styles.classPreservationText}>Missing from candidate: {progress.stats.comparison.class_comparison.removed_classes.join(", ")}</Text></View></View> : null}
               <View style={styles.comparisonSection}><Text style={styles.comparisonSectionTitle}>Promotion Evaluation</Text><View style={styles.promotionResult}><StatusBadge label={progress.stats.promotion_evaluation.eligible ? "ELIGIBLE" : "NOT ELIGIBLE"} tone={progress.stats.promotion_evaluation.eligible ? "success" : "danger"} /><Text style={styles.comparisonSectionDescription}>Backend-authoritative promotion result</Text></View>{progress.stats.promotion_evaluation.reasons.length ? <View style={[styles.readinessBox, progress.stats.promotion_evaluation.eligible ? styles.readinessReady : styles.readinessBlocked]}><Ionicons name={progress.stats.promotion_evaluation.eligible ? "checkmark-circle" : "alert-circle"} size={20} color={progress.stats.promotion_evaluation.eligible ? colors.successFg : colors.warningFg} /><View style={styles.detectionCopy}>{progress.stats.promotion_evaluation.reasons.map((reason, index) => <Text key={`${reason.code}-${index}`} style={styles.readinessReason}>• {promotionReasonText(reason)}</Text>)}</View></View> : null}</View>
-              <MetricComparisonTable title="Full Dataset Metrics" description="Aggregate metrics across the full evaluation dataset" activeLabel="Active" comparedLabel="Candidate" activeMetrics={progress.stats.comparison.active_metrics} comparedMetrics={progress.stats.comparison.candidate_metrics} differences={progress.stats.comparison.metric_differences} />
             </View> : null}
           </View> : null}
         </> : <View style={styles.lifecycleEmpty}><Ionicons name="flask-outline" size={19} color={colors.textMuted} /><Text style={styles.lifecycleEmptyText}>No candidate currently under evaluation.</Text></View>}

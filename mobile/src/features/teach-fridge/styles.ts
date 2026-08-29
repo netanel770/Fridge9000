@@ -141,7 +141,6 @@ export const styles = StyleSheet.create({
   comparisonRoles: { flexDirection: "row", gap: spacing.lg, padding: spacing.md, borderRadius: radius.lg, backgroundColor: colors.surface },
   metricsUnavailable: { color: colors.textMuted, fontSize: 12, fontStyle: "italic", lineHeight: 17, marginTop: spacing.sm },
   productCapability: { gap: spacing.xs, marginTop: spacing.sm, padding: spacing.md, borderRadius: radius.lg, backgroundColor: colors.surface },
-  productName: { color: colors.navy, fontSize: 15, fontWeight: "900" },
   productSupport: { color: colors.textSecondary, fontSize: 12, fontWeight: "700" },
   productUnsupported: { color: colors.textMuted, fontSize: 12, fontWeight: "700", marginTop: spacing.xs },
   productMetrics: { gap: spacing.xs, marginTop: spacing.xs },

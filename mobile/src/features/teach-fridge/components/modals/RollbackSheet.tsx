@@ -9,7 +9,6 @@ import type { ModelLifecycleActions } from "../../hooks/useModelLifecycleActions
 import type { RollbackComparisonState } from "../../hooks/useRollbackComparison";
 import { readableModelName } from "../../modelUtils";
 import { styles } from "../../styles";
-import { MetricComparisonTable } from "../progress/MetricComparisonTable";
 import { SharedProductPerformance } from "../progress/SharedProductPerformance";
 import { UniqueProductPerformance } from "../progress/UniqueProductPerformance";
 
@@ -32,7 +31,6 @@ export function RollbackSheet({ progress, rollback, actions, lifecycle }: {
           {rollback.comparison?.available && rollback.comparison.comparison ? <>
             <View style={styles.rollbackComparisonModels}><View style={styles.detectionCopy}><Text style={styles.modelRole}>CURRENT ACTIVE</Text><Text style={styles.modelVersion}>{readableModelName(rollback.comparison.comparison.active_model, displayNames)}</Text></View><View style={styles.detectionCopy}><Text style={styles.modelRole}>PREVIOUS PRODUCTION</Text><Text style={styles.modelVersion}>{readableModelName(rollback.comparison.comparison.rollback_target, displayNames)}</Text></View></View>
             <Text style={styles.trainingMeta}>Historical comparison from {new Date(rollback.comparison.comparison.created_at).toLocaleString("en-GB")} · Dataset {rollback.comparison.comparison.dataset_version}</Text>
-            <MetricComparisonTable title="Overall Performance" activeLabel="Active" comparedLabel="Previous" activeMetrics={rollback.comparison.comparison.active_metrics} comparedMetrics={rollback.comparison.comparison.rollback_target_metrics} differences={rollback.comparison.comparison.metric_differences} />
             <SharedProductPerformance comparison={rollback.comparison.comparison.shared_class_comparison} fallbackClasses={rollback.comparison.comparison.class_comparison.shared_classes} comparedLabel="Previous" />
             <UniqueProductPerformance title="Products only in Current Active" products={rollback.comparison.comparison.class_comparison.only_in_active} supportedBy="Current Active" unsupportedBy="Previous Production" cached />
             <UniqueProductPerformance title="Products only in Previous Model" products={rollback.comparison.comparison.class_comparison.only_in_rollback_target} metrics={rollback.comparison.comparison.added_class_metrics} supportedBy="Previous Production" unsupportedBy="Current Active" cached />
