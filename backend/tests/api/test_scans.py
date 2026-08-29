@@ -45,7 +45,7 @@ FAKE_DETECTIONS = [
 
 @pytest.fixture
 def scan_api(test_client, monkeypatch):
-    runtime = importlib.import_module("backend.main").runtime
+    scans = importlib.import_module("services.scans")
     inference_calls = []
 
     def fake_infer(payload):
@@ -60,8 +60,8 @@ def scan_api(test_client, monkeypatch):
             "detections": [dict(detection) for detection in FAKE_DETECTIONS],
         }
 
-    monkeypatch.setattr(runtime, "infer", fake_infer)
-    return test_client, runtime, inference_calls
+    monkeypatch.setattr(scans, "infer", fake_infer)
+    return test_client, scans, inference_calls
 
 
 def _upload_scan(client, filename="fridge.png", contents=PNG_BYTES, content_type="image/png"):

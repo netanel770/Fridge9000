@@ -414,3 +414,24 @@ export type FreshnessAnalysisResponse = {
   image_url: string;
   message: string;
 };
+
+export type ManualInventoryResponse = {
+  ok: boolean;
+  item_id?: number;
+  new_quantity?: number;
+  error?: string;
+};
+
+export type OutlinePreparationJob = {
+  job_id: string;
+  status: "queued" | "running" | "complete" | "error";
+  phase: string;
+  message: string;
+  current_product?: string | null;
+  total: number;
+  processed: number;
+  ready: number;
+  skipped: number;
+  failed: number;
+  progress: number;
+};

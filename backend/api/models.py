@@ -1,20 +1,20 @@
 from fastapi import APIRouter
 
 try:
-    from services import runtime
+    from services import model_lifecycle
 except ModuleNotFoundError:
-    from backend.services import runtime
+    from backend.services import model_lifecycle
 
 router = APIRouter()
-router.add_api_route("/models/{version}/promote", runtime.promote_model, methods=["POST"])
-router.add_api_route("/models/{version}/reject", runtime.reject_model, methods=["POST"])
-router.add_api_route("/models/{version}/rollback", runtime.rollback_model, methods=["POST"])
-router.add_api_route("/ai-progress", runtime.get_ai_progress, methods=["GET"])
-router.add_api_route("/model-lifecycle/train", runtime.start_candidate_training, methods=["POST"])
-router.add_api_route("/model-lifecycle/candidates/{version}/compare", runtime.start_candidate_comparison, methods=["POST"])
+router.add_api_route("/models/{version}/promote", model_lifecycle.promote_model, methods=["POST"])
+router.add_api_route("/models/{version}/reject", model_lifecycle.reject_model, methods=["POST"])
+router.add_api_route("/models/{version}/rollback", model_lifecycle.rollback_model, methods=["POST"])
+router.add_api_route("/ai-progress", model_lifecycle.get_ai_progress, methods=["GET"])
+router.add_api_route("/model-lifecycle/train", model_lifecycle.start_candidate_training, methods=["POST"])
+router.add_api_route("/model-lifecycle/candidates/{version}/compare", model_lifecycle.start_candidate_comparison, methods=["POST"])
 router.add_api_route(
     "/model-lifecycle/rollback-targets/{version}/compare",
-    runtime.get_rollback_target_comparison,
+    model_lifecycle.get_rollback_target_comparison,
     methods=["GET", "POST"],
 )
-router.add_api_route("/model-lifecycle/jobs/{job_id}", runtime.get_lifecycle_job, methods=["GET"])
+router.add_api_route("/model-lifecycle/jobs/{job_id}", model_lifecycle.get_lifecycle_job, methods=["GET"])

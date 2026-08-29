@@ -38,9 +38,9 @@ def test_init_sql_defines_complete_current_schema(test_database_url, monkeypatch
                 with connection.cursor() as cursor:
                     cursor.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
 
-        runtime = importlib.import_module("backend.services.runtime")
-        monkeypatch.setattr(runtime, "get_conn", lambda: psycopg2.connect(fresh_url))
-        runtime.ensure_schema()
+        schema = importlib.import_module("db.schema")
+        monkeypatch.setattr(schema, "get_conn", lambda: psycopg2.connect(fresh_url))
+        schema.ensure_schema()
 
         with closing(psycopg2.connect(fresh_url)) as connection:
             with connection.cursor() as cursor:

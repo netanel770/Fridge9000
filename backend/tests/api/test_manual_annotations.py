@@ -41,8 +41,9 @@ def test_annotation_image_upload_never_invokes_detector(
     test_client, db_connection, test_environment
 ):
     runtime = importlib.import_module("backend.main").runtime
+    detection = importlib.import_module("services.detection")
     contents = _png_image(120, 80)
-    with patch.object(runtime, "infer", side_effect=AssertionError("detector invoked")) as infer:
+    with patch.object(detection, "infer", side_effect=AssertionError("detector invoked")) as infer:
         uploaded = _upload_manual_image(test_client, contents)
 
     assert infer.call_count == 0

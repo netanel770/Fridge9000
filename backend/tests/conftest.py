@@ -20,25 +20,41 @@ DEFAULT_TEST_DATABASE_URL = (
 )
 _ORIGINAL_DATABASE_URL = os.environ.get("DATABASE_URL")
 _ORIGINAL_TESTING_FLAG = os.environ.get("FRIDGE9000_TESTING")
+_ORIGINAL_TRAINING_PROVIDER = os.environ.get("TRAINING_PROVIDER")
+_ORIGINAL_UPLOAD_DIR = os.environ.get("UPLOAD_DIR")
 
 
 def pytest_configure(config):
-    if getattr(config.option, "basetemp", None) is not None:
-        return
+    configured_basetemp = getattr(config.option, "basetemp", None)
+    if configured_basetemp is None:
+        session_temp = (
+            PROJECT_ROOT
+            / "backend"
+            / f".pytest-tmp-{os.getpid()}-{uuid.uuid4().hex}"
+        )
+        config.option.basetemp = str(session_temp)
+        config._fridge9000_session_temp = session_temp
+    else:
+        session_temp = Path(configured_basetemp)
 
-    session_temp = (
-        PROJECT_ROOT
-        / "backend"
-        / f".pytest-tmp-{os.getpid()}-{uuid.uuid4().hex}"
-    )
-    config.option.basetemp = str(session_temp)
-    config._fridge9000_session_temp = session_temp
+    test_upload_dir = session_temp / "fridge9000-test-uploads"
+    test_upload_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["TRAINING_PROVIDER"] = "local"
+    os.environ["UPLOAD_DIR"] = str(test_upload_dir)
 
 
 def pytest_unconfigure(config):
     session_temp = getattr(config, "_fridge9000_session_temp", None)
     if session_temp is not None:
         shutil.rmtree(session_temp, ignore_errors=True)
+    if _ORIGINAL_TRAINING_PROVIDER is None:
+        os.environ.pop("TRAINING_PROVIDER", None)
+    else:
+        os.environ["TRAINING_PROVIDER"] = _ORIGINAL_TRAINING_PROVIDER
+    if _ORIGINAL_UPLOAD_DIR is None:
+        os.environ.pop("UPLOAD_DIR", None)
+    else:
+        os.environ["UPLOAD_DIR"] = _ORIGINAL_UPLOAD_DIR
 
 
 def _database_name(database_url: str) -> str:
@@ -123,8 +139,8 @@ def test_database_url() -> str:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def test_environment(test_database_url, tmp_path_factory):
-    test_upload_dir = tmp_path_factory.mktemp("fridge9000-test-uploads")
+def test_environment(test_database_url):
+    test_upload_dir = Path(os.environ["UPLOAD_DIR"])
     replacements = {
         "DATABASE_URL": test_database_url,
         "FRIDGE9000_TESTING": "1",

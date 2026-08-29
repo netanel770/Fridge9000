@@ -1,9 +1,9 @@
 from fastapi import APIRouter
 
 try:
-    from services import runtime
+    from services import receipts
 except ModuleNotFoundError:
-    from backend.services import runtime
+    from backend.services import receipts
 
 router = APIRouter()
-router.add_api_route("/receipts/upload", runtime.upload_receipt, methods=["POST"])
+router.add_api_route("/receipts/upload", receipts.upload_receipt, methods=["POST"])

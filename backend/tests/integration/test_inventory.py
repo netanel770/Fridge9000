@@ -72,7 +72,7 @@ def _assert_persisted_totals(db_connection, expected):
 
 
 def _run_schema_initialization():
-    importlib.import_module("backend.services.runtime").ensure_schema()
+    importlib.import_module("db.schema").ensure_schema()
 
 
 def test_schema_backfill_does_not_duplicate_existing_dated_batch(db_connection):

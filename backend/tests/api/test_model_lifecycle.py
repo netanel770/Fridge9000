@@ -76,7 +76,9 @@ class FakeYolo:
 def lifecycle_context(
     monkeypatch, tmp_path, test_database_url, db_connection
 ):
-    runtime = importlib.import_module("backend.main").runtime
+    runtime = importlib.import_module("services.model_lifecycle")
+    detection = runtime.detection
+    schema = importlib.import_module("db.schema")
     providers = importlib.import_module("training_providers")
     trainer = importlib.import_module("train_yolo_candidate")
     comparison = importlib.import_module("compare_yolo_models")
@@ -122,12 +124,14 @@ def lifecycle_context(
     with runtime._LIFECYCLE_JOB_LOCK:
         runtime._LIFECYCLE_JOBS.clear()
         runtime._ACTIVE_LIFECYCLE_JOB_ID = None
-    runtime.MODEL = None
-    runtime._MODEL_VERSION = None
-    runtime._MODEL_PATH = None
+    detection.MODEL = None
+    detection._MODEL_VERSION = None
+    detection._MODEL_PATH = None
 
     yield SimpleNamespace(
         runtime=runtime,
+        detection=detection,
+        schema=schema,
         providers=providers,
         trainer=trainer,
         comparison=comparison,
@@ -146,9 +150,9 @@ def lifecycle_context(
     with runtime._LIFECYCLE_JOB_LOCK:
         runtime._LIFECYCLE_JOBS.clear()
         runtime._ACTIVE_LIFECYCLE_JOB_ID = None
-    runtime.MODEL = None
-    runtime._MODEL_VERSION = None
-    runtime._MODEL_PATH = None
+    detection.MODEL = None
+    detection._MODEL_VERSION = None
+    detection._MODEL_PATH = None
 
 
 @pytest.fixture
@@ -854,7 +858,7 @@ def test_losing_candidate_blocks_training_until_explicit_rejection(
 
     # Reconciliation (including the startup path) must retain the unresolved
     # candidate's selected data as experimental.
-    lifecycle_context.runtime.ensure_schema()
+    lifecycle_context.schema.ensure_schema()
     with db_connection.cursor() as cursor:
         cursor.execute(
             "SELECT training_state FROM annotation_submissions WHERE id = ANY(%s);",
@@ -1309,8 +1313,8 @@ def test_promotion_and_rollback_preserve_single_active_and_history(
 
     # Startup reconciliation must be idempotent and must not trust data merely
     # because its former model still exists in archived history.
-    lifecycle_context.runtime.ensure_schema()
-    lifecycle_context.runtime.ensure_schema()
+    lifecycle_context.schema.ensure_schema()
+    lifecycle_context.schema.ensure_schema()
     with db_connection.cursor() as cursor:
         cursor.execute(
             "SELECT id, training_state FROM annotation_submissions WHERE id = ANY(%s);",
