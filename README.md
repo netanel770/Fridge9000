@@ -20,21 +20,21 @@ Fridge 9000 uses **Ultralytics YOLO** for refrigerator product detection.
 
 Each scan stores:
 
-- Product labels
-- Confidence scores
-- Bounding boxes
-- Source images
-- Scan history
+* Product labels
+* Confidence scores
+* Bounding boxes
+* Source images
+* Scan history
 
 Before inventory is updated, detections can be reviewed and corrected.
 
 Supported corrections include:
 
-- Confirming a correct detection
-- Relabeling an incorrect product
-- Adjusting a bounding box
-- Removing a false positive
-- Adding a missed product
+* Confirming a correct detection
+* Relabeling an incorrect product
+* Adjusting a bounding box
+* Removing a false positive
+* Adding a missed product
 
 Images with zero YOLO detections are still stored, allowing completely new products to be manually annotated.
 
@@ -44,14 +44,14 @@ Images with zero YOLO detections are still stored, allowing completely new produ
 
 Inventory supports:
 
-- Automatic updates from refrigerator scans
-- Manual additions and removals
-- Per-product quantities
-- Separate inventory batches
-- Manual and estimated expiration dates
-- Partially consumed products
-- Inventory history
-- Low-stock and missing-product alerts
+* Automatic updates from refrigerator scans
+* Manual additions and removals
+* Per-product quantities
+* Separate inventory batches
+* Manual and estimated expiration dates
+* Partially consumed products
+* Inventory history
+* Low-stock and missing-product alerts
 
 Inventory batches are the authoritative representation of stored products.
 
@@ -222,11 +222,11 @@ The submission simply receives archive metadata and disappears from the default 
 
 Archived submissions:
 
-- Remain quarantined
-- Remain excluded from training
-- Preserve their annotations and provenance
-- Can be viewed with `Show archived`
-- Can be unarchived later
+* Remain quarantined
+* Remain excluded from training
+* Preserve their annotations and provenance
+* Can be viewed with `Show archived`
+* Can be unarchived later
 
 This keeps the normal Quarantine queue actionable without permanently deleting historical annotation data.
 
@@ -297,13 +297,13 @@ Promotion, rejection, quarantine, rollback, archiving, and retraining do not era
 
 This makes it possible to determine:
 
-- Which model was trained
-- Which dataset version was used
-- Which starting detector weights were used
-- Which active model it was evaluated against
-- Which submissions were baseline data
-- Which submissions were newly introduced
-- Which annotations contributed to each model
+* Which model was trained
+* Which dataset version was used
+* Which starting detector weights were used
+* Which active model it was evaluated against
+* Which submissions were baseline data
+* Which submissions were newly introduced
+* Which annotations contributed to each model
 
 ---
 
@@ -376,11 +376,11 @@ It learns the accumulated Fridge knowledge from the accumulated trusted dataset.
 
 This has several useful properties:
 
-- Local and remote training have identical semantics
-- Training runs are easier to reproduce
-- Rollback does not require a model ancestry tree
-- Archived-model weights cannot silently influence a new branch
-- Human-reviewed data remains the durable source of accumulated learning
+* Local and remote training have identical semantics
+* Training runs are easier to reproduce
+* Rollback does not require a model ancestry tree
+* Archived-model weights cannot silently influence a new branch
+* Human-reviewed data remains the durable source of accumulated learning
 
 ---
 
@@ -450,17 +450,17 @@ new data       Archived
 
 The system stores:
 
-- Dataset versions
-- Training runs
-- Starting-weight identity and SHA
-- Model versions
-- Model artifacts
-- Metrics
-- Class-aware comparisons
-- Training provenance
-- Promotion history
-- Activation history
-- Rollback history
+* Dataset versions
+* Training runs
+* Starting-weight identity and SHA
+* Model versions
+* Model artifacts
+* Metrics
+* Class-aware comparisons
+* Training provenance
+* Promotion history
+* Activation history
+* Rollback history
 
 Only one detector can be active at a time.
 
@@ -482,26 +482,26 @@ The active detector is the benchmark even though the candidate itself starts fro
 
 Comparison data includes:
 
-- Precision
-- Recall
-- mAP50
-- mAP50-95
-- Class-set analysis
-- Shared-class metrics
-- Added-class metrics
-- Per-added-class metrics
+* Precision
+* Recall
+* mAP50
+* mAP50-95
+* Class-set analysis
+* Shared-class metrics
+* Added-class metrics
+* Per-added-class metrics
 
-The mobile comparison view separates these concepts instead of presenting only a single overall score.
+The mobile comparison view separates established and newly introduced product performance rather than relying only on one aggregate score.
 
 ```text
-Overall Performance
-
 Shared Product Performance
 
 Products Added by Candidate
 
 Promotion Evaluation
 ```
+
+Shared products are compared directly between models, while products unique to one model show their available per-product or aggregate metrics separately.
 
 This matters because a candidate can improve overall metrics while making established products worse.
 
@@ -617,11 +617,11 @@ Rollback means **reactivating an existing model**, not retraining it.
 
 It reuses:
 
-- Model version
-- Model artifact
-- Model path
-- Original training run
-- Training provenance
+* Model version
+* Model artifact
+* Model path
+* Original training run
+* Training provenance
 
 No new training job or duplicate model version is created.
 
@@ -677,7 +677,6 @@ Previous Production Model
 The UI shows:
 
 ```text
-Overall Performance
 Shared Product Performance
 Products only in Current Active
 Products only in Previous Model
@@ -687,11 +686,11 @@ Historical comparisons use already persisted model-comparison data.
 
 Opening a rollback comparison does **not**:
 
-- Launch YOLO evaluation
-- Start a training/lifecycle job
-- Call Kaggle
-- Create a new comparison row
-- Reapply candidate promotion eligibility
+* Launch YOLO evaluation
+* Start a training/lifecycle job
+* Call Kaggle
+* Create a new comparison row
+* Reapply candidate promotion eligibility
 
 If no persisted comparison exists for the exact model pair, the comparison is shown as unavailable.
 
@@ -707,15 +706,15 @@ The **Teach Fridge → AI Progress** view exposes the model lifecycle to the mob
 
 It shows:
 
-- Current active model
-- Candidate and candidate state
-- Candidate comparison
-- Promotion/rejection controls
-- Previously active rollback targets
-- Cached historical comparisons
-- Training History
-- Active Model Products
-- Quarantine
+* Current active model
+* Candidate and candidate state
+* Candidate comparison
+* Promotion/rejection controls
+* Previously active rollback targets
+* Cached historical comparisons
+* Training History
+* Active Model Products
+* Quarantine
 
 Candidate states distinguish situations such as:
 
@@ -771,9 +770,9 @@ Candidate Training
 
 The current active model is supplied separately for:
 
-- Class-preservation checks
-- Comparison
-- Provenance
+* Class-preservation checks
+* Comparison
+* Provenance
 
 It is not used as the candidate's starting weights.
 
@@ -830,14 +829,14 @@ Kaggle is a compute provider, not the authority over Fridge model state.
 
 The backend validates returned:
 
-- Dataset identity
-- Model identity
-- Starting-model identity
-- Class mappings
-- Class preservation
-- Metrics
-- Class-aware comparison data
-- Artifact hashes
+* Dataset identity
+* Model identity
+* Starting-model identity
+* Class mappings
+* Class preservation
+* Metrics
+* Class-aware comparison data
+* Artifact hashes
 
 before accepting the result.
 
@@ -849,11 +848,21 @@ PostgreSQL and the backend model registry remain the source of truth.
 
 # Architecture
 
+Fridge 9000 is organized around domain boundaries rather than a single backend or mobile application module.
+
+At a high level:
+
 ```text
                  React Native / Expo
                          │
                          ▼
+                 Feature / API Layer
+                         │
+                         ▼
                     FastAPI API
+                         │
+                         ▼
+                  Domain Services
                          │
              ┌───────────┴───────────┐
              ▼                       ▼
@@ -869,16 +878,126 @@ PostgreSQL and the backend model registry remain the source of truth.
       Local CPU/GPU or Kaggle
 ```
 
-The backend exposes API modules for areas including:
+## Backend Organization
 
-- Scans
-- Inventory
-- Annotations
-- Models
-- Receipts
-- Product outlines
-- Events
-- System operations
+FastAPI routing is separated from application behavior.
+
+Modules under `backend/api/` define HTTP routes and delegate work to the corresponding domain service instead of containing the full implementation.
+
+```text
+HTTP Request
+     ↓
+backend/api/*
+     ↓
+backend/services/*
+     ↓
+Database / ML / Filesystem
+```
+
+The service layer is divided by responsibility:
+
+* `annotations.py` manages reviewed human corrections and annotation workflow.
+* `detection.py` owns detector loading and inference-related behavior.
+* `events.py` handles event and alert operations.
+* `freshness_analysis.py` owns freshness-classification requests.
+* `inventory.py` manages inventory batches, quantities, expiry state, and inventory updates.
+* `media_images.py` contains shared image/media helpers.
+* `model_lifecycle.py` manages candidate training state, comparison, promotion, rejection, rollback, and model registry operations.
+* `outlines.py` manages representative images and SAM2 outline preparation.
+* `receipts.py` handles receipt ingestion and OCR-related processing.
+* `scans.py` manages refrigerator scans, scan review, stored detections, and scan images.
+
+`backend/services/runtime.py` remains only as a small compatibility facade for startup dependencies. It no longer acts as the central implementation module for unrelated application behavior.
+
+Database responsibilities are also separated under `backend/db/`.
+
+```text
+backend/db/
+├── connection.py
+├── lifecycle_state.py
+└── schema.py
+```
+
+`connection.py` owns database connection creation, `schema.py` owns idempotent runtime schema initialization and migration compatibility, and `lifecycle_state.py` contains annotation-state reconciliation associated with the active model lifecycle.
+
+This keeps HTTP routing, application behavior, and database initialization from accumulating in one shared module.
+
+## Mobile Organization
+
+The mobile application uses Expo Router for route-level screens, while reusable feature behavior lives under `mobile/src/`.
+
+Route files under `mobile/app/` primarily compose screens and connect feature modules rather than implementing every network request, modal, state transition, and presentation concern directly.
+
+The largest workflow, **Teach Fridge**, is divided into a dedicated feature package:
+
+```text
+mobile/src/features/teach-fridge/
+├── components/
+│   ├── contributions/
+│   ├── modals/
+│   ├── progress/
+│   └── suggestions/
+├── hooks/
+├── annotationUtils.ts
+├── contributionUtils.ts
+├── modelUtils.ts
+├── styles.ts
+└── types.ts
+```
+
+The route-level `teach-fridge.tsx` screen coordinates these pieces while specialized hooks own workflow state such as:
+
+* AI progress
+* Annotation editing
+* Contributions
+* Model lifecycle actions
+* Moderation
+* Quarantine
+* Rollback comparison
+* Suggestions
+* Training selection
+
+Presentation is similarly broken into focused components for suggestions, contributions, lifecycle progress, training data, quarantine, rollback, and model comparison.
+
+This prevents the Teach Fridge workflow from depending on one multi-thousand-line screen component and allows individual parts of the lifecycle to evolve independently.
+
+## Mobile API Layer
+
+Mobile networking is also divided by backend domain.
+
+```text
+mobile/src/services/api/
+├── client.ts
+├── annotations.ts
+├── events.ts
+├── freshness.ts
+├── inventory.ts
+├── models.ts
+├── outlines.ts
+├── receipts.ts
+├── scans.ts
+└── index.ts
+```
+
+`client.ts` contains shared request construction, JSON response handling, and normalized API errors.
+
+Domain modules contain the endpoint-specific calls.
+
+The previous `mobile/src/services/api.ts` path remains as a lightweight compatibility export rather than a single file containing the complete mobile API implementation.
+
+This gives both sides of the application similar boundaries:
+
+```text
+Mobile Feature
+      ↓
+Domain API Client
+      ↓
+FastAPI Domain Router
+      ↓
+Backend Domain Service
+      ↓
+Database / ML Service
+```
 
 PostgreSQL stores persistent application state and model-lifecycle metadata.
 
@@ -890,35 +1009,35 @@ Generated artifacts such as uploads, dataset exports, comparison artifacts, and 
 
 ## Backend
 
-- Python
-- FastAPI
-- PostgreSQL
-- psycopg2
-- OpenCV
-- Ultralytics YOLO
-- PyTorch
-- SAM2
-- Tesseract OCR
-- Pillow
-- NumPy
+* Python
+* FastAPI
+* PostgreSQL
+* psycopg2
+* OpenCV
+* Ultralytics YOLO
+* PyTorch
+* SAM2
+* Tesseract OCR
+* Pillow
+* NumPy
 
 ## Mobile
 
-- React Native
-- Expo
-- Expo Router
-- TypeScript
+* React Native
+* Expo
+* Expo Router
+* TypeScript
 
 ## Infrastructure and Testing
 
-- Docker
-- Docker Compose
-- PostgreSQL 16
-- pytest
-- TypeScript compiler
-- ESLint
-- Expo Doctor
-- Kaggle GPU training
+* Docker
+* Docker Compose
+* PostgreSQL 16
+* pytest
+* TypeScript compiler
+* ESLint
+* Expo Doctor
+* Kaggle GPU training
 
 ---
 
@@ -927,11 +1046,44 @@ Generated artifacts such as uploads, dataset exports, comparison artifacts, and 
 ```text
 Fridge9000/
 ├── backend/
-│   ├── api/
+│   ├── api/                         # Thin FastAPI domain routers
+│   │   ├── annotations.py
+│   │   ├── events.py
+│   │   ├── inventory.py
+│   │   ├── models.py
+│   │   ├── outlines.py
+│   │   ├── receipts.py
+│   │   ├── scans.py
+│   │   └── system.py
+│   │
 │   ├── core/
+│   │   └── config.py                # Backend configuration
+│   │
 │   ├── db/
-│   ├── services/
+│   │   ├── connection.py            # PostgreSQL connections
+│   │   ├── lifecycle_state.py       # Annotation trust-state reconciliation
+│   │   └── schema.py                # Runtime schema initialization
+│   │
+│   ├── services/                    # Domain application behavior
+│   │   ├── annotations.py
+│   │   ├── detection.py
+│   │   ├── events.py
+│   │   ├── freshness_analysis.py
+│   │   ├── inventory.py
+│   │   ├── media_images.py
+│   │   ├── model_lifecycle.py
+│   │   ├── outlines.py
+│   │   ├── receipts.py
+│   │   ├── runtime.py               # Startup compatibility facade
+│   │   └── scans.py
+│   │
 │   ├── tests/
+│   │   ├── api/
+│   │   ├── integration/
+│   │   ├── unit/
+│   │   ├── e2e/
+│   │   └── ml/
+│   │
 │   ├── class_aware_metrics.py
 │   ├── compare_yolo_models.py
 │   ├── export_yolo_dataset.py
@@ -949,9 +1101,45 @@ Fridge9000/
 │   └── README.md
 │
 ├── mobile/
-│   ├── app/
+│   ├── app/                          # Expo Router screens
+│   │   └── teach-fridge.tsx         # Teach Fridge orchestration screen
+│   │
 │   ├── assets/
+│   │
 │   └── src/
+│       ├── components/               # Shared application components
+│       │
+│       ├── features/
+│       │   └── teach-fridge/
+│       │       ├── components/
+│       │       │   ├── contributions/
+│       │       │   ├── modals/
+│       │       │   ├── progress/
+│       │       │   └── suggestions/
+│       │       ├── hooks/
+│       │       ├── annotationUtils.ts
+│       │       ├── contributionUtils.ts
+│       │       ├── modelUtils.ts
+│       │       ├── styles.ts
+│       │       └── types.ts
+│       │
+│       ├── services/
+│       │   ├── api/
+│       │   │   ├── client.ts
+│       │   │   ├── annotations.ts
+│       │   │   ├── events.ts
+│       │   │   ├── freshness.ts
+│       │   │   ├── inventory.ts
+│       │   │   ├── models.ts
+│       │   │   ├── outlines.ts
+│       │   │   ├── receipts.ts
+│       │   │   ├── scans.ts
+│       │   │   └── index.ts
+│       │   └── config.ts
+│       │
+│       ├── theme/
+│       ├── types/
+│       └── utils/
 │
 ├── scripts/
 │   └── fridge-data.ps1
@@ -967,6 +1155,10 @@ Fridge9000/
 └── README.md
 ```
 
+The structure intentionally keeps route definitions, domain behavior, persistence setup, mobile networking, and complex UI workflows separate.
+
+The goal is not to create layers merely for their own sake, but to keep high-complexity areas such as inventory, annotation moderation, and the model lifecycle independently navigable and testable.
+
 ---
 
 # Running Fridge 9000
@@ -975,10 +1167,10 @@ Fridge9000/
 
 Install:
 
-- Docker Desktop
-- Git
-- Node.js / npm
-- Expo Go on the mobile device
+* Docker Desktop
+* Git
+* Node.js / npm
+* Expo Go on the mobile device
 
 Clone:
 
@@ -1066,14 +1258,14 @@ Git contains application source code but intentionally does **not** contain all 
 
 Persistent Fridge data includes:
 
-- PostgreSQL database
-- Uploaded scan images
-- Candidate model artifacts
-- Dataset exports
-- Model-comparison artifacts
-- Base training dataset
-- Remote-training job state
-- Local `.env`
+* PostgreSQL database
+* Uploaded scan images
+* Candidate model artifacts
+* Dataset exports
+* Model-comparison artifacts
+* Base training dataset
+* Remote-training job state
+* Local `.env`
 
 Important runtime directories include:
 
@@ -1120,16 +1312,16 @@ export-fridge-data.bat
 
 The export captures:
 
-- PostgreSQL database
-- `.env` when present
-- Uploads
-- Candidate model artifacts
-- Dataset exports
-- Model comparisons
-- Base dataset
-- Remote training state when present
-- Backup manifest
-- Source Git branch and commit
+* PostgreSQL database
+* `.env` when present
+* Uploads
+* Candidate model artifacts
+* Dataset exports
+* Model comparisons
+* Base dataset
+* Remote training state when present
+* Backup manifest
+* Source Git branch and commit
 
 The backend is stopped while runtime files are copied to avoid creating an inconsistent snapshot.
 
@@ -1248,23 +1440,31 @@ docker compose logs -f backend
 
 Fridge 9000 uses a separate PostgreSQL test environment so automated tests do not modify normal development data.
 
+The test suite follows the same domain-oriented structure used by the backend.
+
+Focused API tests cover areas including annotations, freshness analysis, model lifecycle, product outlines, receipts, scans, and system health.
+
+Integration tests cover persistence-heavy behavior including inventory and schema initialization, while smaller unit tests cover isolated utilities and image-processing behavior.
+
 Lifecycle and integration tests exercise operations including:
 
-- Fresh schema initialization
-- Candidate registration
-- Provider parity
-- Class preservation
-- Promotion
-- Rejection
-- Quarantine
-- Archive / unarchive
-- Returning quarantined data to training
-- Rollback
-- Repeated model reactivation
-- Annotation trust reconciliation
-- Cached rollback comparison
-- Training provenance
-- Inventory batch migration
+* Fresh schema initialization
+* Candidate registration
+* Provider parity
+* Class preservation
+* Promotion
+* Rejection
+* Quarantine
+* Archive / unarchive
+* Returning quarantined data to training
+* Rollback
+* Repeated model reactivation
+* Annotation trust reconciliation
+* Cached rollback comparison
+* Training provenance
+* Inventory batch migration
+
+The refactored backend service boundaries preserve the existing HTTP API while allowing these domains to be exercised without depending on one central runtime implementation.
 
 ---
 
@@ -1328,31 +1528,37 @@ npx expo-doctor
 
 # Development Notes
 
-- `.env` and real API credentials must never be committed.
-- Runtime uploads and generated training artifacts are intentionally ignored by Git.
-- Inventory batches are the authoritative inventory representation.
-- Only one detector can be active at a time.
-- Only one unresolved candidate can exist at a time.
-- Every candidate starts from the configured fixed pretrained YOLO foundation.
-- The active Fridge model is the class-preservation and comparison baseline, not the training starting weights.
-- Candidate datasets contain the permanent base dataset, trusted active-model corrections, and explicitly selected eligible corrections.
-- All active-model classes must be preserved by a candidate.
-- Candidate training never silently changes the active detector.
-- Promotion is explicit and backend-authoritative.
-- Rejected experimental data is quarantined.
-- Quarantined data can be returned to the eligible training pool.
-- Quarantine archiving controls workflow visibility without deleting provenance or creating another training state.
-- Annotation trust follows the model currently serving predictions.
-- Historical provenance is never rewritten merely because the active model changes.
-- All previously active production models can remain rollback targets while their artifacts are available.
-- Candidate promotion rules do not retroactively determine rollback eligibility.
-- Rollback comparisons are read-only and use persisted historical comparison data.
-- Rollback reactivates existing model versions without retraining.
-- Local and Kaggle providers use the same starting-model and cumulative-data semantics.
-- Kaggle provides remote compute while the Fridge backend remains the lifecycle authority.
-- Freshness classification remains separate from the detector lifecycle.
-- Development and test PostgreSQL environments are separated.
-- Database backups and trained-model artifacts must be transferred together.
+* `.env` and real API credentials must never be committed.
+* Runtime uploads and generated training artifacts are intentionally ignored by Git.
+* FastAPI modules under `backend/api/` should remain focused on HTTP routing; domain behavior belongs under `backend/services/`.
+* Database connection, schema initialization, and active-model annotation reconciliation are separated under `backend/db/`.
+* `backend/services/runtime.py` is retained only as a small startup compatibility facade rather than a general-purpose service module.
+* Mobile API calls are grouped by backend domain under `mobile/src/services/api/` and share common request/error handling through `client.ts`.
+* Complex mobile workflows should keep route-level screens focused on composition and move reusable state and behavior into feature hooks/components.
+* Teach Fridge is organized as a dedicated feature package rather than a single monolithic screen implementation.
+* Inventory batches are the authoritative inventory representation.
+* Only one detector can be active at a time.
+* Only one unresolved candidate can exist at a time.
+* Every candidate starts from the configured fixed pretrained YOLO foundation.
+* The active Fridge model is the class-preservation and comparison baseline, not the training starting weights.
+* Candidate datasets contain the permanent base dataset, trusted active-model corrections, and explicitly selected eligible corrections.
+* All active-model classes must be preserved by a candidate.
+* Candidate training never silently changes the active detector.
+* Promotion is explicit and backend-authoritative.
+* Rejected experimental data is quarantined.
+* Quarantined data can be returned to the eligible training pool.
+* Quarantine archiving controls workflow visibility without deleting provenance or creating another training state.
+* Annotation trust follows the model currently serving predictions.
+* Historical provenance is never rewritten merely because the active model changes.
+* All previously active production models can remain rollback targets while their artifacts are available.
+* Candidate promotion rules do not retroactively determine rollback eligibility.
+* Rollback comparisons are read-only and use persisted historical comparison data.
+* Rollback reactivates existing model versions without retraining.
+* Local and Kaggle providers use the same starting-model and cumulative-data semantics.
+* Kaggle provides remote compute while the Fridge backend remains the lifecycle authority.
+* Freshness classification remains separate from the detector lifecycle.
+* Development and test PostgreSQL environments are separated.
+* Database backups and trained-model artifacts must be transferred together.
 
 ---
 
