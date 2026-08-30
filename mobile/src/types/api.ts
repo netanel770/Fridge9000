@@ -94,6 +94,50 @@ export type UploadScanResponse = {
   error?: string;
 };
 
+export type PublicUser = {
+  id: number;
+  email: string;
+  display_name: string | null;
+  is_active: boolean;
+  is_system_admin: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AuthSessionResponse = {
+  access_token: string;
+  refresh_token: string;
+  token_type: "bearer";
+  access_token_expires_at: string;
+  refresh_token_expires_at: string;
+  user: PublicUser;
+};
+
+export type HouseholdRole = "OWNER" | "MANAGER" | "MEMBER";
+export type HouseholdStatus = "PENDING" | "ACTIVE" | "REJECTED" | "REMOVED";
+export type HouseholdMembership = {
+  fridge_id: number;
+  fridge_name: string;
+  role: HouseholdRole;
+  status: HouseholdStatus;
+};
+
+export type HouseholdMember = {
+  user_id: number;
+  email: string;
+  display_name: string | null;
+  role: HouseholdRole;
+  status: HouseholdStatus;
+  requested_at: string;
+  reviewed_at: string | null;
+};
+
+export type HouseholdMembersResponse = {
+  fridge_id: number;
+  join_code: string | null;
+  members: HouseholdMember[];
+};
+
 export type ManualAnnotationImageUpload = {
   ok: boolean;
   scan_id: number;
@@ -274,6 +318,37 @@ export type ModelComparisonSummary = {
     provider?: string;
     split?: string;
   };
+};
+
+export type UserModelComparison = {
+  id: string;
+  dataset_version: string;
+  created_at: string;
+  current_model_id: number;
+  previous_model_id: number;
+  stored_active_model_id: number;
+  stored_candidate_model_id: number;
+  current_metrics: ModelMetrics;
+  previous_metrics: ModelMetrics;
+  metric_differences: ModelMetrics;
+  metric_difference_direction: "current_minus_previous" | "previous_minus_current";
+  class_comparison: {
+    current_classes: string[];
+    previous_classes: string[];
+    shared_classes: string[];
+    only_in_current: string[];
+    only_in_previous: string[];
+  };
+  shared_class_comparison: SharedClassComparison;
+  added_class_metrics: AddedClassMetrics;
+  comparison_rule: string;
+  candidate_outperforms_active: boolean;
+};
+
+export type UserModelOverview = {
+  active_model: LifecycleModel | null;
+  previous_model: LifecycleModel | null;
+  comparison: UserModelComparison | null;
 };
 
 export type CandidateState =

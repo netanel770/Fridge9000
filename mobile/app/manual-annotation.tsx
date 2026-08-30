@@ -12,6 +12,7 @@ import type { ManualAnnotationImageUpload } from "../src/types/api";
 import { getMinimumAnnotationBoxSize } from "../src/utils/imageCoordinates";
 import type { ImageBoundingBox } from "../src/utils/imageCoordinates";
 import { colors, radius, spacing, typography } from "../src/theme";
+import { useAuth } from "../src/features/auth/AuthContext";
 
 type ManualProduct = {
   id: string;
@@ -20,6 +21,7 @@ type ManualProduct = {
 };
 
 export default function ManualAnnotationScreen() {
+  const { user } = useAuth();
   const [asset, setAsset] = useState<ImagePicker.ImagePickerAsset | null>(null);
   const [uploaded, setUploaded] = useState<ManualAnnotationImageUpload | null>(null);
   const [products, setProducts] = useState<ManualProduct[]>([]);
@@ -153,7 +155,7 @@ export default function ManualAnnotationScreen() {
       Alert.alert(
         "Annotations submitted",
         "Your contribution is pending moderation in Teach Fridge 9000.",
-        [{ text: "Done", onPress: () => router.replace("/teach-fridge") }],
+        [{ text: "Done", onPress: () => router.replace((user?.is_system_admin ? "/teach-fridge" : "/teach-user") as never) }],
       );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not submit annotations.");

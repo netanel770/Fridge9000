@@ -20,6 +20,31 @@ def _probability_setting(name: str, default: str) -> float:
 def _training_setting(name: str, legacy_name: str, default: str) -> str:
     return os.getenv(name, os.getenv(legacy_name, default))
 
+
+def _non_empty_setting(name: str, default: str) -> str:
+    value = os.getenv(name, default).strip()
+    if not value:
+        raise ValueError(f"{name} must not be empty")
+    return value
+
+
+def _positive_int_setting(name: str, default: str) -> int:
+    try:
+        value = int(os.getenv(name, default))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _comma_separated_setting(name: str) -> tuple[str, ...]:
+    return tuple(
+        value.strip()
+        for value in os.getenv(name, "").split(",")
+        if value.strip()
+    )
+
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -33,6 +58,19 @@ CORS_ORIGINS = [
     "http://localhost:8081",
     "http://127.0.0.1:8081",
 ]
+
+JWT_SECRET = _non_empty_setting(
+    "JWT_SECRET", "development-only-change-me-before-enabling-auth"
+)
+JWT_ISSUER = _non_empty_setting("JWT_ISSUER", "fridge9000")
+JWT_AUDIENCE = _non_empty_setting("JWT_AUDIENCE", "fridge9000-api")
+JWT_ACCESS_TOKEN_LIFETIME_SECONDS = _positive_int_setting(
+    "JWT_ACCESS_TOKEN_LIFETIME_SECONDS", "900"
+)
+JWT_REFRESH_TOKEN_LIFETIME_SECONDS = _positive_int_setting(
+    "JWT_REFRESH_TOKEN_LIFETIME_SECONDS", "2592000"
+)
+GOOGLE_OAUTH_CLIENT_IDS = _comma_separated_setting("GOOGLE_OAUTH_CLIENT_IDS")
 
 TRAINING_PROVIDER = os.getenv("TRAINING_PROVIDER", "local").strip().lower()
 DEFAULT_KAGGLE_MACHINE_SHAPE = "NvidiaTeslaT4"

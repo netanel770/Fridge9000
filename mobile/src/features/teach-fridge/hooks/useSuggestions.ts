@@ -6,6 +6,7 @@ import type { DetectionItem, RecentScan } from "../../../types/api";
 type AddMissedHandler = (scan: RecentScan) => Promise<void>;
 
 export function useSuggestions({
+  active = true,
   requestedScanId,
   requestedDetectionId,
   hasValidRequestedScan,
@@ -14,6 +15,7 @@ export function useSuggestions({
   addMissedHandler,
   selectionStartHandler,
 }: {
+  active?: boolean;
   requestedScanId: number;
   requestedDetectionId: number;
   hasValidRequestedScan: boolean;
@@ -84,8 +86,8 @@ export function useSuggestions({
   }, [addMissedHandler, initialRoute, selectScan]);
 
   useEffect(() => {
-    void loadSuggestions();
-  }, [loadSuggestions]);
+    if (active) void loadSuggestions();
+  }, [active, loadSuggestions]);
 
   return {
     scans,

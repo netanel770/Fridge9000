@@ -5,6 +5,7 @@ import { Image, StyleSheet, Text, View } from "react-native";
 import type { DetectionItem } from "../types/api";
 import { colors, radius } from "../theme";
 import { projectBoundingBox } from "../utils/imageCoordinates";
+import { getApiRequestHeaders } from "../services/api";
 
 type DetectionImageViewerProps = {
   imageUri: string;
@@ -41,7 +42,7 @@ export function DetectionImageViewer({
       }}
     >
       <Image
-        source={{ uri: imageUri }}
+        source={{ uri: imageUri, headers: getApiRequestHeaders() }}
         style={StyleSheet.absoluteFillObject}
         resizeMode="contain"
         onError={() => setImageUnavailable(true)}

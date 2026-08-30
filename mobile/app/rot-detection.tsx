@@ -4,7 +4,7 @@ import * as ImagePicker from "expo-image-picker";
 import { Ionicons } from "@expo/vector-icons";
 
 import { AppButton, Card, ScreenHeader, StatusBadge } from "../src/components/ui";
-import { analyzeFreshness, getInventoryBatches, removeInventoryBatchQuantity } from "../src/services/api";
+import { analyzeFreshness, getApiRequestHeaders, getInventoryBatches, removeInventoryBatchQuantity } from "../src/services/api";
 import { API_BASE_URL } from "../src/services/config";
 import { colors, radius, spacing, typography } from "../src/theme";
 import type {
@@ -151,7 +151,7 @@ export default function RotDetectionScreen() {
         <>
           <Card>
             <Image
-              source={{ uri: result ? absoluteImageUrl(result.image_url) : imageUri }}
+              source={{ uri: result ? absoluteImageUrl(result.image_url) : imageUri, ...(result ? { headers: getApiRequestHeaders() } : {}) }}
               style={styles.preview}
               resizeMode="contain"
             />

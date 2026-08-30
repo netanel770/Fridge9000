@@ -69,6 +69,11 @@ def test_init_sql_defines_complete_current_schema(test_database_url, monkeypatch
                     "training_run_annotation_usage",
                     "model_comparisons",
                     "model_activation_history",
+                    "users",
+                    "refresh_sessions",
+                    "auth_identities",
+                    "households",
+                    "household_memberships",
                 } <= tables
 
                 cursor.execute(
@@ -172,3 +177,191 @@ def test_init_sql_defines_complete_current_schema(test_database_url, monkeypatch
                         sql.Identifier(database_name)
                     )
                 )
+
+
+def test_auth_foundation_tables_have_expected_schema(db_connection):
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT table_name, column_name, is_nullable, data_type, column_default
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name IN ('users', 'refresh_sessions', 'auth_identities');
+            """
+        )
+        columns = {
+            (row[0], row[1]): {
+                "nullable": row[2],
+                "type": row[3],
+                "default": row[4],
+            }
+            for row in cursor.fetchall()
+        }
+
+        assert {name for table, name in columns if table == "users"} == {
+            "id",
+            "email",
+            "display_name",
+            "password_hash",
+            "is_active",
+            "is_system_admin",
+            "created_at",
+            "updated_at",
+        }
+        assert {name for table, name in columns if table == "refresh_sessions"} == {
+            "id",
+            "user_id",
+            "token_hash",
+            "created_at",
+            "expires_at",
+            "revoked_at",
+        }
+        assert {name for table, name in columns if table == "auth_identities"} == {
+            "id",
+            "user_id",
+            "provider",
+            "provider_subject",
+            "verified_email",
+            "created_at",
+        }
+        assert columns[("users", "email")]["nullable"] == "NO"
+        assert columns[("users", "password_hash")]["nullable"] == "YES"
+        assert columns[("users", "is_active")]["default"] == "true"
+        assert columns[("users", "is_system_admin")]["default"] == "false"
+        assert columns[("refresh_sessions", "id")]["type"] == "uuid"
+        assert columns[("refresh_sessions", "revoked_at")]["nullable"] == "YES"
+
+
+def test_runtime_schema_creates_auth_tables_idempotently(db_connection):
+    with db_connection.cursor() as cursor:
+        cursor.execute("DROP TABLE auth_identities;")
+        cursor.execute("DROP TABLE refresh_sessions;")
+    db_connection.commit()
+
+    schema = importlib.import_module("db.schema")
+    schema.ensure_schema()
+    schema.ensure_schema()
+
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name IN ('users', 'refresh_sessions', 'auth_identities');
+            """
+        )
+        assert {row[0] for row in cursor.fetchall()} == {
+            "users",
+            "refresh_sessions",
+            "auth_identities",
+        }
+
+
+def test_auth_identity_requires_user_and_unique_provider_subject(db_connection):
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO users(email) VALUES (%s) RETURNING id;",
+            ("person@example.com",),
+        )
+        user_id = cursor.fetchone()[0]
+        cursor.execute(
+            """
+            INSERT INTO auth_identities(
+                user_id, provider, provider_subject, verified_email
+            ) VALUES (%s, 'GOOGLE', 'subject-123', %s);
+            """,
+            (user_id, "person@example.com"),
+        )
+    db_connection.commit()
+
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        with db_connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO auth_identities(user_id, provider, provider_subject)
+                VALUES (%s, 'GOOGLE', 'subject-123');
+                """,
+                (user_id,),
+            )
+    db_connection.rollback()
+
+    with pytest.raises(psycopg2.errors.ForeignKeyViolation):
+        with db_connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO auth_identities(user_id, provider, provider_subject)
+                VALUES (999999, 'GOOGLE', 'missing-user');
+                """
+            )
+    db_connection.rollback()
+
+
+def test_household_schema_and_legacy_ownership_are_present(db_connection):
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT name, join_code, creator_user_id, is_legacy
+            FROM households WHERE id = 1;
+            """
+        )
+        assert cursor.fetchone() == (
+            "Legacy Fridge Data",
+            "LEGACY-DATA",
+            None,
+            True,
+        )
+        cursor.execute(
+            """
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND (table_name, column_name) IN (
+                ('inventory', 'household_id'),
+                ('inventory_batches', 'household_id'),
+                ('scans', 'household_id'),
+                ('scans', 'created_by_user_id'),
+                ('events', 'household_id'),
+                ('annotation_submissions', 'household_id'),
+                ('annotation_submissions', 'created_by_user_id')
+              );
+            """
+        )
+        assert set(cursor.fetchall()) == {
+            ("inventory", "household_id"),
+            ("inventory_batches", "household_id"),
+            ("scans", "household_id"),
+            ("scans", "created_by_user_id"),
+            ("events", "household_id"),
+            ("annotation_submissions", "household_id"),
+            ("annotation_submissions", "created_by_user_id"),
+        }
+
+def test_user_email_uniqueness_is_case_insensitive(db_connection):
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO users(email) VALUES (%s);",
+            ("Person@example.com",),
+        )
+    db_connection.commit()
+
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        with db_connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO users(email) VALUES (%s);",
+                ("person@EXAMPLE.com",),
+            )
+    db_connection.rollback()
+
+
+def test_refresh_session_requires_existing_user(db_connection):
+    with pytest.raises(psycopg2.errors.ForeignKeyViolation):
+        with db_connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO refresh_sessions(id, user_id, token_hash, expires_at)
+                VALUES (%s, %s, %s, NOW() + INTERVAL '30 days');
+                """,
+                (str(uuid.uuid4()), 999_999, "missing-user-token-hash"),
+            )
+    db_connection.rollback()

@@ -1,9 +1,11 @@
 import math
+import mimetypes
 import os
 import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from psycopg2.extras import RealDictCursor
 
 try:
@@ -23,13 +25,16 @@ ANNOTATION_ACTIONS = {"CONFIRM", "RELABEL", "ADJUST_BOX", "ADD", "REMOVE"}
 ANNOTATION_STATUSES = {"pending", "approved", "rejected", "used"}
 
 
-async def upload_annotation_image(file: UploadFile = File(...)):
+async def upload_annotation_image(
+    file: UploadFile = File(...), household_id: int = 1, user_id: int | None = None
+):
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Uploaded image is empty")
     normalized_contents, extension, image_width, image_height = _normalize_uploaded_image(
         contents, file.content_type or ""
     )
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
     file_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.{extension}")
     try:
         with open(file_path, "wb") as destination:
@@ -38,11 +43,14 @@ async def upload_annotation_image(file: UploadFile = File(...)):
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
-                    INSERT INTO scans(image_ref, image_width, image_height, source)
-                    VALUES (%s, %s, %s, 'manual_annotation')
+                    INSERT INTO scans(
+                        household_id, created_by_user_id, image_ref,
+                        image_width, image_height, source
+                    )
+                    VALUES (%s, %s, %s, %s, %s, 'manual_annotation')
                     RETURNING id, image_width, image_height, source, created_at;
                     """,
-                    (file_path, image_width, image_height),
+                    (household_id, user_id, file_path, image_width, image_height),
                 )
                 scan = cur.fetchone()
                 conn.commit()
@@ -178,14 +186,27 @@ def _insert_annotation(cur, submission_id: int, annotation: Dict[str, Any]):
     return cur.fetchone()
 
 
-def create_annotation_submission(scan_id: int, payload: Dict[str, Any]):
+def create_annotation_submission(
+    scan_id: int,
+    payload: Dict[str, Any],
+    household_id: int = 1,
+    user_id: int | None = None,
+):
     annotation_payloads = payload.get("annotations", [])
     if not isinstance(annotation_payloads, list) or not annotation_payloads:
         raise HTTPException(status_code=400, detail="At least one annotation is required")
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT id, image_width, image_height FROM scans WHERE id = %s;", (scan_id,))
+            cur.execute(
+                """
+                SELECT id, image_width, image_height FROM scans
+                WHERE id = %s AND household_id = %s
+                  AND (created_by_user_id = %s OR
+                       (household_id = 1 AND created_by_user_id IS NULL));
+                """,
+                (scan_id, household_id, user_id),
+            )
             scan = cur.fetchone()
             if not scan:
                 raise HTTPException(status_code=404, detail="Scan not found")
@@ -218,11 +239,20 @@ def create_annotation_submission(scan_id: int, payload: Dict[str, Any]):
                     raise HTTPException(status_code=409, detail=f"A {action} correction already exists for this detection")
             cur.execute(
                 """
-                INSERT INTO annotation_submissions(scan_id, image_width, image_height)
-                VALUES (%s, %s, %s)
+                INSERT INTO annotation_submissions(
+                    household_id, created_by_user_id, scan_id,
+                    image_width, image_height
+                )
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING *;
                 """,
-                (scan_id, scan["image_width"], scan["image_height"]),
+                (
+                    household_id,
+                    user_id,
+                    scan_id,
+                    scan["image_width"],
+                    scan["image_height"],
+                ),
             )
             submission = cur.fetchone()
             annotations = [_insert_annotation(cur, submission["id"], item) for item in prepared]
@@ -274,6 +304,32 @@ def list_annotation_submissions(status: Optional[str] = None, include_archived: 
             return cur.fetchall()
 
 
+def list_my_annotation_submissions(
+    household_id: int, user_id: int, status: Optional[str] = None
+):
+    if status is not None and status not in ANNOTATION_STATUSES:
+        raise HTTPException(status_code=400, detail="Unsupported submission status")
+    predicate = " AND s.status = %s" if status is not None else ""
+    params = [household_id, user_id]
+    if status is not None:
+        params.append(status)
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT s.*,
+                       (SELECT COUNT(*) FROM annotations a
+                        WHERE a.submission_id = s.id) AS annotation_count
+                FROM annotation_submissions s
+                WHERE s.household_id = %s AND s.created_by_user_id = %s
+                  AND s.archived_at IS NULL{predicate}
+                ORDER BY s.created_at DESC, s.id DESC;
+                """,
+                params,
+            )
+            return cur.fetchall()
+
+
 def get_annotation_submission_stats():
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -306,11 +362,20 @@ def get_annotation_submission_stats():
                 actions[row["action"]] = row["count"]
             return {"submissions": submissions, "annotations_by_action": actions}
 
-def get_annotation_submission(submission_id: int):
+def _get_annotation_submission(
+    submission_id: int,
+    household_id: int | None = None,
+    user_id: int | None = None,
+):
+    ownership_sql = ""
+    params: list[Any] = [submission_id]
+    if household_id is not None and user_id is not None:
+        ownership_sql = " AND s.household_id = %s AND s.created_by_user_id = %s"
+        params.extend([household_id, user_id])
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """
+                f"""
                 SELECT s.*,
                        s.training_state AS training_lifecycle_state,
                        CASE WHEN s.status = 'used' OR EXISTS (
@@ -328,9 +393,9 @@ def get_annotation_submission(submission_id: int):
                            JOIN model_versions m ON m.id = u.model_version_id
                            WHERE u.submission_id = s.id
                        ), '[]'::jsonb) AS training_usages
-                FROM annotation_submissions s WHERE s.id = %s;
+                FROM annotation_submissions s WHERE s.id = %s{ownership_sql};
                 """,
-                (submission_id,),
+                params,
             )
             submission = cur.fetchone()
             if not submission:
@@ -354,6 +419,35 @@ def get_annotation_submission(submission_id: int):
                 (submission_id,),
             )
             return {"submission": submission, "annotations": cur.fetchall()}
+
+
+def get_annotation_submission(submission_id: int):
+    return _get_annotation_submission(submission_id)
+
+
+def get_my_annotation_submission(
+    submission_id: int, household_id: int, user_id: int
+):
+    return _get_annotation_submission(submission_id, household_id, user_id)
+
+
+def get_annotation_submission_image(submission_id: int):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT s.image_ref
+                FROM annotation_submissions a
+                JOIN scans s ON s.id = a.scan_id
+                WHERE a.id = %s;
+                """,
+                (submission_id,),
+            )
+            row = cur.fetchone()
+    if not row or not row[0] or not os.path.isfile(row[0]):
+        raise HTTPException(status_code=404, detail="Annotation image not found")
+    media_type = mimetypes.guess_type(row[0])[0] or "application/octet-stream"
+    return FileResponse(row[0], media_type=media_type)
 
 
 def update_annotation_submission(submission_id: int, payload: Dict[str, Any]):
@@ -436,7 +530,12 @@ def update_quarantined_submission(submission_id: int, payload: Dict[str, Any]):
     return {"ok": True, "action": action.upper(), "submission": updated}
 
 
-def update_annotation(annotation_id: int, payload: Dict[str, Any]):
+def update_annotation(
+    annotation_id: int,
+    payload: Dict[str, Any],
+    household_id: int = 1,
+    user_id: int | None = None,
+):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -445,9 +544,12 @@ def update_annotation(annotation_id: int, payload: Dict[str, Any]):
                 FROM annotations a
                 JOIN annotation_submissions s ON s.id = a.submission_id
                 WHERE a.id = %s
+                  AND s.household_id = %s
+                  AND (s.created_by_user_id = %s OR
+                       (s.household_id = 1 AND s.created_by_user_id IS NULL))
                 FOR UPDATE OF a, s;
                 """,
-                (annotation_id,),
+                (annotation_id, household_id, user_id),
             )
             current = cur.fetchone()
             if not current:

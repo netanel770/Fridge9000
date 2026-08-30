@@ -2,15 +2,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 try:
-    from api import annotations, events, inventory, models, outlines, receipts, scans, system
-    from core.config import CORS_ORIGINS, UPLOAD_DIR
+    from api import auth, annotations, events, households, inventory, models, outlines, receipts, scans, system, system_admins
+    from core.config import CORS_ORIGINS
     from services import runtime
 except ModuleNotFoundError:
-    from backend.api import annotations, events, inventory, models, outlines, receipts, scans, system
-    from backend.core.config import CORS_ORIGINS, UPLOAD_DIR
+    from backend.api import auth, annotations, events, households, inventory, models, outlines, receipts, scans, system, system_admins
+    from backend.core.config import CORS_ORIGINS
     from backend.services import runtime
 
 
@@ -22,7 +21,6 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Fridge 9000 API", lifespan=lifespan)
-app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -32,6 +30,9 @@ app.add_middleware(
 )
 
 for router in (
+    auth.router,
+    households.router,
+    system_admins.router,
     system.router,
     models.router,
     inventory.router,

@@ -13,7 +13,9 @@ except ImportError:
     from db.connection import get_conn
 
 
-async def upload_receipt(file: UploadFile = File(...)):
+async def upload_receipt(
+    file: UploadFile = File(...), household_id: int = 1, user_id: int | None = None
+):
     try:
         import re
 
@@ -26,6 +28,7 @@ async def upload_receipt(file: UploadFile = File(...)):
             )
 
         filename = f"{uuid.uuid4()}.{ext}"
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
         file_path = os.path.join(UPLOAD_DIR, filename)
 
         with open(file_path, "wb") as f:
@@ -167,11 +170,11 @@ async def upload_receipt(file: UploadFile = File(...)):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO scans(image_ref, source)
-                    VALUES (%s, 'receipt')
+                    INSERT INTO scans(household_id, created_by_user_id, image_ref, source)
+                    VALUES (%s, %s, %s, 'receipt')
                     RETURNING id;
                     """,
-                    (file_path,),
+                    (household_id, user_id, file_path),
                 )
                 scan_id = cur.fetchone()[0]
 

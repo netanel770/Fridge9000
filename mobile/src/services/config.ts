@@ -15,3 +15,9 @@ if (!/^https?:\/\/[^\s]+$/i.test(resolvedApiUrl)) {
 }
 
 export const API_BASE_URL = resolvedApiUrl;
+
+export const GOOGLE_OAUTH_CLIENT_IDS = {
+  web: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID?.trim(),
+  ios: process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID?.trim(),
+  android: process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID?.trim(),
+};

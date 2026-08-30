@@ -12,6 +12,44 @@ export class ApiError extends Error {
   }
 }
 
+type SessionTransport = {
+  getAccessToken: () => string | null;
+  getRefreshToken: () => Promise<string | null>;
+  acceptSession: (session: AuthTokenPayload) => Promise<void>;
+  clearSession: () => Promise<void>;
+};
+
+export type AuthTokenPayload = {
+  access_token: string;
+  refresh_token: string;
+  token_type: "bearer";
+  access_token_expires_at: string;
+  refresh_token_expires_at: string;
+  user: unknown;
+};
+
+type RequestOptions = RequestInit & { auth?: boolean; retryAuth?: boolean };
+
+let sessionTransport: SessionTransport | null = null;
+let selectedHouseholdId: number | null = null;
+let refreshRequest: Promise<boolean> | null = null;
+
+export function configureSessionTransport(transport: SessionTransport | null) {
+  sessionTransport = transport;
+}
+
+export function setSelectedHouseholdHeader(householdId: number | null) {
+  selectedHouseholdId = householdId;
+}
+
+export function getApiRequestHeaders() {
+  const headers: Record<string, string> = {};
+  const token = sessionTransport?.getAccessToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (selectedHouseholdId != null) headers["X-Fridge-ID"] = String(selectedHouseholdId);
+  return headers;
+}
+
 function validationErrorMessage(value: unknown) {
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
@@ -59,13 +97,57 @@ export function apiUrl(path: string) {
   return `${API_BASE_URL}${path}`;
 }
 
-export async function requestJsonResponse<T>(path: string, init?: RequestInit) {
-  const response = await fetch(apiUrl(path), init);
+async function refreshAccessToken() {
+  if (!sessionTransport) return false;
+  if (!refreshRequest) {
+    refreshRequest = (async () => {
+      const refreshToken = await sessionTransport!.getRefreshToken();
+      if (!refreshToken) {
+        await sessionTransport!.clearSession();
+        return false;
+      }
+      const response = await fetch(apiUrl("/auth/refresh"), {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+      if (!response.ok) {
+        await sessionTransport!.clearSession();
+        return false;
+      }
+      const session = await handleJsonResponse<AuthTokenPayload>(response);
+      await sessionTransport!.acceptSession(session);
+      return true;
+    })().catch(async () => {
+      await sessionTransport?.clearSession();
+      return false;
+    }).finally(() => { refreshRequest = null; });
+  }
+  return refreshRequest;
+}
+
+export async function requestJsonResponse<T>(path: string, options: RequestOptions = {}) {
+  const { auth = true, retryAuth = true, headers: providedHeaders, ...init } = options;
+  const headers = new Headers(providedHeaders);
+  if (auth) {
+    const token = sessionTransport?.getAccessToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+  }
+  if (selectedHouseholdId != null) headers.set("X-Fridge-ID", String(selectedHouseholdId));
+  let response = await fetch(apiUrl(path), { ...init, headers });
+  if (auth && retryAuth && response.status === 401 && await refreshAccessToken()) {
+    const retryHeaders = new Headers(providedHeaders);
+    const token = sessionTransport?.getAccessToken();
+    if (token) retryHeaders.set("Authorization", `Bearer ${token}`);
+    if (selectedHouseholdId != null) retryHeaders.set("X-Fridge-ID", String(selectedHouseholdId));
+    response = await fetch(apiUrl(path), { ...init, headers: retryHeaders });
+    if (response.status === 401) await sessionTransport?.clearSession();
+  }
   const data = await handleJsonResponse<T>(response);
   return { data, response };
 }
 
-export async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+export async function requestJson<T>(path: string, init?: RequestOptions): Promise<T> {
   return (await requestJsonResponse<T>(path, init)).data;
 }
 

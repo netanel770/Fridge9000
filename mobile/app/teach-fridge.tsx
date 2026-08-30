@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { Pressable, ScrollView, Text, View } from "react-native";
-import { useLocalSearchParams } from "expo-router";
+import { Redirect, useLocalSearchParams } from "expo-router";
 
 import { useLifecycleJob } from "../src/components/LifecycleJobProvider";
 import { uniqueProductLabels } from "../src/components/ProductLabelInput";
@@ -27,23 +27,33 @@ import { readableModelName } from "../src/features/teach-fridge/modelUtils";
 import { styles } from "../src/features/teach-fridge/styles";
 import { colors } from "../src/theme";
 import type { RecentScan } from "../src/types/api";
+import { useAuth } from "../src/features/auth/AuthContext";
+import { useHousehold } from "../src/features/households/HouseholdContext";
 
 type TeachTab = "Suggestions" | "Contributions" | "AI Progress";
 const TABS: TeachTab[] = ["Suggestions", "Contributions", "AI Progress"];
 
 export default function TeachFridgeScreen() {
+  const { user } = useAuth();
+  const params = useLocalSearchParams<Record<string, string>>();
+  if (!user?.is_system_admin) return <Redirect href={{ pathname: "/teach-user" as never, params }} />;
+  return <AdminTeachFridgeScreen />;
+}
+
+function AdminTeachFridgeScreen() {
+  const { selected } = useHousehold();
   const { scanId: requestedScanIdParam, detectionId: requestedDetectionIdParam, addMissed, tab } = useLocalSearchParams<{ scanId?: string; detectionId?: string; addMissed?: string; tab?: string }>();
   const requestedScanId = Number(requestedScanIdParam);
   const requestedDetectionId = Number(requestedDetectionIdParam);
   const hasValidRequestedScan = Number.isInteger(requestedScanId) && requestedScanId > 0;
   const hasTargetedDetection = hasValidRequestedScan && Number.isInteger(requestedDetectionId) && requestedDetectionId > 0;
-  const [activeTab, setActiveTab] = useState<TeachTab>(tab === "AI Progress" ? "AI Progress" : "Suggestions");
+  const [activeTab, setActiveTab] = useState<TeachTab>(tab === "AI Progress" || !selected ? "AI Progress" : "Suggestions");
   const lifecycle = useLifecycleJob();
 
   const addMissedHandler = useRef<((scan: RecentScan) => Promise<void>) | null>(null);
   const selectionStartHandler = useRef<(() => void) | null>(null);
-  const suggestions = useSuggestions({ requestedScanId, requestedDetectionId, hasValidRequestedScan, hasTargetedDetection, addMissed, addMissedHandler, selectionStartHandler });
-  const contributionsState = useContributions(activeTab === "Contributions");
+  const suggestions = useSuggestions({ active: Boolean(selected), requestedScanId, requestedDetectionId, hasValidRequestedScan, hasTargetedDetection, addMissed, addMissedHandler, selectionStartHandler });
+  const contributionsState = useContributions(Boolean(selected) && activeTab === "Contributions");
   const moderation = useModeration(activeTab === "Contributions");
   const { scans, selectedScan, detections, loadingScans, loadingDetections, error: suggestionsError, setError: setSuggestionsError, selectScan, loadSuggestions } = suggestions;
   const { contributions, loadContributions } = contributionsState;
@@ -98,7 +108,7 @@ export default function TeachFridgeScreen() {
     <ScrollView style={styles.screen} contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled" automaticallyAdjustKeyboardInsets>
       <ScreenHeader eyebrow="Help the fridge learn" title="Teach AI" subtitle="Correct a prediction, add a missed product, or follow improvements." />
       <View accessibilityRole="tablist" style={styles.tabs}>
-        {TABS.map((teachTab) => {
+        {(selected ? TABS : ["AI Progress"] as TeachTab[]).map((teachTab) => {
           const selected = activeTab === teachTab;
           return <Pressable key={teachTab} accessibilityRole="tab" accessibilityState={{ selected }} onPress={() => setActiveTab(teachTab)} style={[styles.tab, selected && styles.activeTab]}><Text style={[styles.tabText, selected && styles.activeTabText]}>{teachTab}</Text></Pressable>;
         })}
@@ -131,7 +141,7 @@ export default function TeachFridgeScreen() {
           onConfirm={(detection) => { setConfirmError(""); setConfirmDetection(detection); }}
         />
       ) : activeTab === "Contributions" ? (
-        <ContributionsTab contributions={contributionsState} productLabelSuggestions={productLabelSuggestions} contributionMessage={contributionMessage} displayNameForModel={displayNameForModel} onViewImage={setContributionImage} onEditLabel={(contribution) => { void openContributionEditor(contribution); }} onEditBox={openContributionBoxEditor} moderation={moderation} />
+        <ContributionsTab contributions={contributionsState} productLabelSuggestions={productLabelSuggestions} contributionMessage={contributionMessage} displayNameForModel={displayNameForModel} onViewImage={setContributionImage} onEditLabel={(contribution) => { void openContributionEditor(contribution); }} onEditBox={openContributionBoxEditor} moderation={moderation} allowEditing={false} />
       ) : (
         <AiProgressTab progress={progress} training={training} quarantine={quarantine} rollback={rollback} actions={actions} lifecycle={lifecycle} />
       )}
@@ -167,6 +177,7 @@ export default function TeachFridgeScreen() {
         onCloseConfirm={() => setConfirmDetection(null)}
         onConfirmDetection={() => { void submitDetectionConfirmation(); }}
         contributionImage={contributionImage}
+        useAdminContributionImages
         onCloseContributionImage={() => setContributionImage(null)}
         editContribution={editContribution}
         contributionLabel={contributionLabel}

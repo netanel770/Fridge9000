@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { getAnnotationSubmission, getAnnotationSubmissions } from "../../../services/api";
+import { getAnnotationSubmission, getAnnotationSubmissions, getMyAnnotationSubmission, getMyAnnotationSubmissions } from "../../../services/api";
 import { filterAndSortContributions, groupContributions, trainingState } from "../contributionUtils";
 import type { Contribution, ContributionFilter, ContributionSort } from "../types";
 
-export function useContributions(active: boolean) {
+export function useContributions(active: boolean, scope: "admin" | "mine" = "admin") {
   const [filter, setFilter] = useState<ContributionFilter>("All");
   const [search, setSearch] = useState("");
   const [labelFilter, setLabelFilter] = useState("");
@@ -19,8 +19,8 @@ export function useContributions(active: boolean) {
     setLoading(true);
     setError("");
     try {
-      const submissions = await getAnnotationSubmissions();
-      const details = await Promise.all(submissions.map((submission) => getAnnotationSubmission(submission.id)));
+      const submissions = scope === "mine" ? await getMyAnnotationSubmissions() : await getAnnotationSubmissions();
+      const details = await Promise.all(submissions.map((submission) => scope === "mine" ? getMyAnnotationSubmission(submission.id) : getAnnotationSubmission(submission.id)));
       if (request.current === requestId) {
         setContributions(details
           .filter((detail) => trainingState(detail.submission) !== "quarantined")
@@ -34,7 +34,7 @@ export function useContributions(active: boolean) {
     } finally {
       if (request.current === requestId) setLoading(false);
     }
-  }, []);
+  }, [scope]);
 
   useEffect(() => {
     if (active) void loadContributions();

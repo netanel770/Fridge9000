@@ -1,8 +1,12 @@
-import type { AIProgressResponse, LifecycleJob, RollbackComparisonResponse } from "../../types/api";
+import type { AIProgressResponse, LifecycleJob, RollbackComparisonResponse, UserModelOverview } from "../../types/api";
 import { JSON_HEADERS, requestJson } from "./client";
 
 export function getAIProgress(): Promise<AIProgressResponse> {
   return requestJson<AIProgressResponse>("/ai-progress");
+}
+
+export function getUserModelOverview(): Promise<UserModelOverview> {
+  return requestJson<UserModelOverview>("/models/user-overview");
 }
 
 export function getRollbackTargetComparison(version: string): Promise<RollbackComparisonResponse> {

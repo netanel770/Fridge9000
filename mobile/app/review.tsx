@@ -20,9 +20,11 @@ import {
   getScanDetections,
   getAllInventory,
   getInventoryBatches,
+  getApiRequestHeaders,
   submitReview,
 } from "../src/services/api";
 import { ProductLabelInput } from "../src/components/ProductLabelInput";
+import { useAuth } from "../src/features/auth/AuthContext";
 
 import { API_BASE_URL } from "../src/services/config";
 
@@ -63,6 +65,7 @@ function getSuggestedExpiryDate(itemName: string) {
 }
 
 export default function ReviewScreen() {
+  const { user } = useAuth();
   const { mode, scanId: scanIdParam, source } = useLocalSearchParams<{
     mode?: "Added" | "Removed";
     scanId?: string;
@@ -339,6 +342,7 @@ export default function ReviewScreen() {
                 <Image
                   source={{
                     uri: `${API_BASE_URL}/scans/${scanId}/detections/${item.id}/boxed`,
+                    headers: getApiRequestHeaders(),
                   }}
                   style={styles.detectedImage}
                   resizeMode="contain"
@@ -447,7 +451,7 @@ export default function ReviewScreen() {
               <Pressable
                 accessibilityRole="button"
                 style={styles.itemTeachButton}
-                onPress={() => router.push({ pathname: "/teach-fridge", params: { scanId: String(scanId), detectionId: String(item.id) } })}
+                onPress={() => router.push({ pathname: (user?.is_system_admin ? "/teach-fridge" : "/teach-user") as never, params: { scanId: String(scanId), detectionId: String(item.id) } })}
               >
                 <Text style={styles.itemTeachButtonText}>Teach AI about this product</Text>
               </Pressable>
@@ -463,7 +467,7 @@ export default function ReviewScreen() {
               <Pressable
                 accessibilityRole="button"
                 style={styles.teachButton}
-                onPress={() => router.push({ pathname: "/teach-fridge", params: { scanId: String(scanId), addMissed: "1" } })}
+                onPress={() => router.push({ pathname: (user?.is_system_admin ? "/teach-fridge" : "/teach-user") as never, params: { scanId: String(scanId), addMissed: "1" } })}
               >
                 <Text style={styles.teachButtonText}>Teach the AI</Text>
               </Pressable>

@@ -14,6 +14,7 @@ import {
 import type { LayoutChangeEvent } from "react-native";
 import {
   getInventoryBatches,
+  getApiRequestHeaders,
   updateInventoryBatchRemaining,
   uploadProductRepresentativeImage,
 } from "../src/services/api";
@@ -309,7 +310,7 @@ export default function AdjustOpenProductScreen() {
               {imageAvailable ? (
                 <>
                   <Image
-                    source={{ uri: imageUri }}
+                    source={{ uri: imageUri, headers: getApiRequestHeaders() }}
                     style={styles.productImage}
                     tintColor={highContrastOutline ? "#ffffff" : "#d1d5db"}
                     resizeMode="contain"
@@ -317,7 +318,7 @@ export default function AdjustOpenProductScreen() {
                   />
                   <View style={[styles.remainingImageClip, { height: `${remainingPercent}%` }]}>
                     <Image
-                      source={{ uri: imageUri }}
+                      source={{ uri: imageUri, headers: getApiRequestHeaders() }}
                       style={styles.filledProductImage}
                       tintColor={highContrastOutline ? "#111111" : undefined}
                       resizeMode="contain"

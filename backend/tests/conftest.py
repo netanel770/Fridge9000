@@ -141,6 +141,7 @@ def test_database_url() -> str:
 @pytest.fixture(scope="session", autouse=True)
 def test_environment(test_database_url):
     test_upload_dir = Path(os.environ["UPLOAD_DIR"])
+    test_upload_dir.mkdir(parents=True, exist_ok=True)
     replacements = {
         "DATABASE_URL": test_database_url,
         "FRIDGE9000_TESTING": "1",
@@ -209,6 +210,45 @@ def fastapi_app(isolated_database):
 
 
 @pytest.fixture
-def test_client(fastapi_app):
+def test_client(fastapi_app, initialized_test_database, request):
+    upload_dir = Path(os.environ["UPLOAD_DIR"])
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    (upload_dir / "freshness").mkdir(parents=True, exist_ok=True)
+    (upload_dir / "outlines").mkdir(parents=True, exist_ok=True)
     with TestClient(fastapi_app) as client:
+        auth_test_files = {
+            "test_auth.py",
+            "test_google_auth_api.py",
+            "test_households.py",
+            "test_admin_permissions.py",
+        }
+        if request.node.path.name not in auth_test_files:
+            registered = client.post(
+                "/auth/register/password",
+                json={
+                    "email": "legacy-test-user@example.com",
+                    "password": "legacy test password",
+                },
+            ).json()
+            with closing(_connect(initialized_test_database)) as connection:
+                with connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            "UPDATE users SET is_system_admin = TRUE WHERE id = %s;",
+                            (registered["user"]["id"],),
+                        )
+                        cursor.execute(
+                            """
+                            INSERT INTO household_memberships(
+                                household_id, user_id, role, status
+                            ) VALUES (1, %s, 'OWNER', 'ACTIVE');
+                            """,
+                            (registered["user"]["id"],),
+                        )
+            client.headers.update(
+                {
+                    "Authorization": f"Bearer {registered['access_token']}",
+                    "X-Fridge-ID": "1",
+                }
+            )
         yield client

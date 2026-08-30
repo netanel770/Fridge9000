@@ -6,6 +6,7 @@ import uuid
 import cv2
 import numpy as np
 from fastapi import File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from ultralytics import YOLO
 
 try:
@@ -15,6 +16,7 @@ try:
         FRESHNESS_UPLOAD_DIR,
     )
     from ..freshness import classification_probabilities, parse_freshness_class
+    from ..db.connection import get_conn
 except ImportError:
     from core.config import (
         FRESHNESS_MAX_UPLOAD_BYTES,
@@ -22,6 +24,7 @@ except ImportError:
         FRESHNESS_UPLOAD_DIR,
     )
     from freshness import classification_probabilities, parse_freshness_class
+    from db.connection import get_conn
 
 
 LOGGER = logging.getLogger("uvicorn.error")
@@ -55,7 +58,9 @@ def get_freshness_model():
     return _FRESHNESS_MODEL
 
 
-async def analyze_freshness(file: UploadFile = File(...)):
+async def analyze_freshness(
+    file: UploadFile = File(...), household_id: int = 1, user_id: int | None = None
+):
     allowed_types = {"image/jpeg", "image/png", "image/webp"}
     if file.content_type not in allowed_types:
         raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP image.")
@@ -72,6 +77,7 @@ async def analyze_freshness(file: UploadFile = File(...)):
 
     analysis_id = uuid.uuid4().hex
     input_filename = f"{analysis_id}_input.jpg"
+    os.makedirs(FRESHNESS_UPLOAD_DIR, exist_ok=True)
     input_path = os.path.join(FRESHNESS_UPLOAD_DIR, input_filename)
     if not cv2.imwrite(input_path, image):
         raise HTTPException(status_code=500, detail="Could not save the uploaded image.")
@@ -103,6 +109,18 @@ async def analyze_freshness(file: UploadFile = File(...)):
         raise HTTPException(status_code=422, detail="The model returned an unsupported freshness class.")
     classification.update({"class_id": class_id, "confidence": confidence})
 
+    with get_conn() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO freshness_analyses(
+                    id, household_id, created_by_user_id, image_path
+                ) VALUES (%s, %s, %s, %s);
+                """,
+                (analysis_id, household_id, user_id, input_path),
+            )
+        conn.commit()
+
     return {
         "ok": True,
         "classification": classification,
@@ -115,3 +133,26 @@ async def analyze_freshness(file: UploadFile = File(...)):
             f"{classification['item'].lower()}."
         ),
     }
+
+
+def get_freshness_image(
+    filename: str, household_id: int = 1, user_id: int | None = None
+):
+    analysis_id, separator, extension = filename.partition("_input.")
+    if not separator or extension != "jpg":
+        raise HTTPException(status_code=404, detail="Freshness image not found")
+    with get_conn() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT image_path FROM freshness_analyses
+                WHERE id = %s AND household_id = %s
+                  AND (created_by_user_id = %s OR
+                       (household_id = 1 AND created_by_user_id IS NULL));
+                """,
+                (analysis_id, household_id, user_id),
+            )
+            row = cursor.fetchone()
+    if row is None or not os.path.isfile(row[0]):
+        raise HTTPException(status_code=404, detail="Freshness image not found")
+    return FileResponse(row[0], media_type="image/jpeg")

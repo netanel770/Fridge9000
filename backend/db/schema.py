@@ -7,6 +7,96 @@ def ensure_schema():
         with conn.cursor() as cur:
             cur.execute(
                 """
+                CREATE EXTENSION IF NOT EXISTS citext;
+
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    email CITEXT NOT NULL UNIQUE
+                        CONSTRAINT users_email_normalized_check CHECK (
+                            email = BTRIM(email) AND email <> ''
+                        ),
+                    display_name TEXT,
+                    password_hash TEXT,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    is_system_admin BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                CREATE TABLE IF NOT EXISTS refresh_sessions (
+                    id UUID PRIMARY KEY,
+                    user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    revoked_at TIMESTAMPTZ
+                );
+
+                CREATE TABLE IF NOT EXISTS auth_identities (
+                    id SERIAL PRIMARY KEY,
+                    user_id INT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+                    provider TEXT NOT NULL
+                        CONSTRAINT auth_identities_provider_normalized_check CHECK (
+                            provider = UPPER(BTRIM(provider)) AND provider <> ''
+                        ),
+                    provider_subject TEXT NOT NULL
+                        CONSTRAINT auth_identities_subject_nonempty_check CHECK (
+                            BTRIM(provider_subject) <> ''
+                        ),
+                    verified_email CITEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(provider, provider_subject)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_refresh_sessions_user_id
+                    ON refresh_sessions(user_id);
+                CREATE INDEX IF NOT EXISTS idx_refresh_sessions_expires_at
+                    ON refresh_sessions(expires_at);
+                CREATE INDEX IF NOT EXISTS idx_auth_identities_user_id
+                    ON auth_identities(user_id);
+
+                CREATE TABLE IF NOT EXISTS households (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL CONSTRAINT households_name_nonempty_check CHECK (BTRIM(name) <> ''),
+                    join_code TEXT NOT NULL UNIQUE,
+                    creator_user_id INT REFERENCES users(id) ON DELETE RESTRICT,
+                    is_legacy BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+
+                INSERT INTO households(id, name, join_code, creator_user_id, is_legacy)
+                VALUES (1, 'Legacy Fridge Data', 'LEGACY-DATA', NULL, TRUE)
+                ON CONFLICT (id) DO NOTHING;
+                SELECT setval(
+                    pg_get_serial_sequence('households', 'id'),
+                    GREATEST(1, (SELECT MAX(id) FROM households))
+                );
+
+                CREATE TABLE IF NOT EXISTS household_memberships (
+                    id SERIAL PRIMARY KEY,
+                    household_id INT NOT NULL REFERENCES households(id) ON DELETE CASCADE,
+                    user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL CONSTRAINT household_memberships_role_check CHECK (
+                        role IN ('OWNER', 'MANAGER', 'MEMBER')
+                    ),
+                    status TEXT NOT NULL CONSTRAINT household_memberships_status_check CHECK (
+                        status IN ('PENDING', 'ACTIVE', 'REJECTED', 'REMOVED')
+                    ),
+                    requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    reviewed_at TIMESTAMPTZ,
+                    reviewed_by_user_id INT REFERENCES users(id) ON DELETE SET NULL,
+                    UNIQUE(household_id, user_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_household_memberships_user
+                    ON household_memberships(user_id, status);
+                CREATE INDEX IF NOT EXISTS idx_household_memberships_household
+                    ON household_memberships(household_id, status);
+                """
+            )
+            cur.execute(
+                """
                 ALTER TABLE scans
                 ADD COLUMN IF NOT EXISTS image_width INT,
                 ADD COLUMN IF NOT EXISTS image_height INT,
@@ -265,6 +355,64 @@ def ensure_schema():
             )
             cur.execute(
                 """
+                ALTER TABLE inventory
+                    ADD COLUMN IF NOT EXISTS household_id INT NOT NULL DEFAULT 1
+                        REFERENCES households(id) ON DELETE RESTRICT;
+                ALTER TABLE inventory_batches
+                    ADD COLUMN IF NOT EXISTS household_id INT NOT NULL DEFAULT 1
+                        REFERENCES households(id) ON DELETE RESTRICT;
+                ALTER TABLE scans
+                    ADD COLUMN IF NOT EXISTS household_id INT NOT NULL DEFAULT 1
+                        REFERENCES households(id) ON DELETE RESTRICT,
+                    ADD COLUMN IF NOT EXISTS created_by_user_id INT
+                        REFERENCES users(id) ON DELETE SET NULL;
+
+                CREATE TABLE IF NOT EXISTS freshness_analyses (
+                    id TEXT PRIMARY KEY,
+                    household_id INT NOT NULL DEFAULT 1
+                        REFERENCES households(id) ON DELETE RESTRICT,
+                    created_by_user_id INT REFERENCES users(id) ON DELETE SET NULL,
+                    image_path TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                ALTER TABLE events
+                    ADD COLUMN IF NOT EXISTS household_id INT NOT NULL DEFAULT 1
+                        REFERENCES households(id) ON DELETE RESTRICT;
+                ALTER TABLE annotation_submissions
+                    ADD COLUMN IF NOT EXISTS household_id INT NOT NULL DEFAULT 1
+                        REFERENCES households(id) ON DELETE RESTRICT,
+                    ADD COLUMN IF NOT EXISTS created_by_user_id INT
+                        REFERENCES users(id) ON DELETE SET NULL;
+
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conrelid = 'inventory'::regclass
+                          AND conname = 'inventory_pkey'
+                          AND pg_get_constraintdef(oid) <> 'PRIMARY KEY (household_id, item_id)'
+                    ) THEN
+                        ALTER TABLE inventory DROP CONSTRAINT inventory_pkey;
+                        ALTER TABLE inventory
+                            ADD CONSTRAINT inventory_pkey PRIMARY KEY (household_id, item_id);
+                    END IF;
+                END $$;
+
+                CREATE INDEX IF NOT EXISTS idx_inventory_batches_household
+                    ON inventory_batches(household_id, item_id);
+                CREATE INDEX IF NOT EXISTS idx_scans_household_user
+                    ON scans(household_id, created_by_user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_events_household
+                    ON events(household_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_annotation_submissions_household_user
+                    ON annotation_submissions(household_id, created_by_user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_freshness_analyses_household_user
+                    ON freshness_analyses(household_id, created_by_user_id, created_at DESC);
+                """
+            )
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS inventory_batches (
                     id SERIAL PRIMARY KEY,
                     item_id INT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
@@ -326,7 +474,7 @@ def ensure_schema():
             )
             cur.execute(
                 """
-                SELECT id, item_id, quantity, expiry_date, expiry_estimate_date,
+                SELECT id, household_id, item_id, quantity, expiry_date, expiry_estimate_date,
                        expiry_source, open_unit_remaining_percent, created_at, last_updated
                 FROM inventory_batches
                 WHERE quantity > 1 AND open_unit_remaining_percent IS NOT NULL;
@@ -340,45 +488,46 @@ def ensure_schema():
                     SET quantity = %s, open_unit_remaining_percent = NULL
                     WHERE id = %s;
                     """,
-                    (batch[2] - 1, batch[0]),
+                    (batch[3] - 1, batch[0]),
                 )
                 cur.execute(
                     """
                     INSERT INTO inventory_batches(
-                        item_id, quantity, expiry_date, expiry_estimate_date, expiry_source,
+                        household_id, item_id, quantity, expiry_date, expiry_estimate_date, expiry_source,
                         open_unit_remaining_percent, created_at, last_updated
-                    ) VALUES (%s, 1, %s, %s, %s, %s, %s, %s);
+                    ) VALUES (%s, %s, 1, %s, %s, %s, %s, %s, %s);
                     """,
-                    (batch[1], batch[3], batch[4], batch[5], batch[6], batch[7], batch[8]),
+                    (batch[1], batch[2], batch[4], batch[5], batch[6], batch[7], batch[8], batch[9]),
                 )
             cur.execute(
                 """
-                INSERT INTO inventory_batches(item_id, quantity, expiry_date, expiry_estimate_date, expiry_source, created_at, last_updated)
-                SELECT inv.item_id, inv.quantity, NULL, NULL, 'manual', inv.last_updated, inv.last_updated
+                INSERT INTO inventory_batches(household_id, item_id, quantity, expiry_date, expiry_estimate_date, expiry_source, created_at, last_updated)
+                SELECT inv.household_id, inv.item_id, inv.quantity, NULL, NULL, 'manual', inv.last_updated, inv.last_updated
                 FROM inventory inv
                 WHERE inv.quantity > 0
                   AND NOT EXISTS (
                       SELECT 1 FROM inventory_batches b
-                      WHERE b.item_id = inv.item_id
+                      WHERE b.household_id = inv.household_id
+                        AND b.item_id = inv.item_id
                   );
                 """
             )
-            cur.execute("SELECT id FROM items;")
-            items = cur.fetchall()
-            for item in items:
+            cur.execute("SELECT h.id, i.id FROM households h CROSS JOIN items i;")
+            household_items = cur.fetchall()
+            for household_id, item_id in household_items:
                 cur.execute(
-                    "SELECT COALESCE(SUM(quantity), 0) AS quantity FROM inventory_batches WHERE item_id = %s;",
-                    (item[0],),
+                    "SELECT COALESCE(SUM(quantity), 0) AS quantity FROM inventory_batches WHERE household_id = %s AND item_id = %s;",
+                    (household_id, item_id),
                 )
                 quantity = cur.fetchone()[0]
                 status = "MISSING" if quantity == 0 else "LOW" if quantity == 1 else "OK"
                 cur.execute(
                     """
-                    INSERT INTO inventory(item_id, quantity, status, last_updated)
-                    VALUES (%s, %s, %s, NOW())
-                    ON CONFLICT (item_id)
+                    INSERT INTO inventory(household_id, item_id, quantity, status, last_updated)
+                    VALUES (%s, %s, %s, %s, NOW())
+                    ON CONFLICT (household_id, item_id)
                     DO UPDATE SET quantity = EXCLUDED.quantity, status = EXCLUDED.status, last_updated = NOW();
                     """,
-                    (item[0], quantity, status),
+                    (household_id, item_id, quantity, status),
                 )
             conn.commit()

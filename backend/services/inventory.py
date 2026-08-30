@@ -46,33 +46,35 @@ def estimate_expiry_date(item_name: str) -> Optional[date]:
         return datetime.utcnow().date() + timedelta(days=3)
     return datetime.utcnow().date() + timedelta(days=14)
 
-def sync_inventory_summary(conn):
+def sync_inventory_summary(conn, household_id: int = 1):
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM items;")
         items = cur.fetchall()
         for item in items:
             cur.execute(
-                "SELECT COALESCE(SUM(quantity), 0) AS quantity FROM inventory_batches WHERE item_id = %s;",
-                (item[0],),
+                "SELECT COALESCE(SUM(quantity), 0) AS quantity FROM inventory_batches WHERE household_id = %s AND item_id = %s;",
+                (household_id, item[0]),
             )
             quantity = cur.fetchone()[0]
             status = "MISSING" if quantity == 0 else "LOW" if quantity == 1 else "OK"
             cur.execute(
                 """
-                INSERT INTO inventory(item_id, quantity, status, last_updated)
-                VALUES (%s, %s, %s, NOW())
-                ON CONFLICT (item_id)
+                INSERT INTO inventory(household_id, item_id, quantity, status, last_updated)
+                VALUES (%s, %s, %s, %s, NOW())
+                ON CONFLICT (household_id, item_id)
                 DO UPDATE SET quantity = EXCLUDED.quantity, status = EXCLUDED.status, last_updated = NOW();
                 """,
-                (item[0], quantity, status),
+                (household_id, item[0], quantity, status),
             )
 
 
-def change_inventory_batches(cur, item_id: int, action: str, quantity: int) -> int:
+def change_inventory_batches(
+    cur, item_id: int, action: str, quantity: int, household_id: int = 1
+) -> int:
     """Apply a legacy inventory change to the authoritative batch state."""
     cur.execute(
-        "SELECT COALESCE(SUM(quantity), 0) AS quantity FROM inventory_batches WHERE item_id = %s;",
-        (item_id,),
+        "SELECT COALESCE(SUM(quantity), 0) AS quantity FROM inventory_batches WHERE household_id = %s AND item_id = %s;",
+        (household_id, item_id),
     )
     current_quantity = cur.fetchone()["quantity"]
 
@@ -81,14 +83,14 @@ def change_inventory_batches(cur, item_id: int, action: str, quantity: int) -> i
             """
             SELECT id
             FROM inventory_batches
-            WHERE item_id = %s
+            WHERE household_id = %s AND item_id = %s
               AND expiry_date IS NULL
               AND expiry_estimate_date IS NULL
             ORDER BY created_at, id
             LIMIT 1
             FOR UPDATE;
             """,
-            (item_id,),
+            (household_id, item_id),
         )
         batch = cur.fetchone()
         if batch:
@@ -103,10 +105,10 @@ def change_inventory_batches(cur, item_id: int, action: str, quantity: int) -> i
         else:
             cur.execute(
                 """
-                INSERT INTO inventory_batches(item_id, quantity, expiry_source)
-                VALUES (%s, %s, 'manual');
+                INSERT INTO inventory_batches(household_id, item_id, quantity, expiry_source)
+                VALUES (%s, %s, %s, 'manual');
                 """,
-                (item_id, quantity),
+                (household_id, item_id, quantity),
             )
         return current_quantity + quantity
 
@@ -119,12 +121,12 @@ def change_inventory_batches(cur, item_id: int, action: str, quantity: int) -> i
         """
         SELECT id, quantity
         FROM inventory_batches
-        WHERE item_id = %s AND quantity > 0
+        WHERE household_id = %s AND item_id = %s AND quantity > 0
         ORDER BY COALESCE(expiry_date, expiry_estimate_date) NULLS LAST,
                  created_at, id
         FOR UPDATE;
         """,
-        (item_id,),
+        (household_id, item_id),
     )
     remaining = quantity
     for batch in cur.fetchall():
@@ -144,7 +146,7 @@ def change_inventory_batches(cur, item_id: int, action: str, quantity: int) -> i
         )
     return current_quantity - quantity
 
-def inventory() -> List[Dict[str, Any]]:
+def inventory(household_id: int = 1) -> List[Dict[str, Any]]:
     sql = """
     SELECT i.id, i.name, i.category,
            SUM(b.quantity) AS quantity,
@@ -176,18 +178,18 @@ def inventory() -> List[Dict[str, Any]]:
            MIN(COALESCE(b.expiry_date, b.expiry_estimate_date)) AS expiry_date,
            MIN(COALESCE(b.expiry_estimate_date, b.expiry_date)) AS expiry_estimate_date
     FROM items i
-    LEFT JOIN inventory_batches b ON b.item_id = i.id
+    LEFT JOIN inventory_batches b ON b.item_id = i.id AND b.household_id = %s
     GROUP BY i.id, i.name, i.category
     HAVING SUM(b.quantity) > 0
     ORDER BY i.category, i.name;
     """
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql)
+            cur.execute(sql, (household_id,))
             return cur.fetchall()
 
 
-def inventory_batches() -> List[Dict[str, Any]]:
+def inventory_batches(household_id: int = 1) -> List[Dict[str, Any]]:
     sql = """
     SELECT b.id, b.item_id, i.name, i.category,
            b.quantity, b.expiry_date, b.expiry_estimate_date, b.expiry_source,
@@ -195,16 +197,18 @@ def inventory_batches() -> List[Dict[str, Any]]:
            b.created_at, b.last_updated
     FROM inventory_batches b
     JOIN items i ON i.id = b.item_id
-    WHERE b.quantity > 0
+    WHERE b.household_id = %s AND b.quantity > 0
     ORDER BY i.category, i.name, b.expiry_date, b.created_at, b.id;
     """
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql)
+            cur.execute(sql, (household_id,))
             return cur.fetchall()
 
 
-def update_inventory_batch_remaining(batch_id: int, payload: Dict[str, Any]):
+def update_inventory_batch_remaining(
+    batch_id: int, payload: Dict[str, Any], household_id: int = 1
+):
     try:
         remaining_percent = int(payload.get("remaining_percent"))
     except (TypeError, ValueError):
@@ -220,10 +224,10 @@ def update_inventory_batch_remaining(batch_id: int, payload: Dict[str, Any]):
                 SELECT id, item_id, quantity, expiry_date, expiry_estimate_date,
                        expiry_source, open_unit_remaining_percent, created_at
                 FROM inventory_batches
-                WHERE id = %s AND quantity > 0
+                WHERE id = %s AND household_id = %s AND quantity > 0
                 FOR UPDATE;
                 """,
-                (batch_id,),
+                (batch_id, household_id),
             )
             batch = cur.fetchone()
             if not batch:
@@ -242,10 +246,10 @@ def update_inventory_batch_remaining(batch_id: int, payload: Dict[str, Any]):
                 )
                 cur.execute(
                     """
-                    INSERT INTO events(scan_id, item_id, action, confidence, quantity_change)
-                    VALUES (NULL, %s, 'Removed', 1.0, 1);
+                    INSERT INTO events(household_id, scan_id, item_id, action, confidence, quantity_change)
+                    VALUES (%s, NULL, %s, 'Removed', 1.0, 1);
                     """,
-                    (batch["item_id"],),
+                    (household_id, batch["item_id"]),
                 )
             else:
                 stored_percent = None if remaining_percent == 100 else remaining_percent
@@ -263,12 +267,13 @@ def update_inventory_batch_remaining(batch_id: int, payload: Dict[str, Any]):
                     cur.execute(
                         """
                         INSERT INTO inventory_batches(
-                            item_id, quantity, expiry_date, expiry_estimate_date,
+                            household_id, item_id, quantity, expiry_date, expiry_estimate_date,
                             expiry_source, open_unit_remaining_percent, created_at, last_updated
-                        ) VALUES (%s, 1, %s, %s, %s, %s, %s, NOW())
+                        ) VALUES (%s, %s, 1, %s, %s, %s, %s, %s, NOW())
                         RETURNING id;
                         """,
                         (
+                            household_id,
                             batch["item_id"],
                             batch["expiry_date"],
                             batch["expiry_estimate_date"],
@@ -292,7 +297,7 @@ def update_inventory_batch_remaining(batch_id: int, payload: Dict[str, Any]):
             if remaining_percent == 0:
                 updated_batch_id = batch_id
 
-            sync_inventory_summary(conn)
+            sync_inventory_summary(conn, household_id)
             cur.execute(
                 """
                 SELECT id, item_id, quantity, open_unit_remaining_percent, last_updated
@@ -305,7 +310,9 @@ def update_inventory_batch_remaining(batch_id: int, payload: Dict[str, Any]):
             return {"ok": True, "batch": updated_batch}
 
 
-def update_inventory_batch_expiry(batch_id: int, payload: Dict[str, Any]):
+def update_inventory_batch_expiry(
+    batch_id: int, payload: Dict[str, Any], household_id: int = 1
+):
     raw_expiry_date = payload.get("expiry_date")
     expiry_date = parse_expiry_date(raw_expiry_date)
     if not expiry_date:
@@ -322,10 +329,10 @@ def update_inventory_batch_expiry(batch_id: int, payload: Dict[str, Any]):
                     expiry_estimate_date = NULL,
                     expiry_source = 'manual',
                     last_updated = NOW()
-                WHERE id = %s AND quantity > 0
+                WHERE id = %s AND household_id = %s AND quantity > 0
                 RETURNING id, item_id, quantity, expiry_date;
                 """,
-                (expiry_date, batch_id),
+                (expiry_date, batch_id, household_id),
             )
             updated_batch = cur.fetchone()
             if not updated_batch:
@@ -334,17 +341,17 @@ def update_inventory_batch_expiry(batch_id: int, payload: Dict[str, Any]):
             return {"ok": True, "batch": updated_batch}
 
 
-def remove_inventory_batch(batch_id: int):
+def remove_inventory_batch(batch_id: int, household_id: int = 1):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
                 SELECT id, item_id, quantity
                 FROM inventory_batches
-                WHERE id = %s AND quantity > 0
+                WHERE id = %s AND household_id = %s AND quantity > 0
                 FOR UPDATE;
                 """,
-                (batch_id,),
+                (batch_id, household_id),
             )
             batch = cur.fetchone()
             if not batch:
@@ -362,17 +369,19 @@ def remove_inventory_batch(batch_id: int):
             )
             cur.execute(
                 """
-                INSERT INTO events(scan_id, item_id, action, confidence, quantity_change)
-                VALUES (NULL, %s, 'Removed', 1.0, %s);
+                INSERT INTO events(household_id, scan_id, item_id, action, confidence, quantity_change)
+                VALUES (%s, NULL, %s, 'Removed', 1.0, %s);
                 """,
-                (batch["item_id"], batch["quantity"]),
+                (household_id, batch["item_id"], batch["quantity"]),
             )
-            sync_inventory_summary(conn)
+            sync_inventory_summary(conn, household_id)
             conn.commit()
             return {"ok": True, "removed_quantity": batch["quantity"]}
 
 
-def remove_inventory_batch_quantity(batch_id: int, payload: Dict[str, Any]):
+def remove_inventory_batch_quantity(
+    batch_id: int, payload: Dict[str, Any], household_id: int = 1
+):
     try:
         quantity = int(payload.get("quantity"))
     except (TypeError, ValueError):
@@ -386,10 +395,10 @@ def remove_inventory_batch_quantity(batch_id: int, payload: Dict[str, Any]):
                 """
                 SELECT id, item_id, quantity
                 FROM inventory_batches
-                WHERE id = %s AND quantity > 0
+                WHERE id = %s AND household_id = %s AND quantity > 0
                 FOR UPDATE;
                 """,
-                (batch_id,),
+                (batch_id, household_id),
             )
             batch = cur.fetchone()
             if not batch:
@@ -412,12 +421,12 @@ def remove_inventory_batch_quantity(batch_id: int, payload: Dict[str, Any]):
             )
             cur.execute(
                 """
-                INSERT INTO events(scan_id, item_id, action, confidence, quantity_change)
-                VALUES (NULL, %s, 'Removed', 1.0, %s);
+                INSERT INTO events(household_id, scan_id, item_id, action, confidence, quantity_change)
+                VALUES (%s, NULL, %s, 'Removed', 1.0, %s);
                 """,
-                (batch["item_id"], quantity),
+                (household_id, batch["item_id"], quantity),
             )
-            sync_inventory_summary(conn)
+            sync_inventory_summary(conn, household_id)
             conn.commit()
             return {
                 "ok": True,
@@ -426,7 +435,7 @@ def remove_inventory_batch_quantity(batch_id: int, payload: Dict[str, Any]):
             }
 
 
-def inventory_all() -> List[Dict[str, Any]]:
+def inventory_all(household_id: int = 1) -> List[Dict[str, Any]]:
     sql = """
     SELECT i.id, i.name, i.category,
            COALESCE(SUM(b.quantity), 0) AS quantity,
@@ -439,16 +448,16 @@ def inventory_all() -> List[Dict[str, Any]]:
            MIN(COALESCE(b.expiry_date, b.expiry_estimate_date)) AS expiry_date,
            MIN(COALESCE(b.expiry_estimate_date, b.expiry_date)) AS expiry_estimate_date
     FROM items i
-    LEFT JOIN inventory_batches b ON b.item_id = i.id
+    LEFT JOIN inventory_batches b ON b.item_id = i.id AND b.household_id = %s
     GROUP BY i.id, i.name, i.category
     ORDER BY i.category, i.name;
     """
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql)
+            cur.execute(sql, (household_id,))
             return cur.fetchall()
 
-def reset_inventory():
+def reset_inventory(household_id: int = 1):
     """
     Completely clears the inventory and related events.
     """
@@ -456,10 +465,10 @@ def reset_inventory():
         with get_conn() as conn:
             with conn.cursor() as cur:
                 # Optionally clear events first to avoid FK issues
-                cur.execute("DELETE FROM events;")
+                cur.execute("DELETE FROM events WHERE household_id = %s;", (household_id,))
                 # Inventory reads are derived from batches, so both stores must reset.
-                cur.execute("DELETE FROM inventory_batches;")
-                cur.execute("DELETE FROM inventory;")
+                cur.execute("DELETE FROM inventory_batches WHERE household_id = %s;", (household_id,))
+                cur.execute("DELETE FROM inventory WHERE household_id = %s;", (household_id,))
                 # Optional: clear items table if you want a full reset
                 # cur.execute("DELETE FROM items;")
                 conn.commit()
@@ -469,7 +478,8 @@ def reset_inventory():
 
 async def update_inventory_by_image(
     action: str,
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    household_id: int = 1,
 ):
     if action not in ("Added", "Removed"):
         raise HTTPException(status_code=400, detail="action must be Added or Removed")
@@ -477,6 +487,7 @@ async def update_inventory_by_image(
     try:
         ext = file.filename.split(".")[-1]
         filename = f"{uuid.uuid4()}.{ext}"
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
         file_path = os.path.join(UPLOAD_DIR, filename)
 
         with open(file_path, "wb") as f:
@@ -533,7 +544,7 @@ async def update_inventory_by_image(
 
                     try:
                         new_qty = change_inventory_batches(
-                            cur, item_id, action, data["count"]
+                            cur, item_id, action, data["count"], household_id
                         )
                     except HTTPException as exc:
                         raise HTTPException(
@@ -543,10 +554,10 @@ async def update_inventory_by_image(
 
                     cur.execute(
                         """
-                        INSERT INTO events(scan_id, item_id, action, confidence)
-                        VALUES (%s, %s, %s, %s);
+                        INSERT INTO events(household_id, scan_id, item_id, action, confidence)
+                        VALUES (%s, %s, %s, %s, %s);
                         """,
-                        (None, item_id, action, data["confidence"]),
+                        (household_id, None, item_id, action, data["confidence"]),
                     )
 
                     updated_items.append({
@@ -556,7 +567,7 @@ async def update_inventory_by_image(
                         "new_quantity": new_qty,
                     })
 
-                sync_inventory_summary(conn)
+                sync_inventory_summary(conn, household_id)
                 conn.commit()
 
         return {
@@ -570,7 +581,7 @@ async def update_inventory_by_image(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-def manual_inventory(payload: Dict[str, Any]):
+def manual_inventory(payload: Dict[str, Any], household_id: int = 1):
     """
     Manually add or remove items.
 
@@ -651,26 +662,26 @@ def manual_inventory(payload: Dict[str, Any]):
                     cur.execute(
                         """
                         SELECT id, quantity FROM inventory_batches
-                        WHERE item_id = %s
+                        WHERE household_id = %s AND item_id = %s
                           AND quantity > 0
                           AND expiry_date IS NULL
                           AND expiry_estimate_date IS NULL
                         ORDER BY created_at
                         FOR UPDATE
                         """,
-                        (item_id,),
+                        (household_id, item_id),
                     )
                 else:
                     cur.execute(
                         """
                         SELECT id, quantity FROM inventory_batches
-                        WHERE item_id = %s
+                        WHERE household_id = %s AND item_id = %s
                           AND quantity > 0
                           AND COALESCE(expiry_date, expiry_estimate_date) = %s
                         ORDER BY created_at
                         FOR UPDATE
                         """,
-                        (item_id, selected_expiry_date),
+                        (household_id, item_id, selected_expiry_date),
                     )
                 batches = cur.fetchall()
                 remaining = quantity_change
@@ -705,12 +716,12 @@ def manual_inventory(payload: Dict[str, Any]):
                     """
                     SELECT id, quantity
                     FROM inventory_batches
-                    WHERE item_id = %s
+                    WHERE household_id = %s AND item_id = %s
                       AND COALESCE(expiry_date, expiry_estimate_date) = %s
                       AND expiry_source = %s
                     FOR UPDATE;
                     """,
-                    (item_id, selected_expiry_date, expiry_source),
+                    (household_id, item_id, selected_expiry_date, expiry_source),
                 )
                 existing_batch = cur.fetchone()
                 if existing_batch:
@@ -726,11 +737,12 @@ def manual_inventory(payload: Dict[str, Any]):
                     cur.execute(
                         """
                         INSERT INTO inventory_batches(
-                            item_id, quantity, expiry_date, expiry_estimate_date, expiry_source
+                            household_id, item_id, quantity, expiry_date, expiry_estimate_date, expiry_source
                         )
-                        VALUES (%s, %s, %s, %s, %s);
+                        VALUES (%s, %s, %s, %s, %s, %s);
                         """,
                         (
+                            household_id,
                             item_id,
                             quantity_change,
                             expiry_date,
@@ -739,11 +751,11 @@ def manual_inventory(payload: Dict[str, Any]):
                         ),
                     )
 
-            sync_inventory_summary(conn)
+            sync_inventory_summary(conn, household_id)
 
             cur.execute(
-                "SELECT COALESCE(SUM(quantity), 0) AS quantity FROM inventory_batches WHERE item_id = %s;",
-                (item_id,),
+                "SELECT COALESCE(SUM(quantity), 0) AS quantity FROM inventory_batches WHERE household_id = %s AND item_id = %s;",
+                (household_id, item_id),
             )
             new_qty = cur.fetchone()["quantity"]
             status = "MISSING" if new_qty == 0 else "LOW" if new_qty == 1 else "OK"
@@ -751,11 +763,11 @@ def manual_inventory(payload: Dict[str, Any]):
             # --- Create event ---
             cur.execute(
                 """
-                INSERT INTO events(scan_id, item_id, action, confidence, quantity_change)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO events(household_id, scan_id, item_id, action, confidence, quantity_change)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id;
                 """,
-                (None, item_id, action, 1.0, quantity_change),
+                (household_id, None, item_id, action, 1.0, quantity_change),
             )
             event_id = cur.fetchone()["id"]
 

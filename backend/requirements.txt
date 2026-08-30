@@ -3,6 +3,9 @@ uvicorn[standard]
 psycopg2-binary
 python-dotenv
 python-multipart
+argon2-cffi
+PyJWT
+google-auth[requests]
 ultralytics
 opencv-python
 pandas

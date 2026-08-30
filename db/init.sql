@@ -1,6 +1,85 @@
 -- Core tables
 CREATE EXTENSION IF NOT EXISTS citext;
 
+-- Users prepared for future authentication
+CREATE TABLE IF NOT EXISTS users (
+  id SERIAL PRIMARY KEY,
+  email CITEXT NOT NULL UNIQUE CONSTRAINT users_email_normalized_check CHECK (
+    email = BTRIM(email) AND email <> ''
+  ),
+  display_name TEXT,
+  password_hash TEXT,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  is_system_admin BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Revocable refresh sessions; token material is stored only as a hash
+CREATE TABLE IF NOT EXISTS refresh_sessions (
+  id UUID PRIMARY KEY,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  revoked_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_refresh_sessions_user_id ON refresh_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_sessions_expires_at ON refresh_sessions(expires_at);
+
+-- External sign-in identities are keyed by provider subject, never by email alone
+CREATE TABLE IF NOT EXISTS auth_identities (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  provider TEXT NOT NULL CONSTRAINT auth_identities_provider_normalized_check CHECK (
+    provider = UPPER(BTRIM(provider)) AND provider <> ''
+  ),
+  provider_subject TEXT NOT NULL CONSTRAINT auth_identities_subject_nonempty_check CHECK (
+    BTRIM(provider_subject) <> ''
+  ),
+  verified_email CITEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(provider, provider_subject)
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_identities_user_id ON auth_identities(user_id);
+
+-- Fridges and their user memberships. Household 1 owns pre-authentication data.
+CREATE TABLE IF NOT EXISTS households (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL CONSTRAINT households_name_nonempty_check CHECK (BTRIM(name) <> ''),
+  join_code TEXT NOT NULL UNIQUE,
+  creator_user_id INT REFERENCES users(id) ON DELETE RESTRICT,
+  is_legacy BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO households(id, name, join_code, creator_user_id, is_legacy)
+VALUES (1, 'Legacy Fridge Data', 'LEGACY-DATA', NULL, TRUE)
+ON CONFLICT (id) DO NOTHING;
+SELECT setval(pg_get_serial_sequence('households', 'id'), GREATEST(1, (SELECT MAX(id) FROM households)));
+
+CREATE TABLE IF NOT EXISTS household_memberships (
+  id SERIAL PRIMARY KEY,
+  household_id INT NOT NULL REFERENCES households(id) ON DELETE CASCADE,
+  user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CONSTRAINT household_memberships_role_check CHECK (
+    role IN ('OWNER', 'MANAGER', 'MEMBER')
+  ),
+  status TEXT NOT NULL CONSTRAINT household_memberships_status_check CHECK (
+    status IN ('PENDING', 'ACTIVE', 'REJECTED', 'REMOVED')
+  ),
+  requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  reviewed_at TIMESTAMPTZ,
+  reviewed_by_user_id INT REFERENCES users(id) ON DELETE SET NULL,
+  UNIQUE(household_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_household_memberships_user ON household_memberships(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_household_memberships_household ON household_memberships(household_id, status);
+
 -- Items
 CREATE TABLE IF NOT EXISTS items (
   id SERIAL PRIMARY KEY,
@@ -10,15 +89,18 @@ CREATE TABLE IF NOT EXISTS items (
 
 -- Inventory summary
 CREATE TABLE IF NOT EXISTS inventory (
-  item_id INT PRIMARY KEY REFERENCES items(id),
+  household_id INT NOT NULL DEFAULT 1 REFERENCES households(id) ON DELETE RESTRICT,
+  item_id INT NOT NULL REFERENCES items(id),
   quantity INT NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'OK',
-  last_updated TIMESTAMP NOT NULL DEFAULT NOW()
+  last_updated TIMESTAMP NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (household_id, item_id)
 );
 
 -- Inventory batches with expiry tracking
 CREATE TABLE IF NOT EXISTS inventory_batches (
   id SERIAL PRIMARY KEY,
+  household_id INT NOT NULL DEFAULT 1 REFERENCES households(id) ON DELETE RESTRICT,
   item_id INT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
   quantity INT NOT NULL DEFAULT 0,
   expiry_date DATE,
@@ -33,10 +115,13 @@ CREATE TABLE IF NOT EXISTS inventory_batches (
 );
 
 CREATE INDEX IF NOT EXISTS idx_inventory_batches_item_id ON inventory_batches(item_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_batches_household ON inventory_batches(household_id, item_id);
 
 -- Scans
 CREATE TABLE IF NOT EXISTS scans (
   id SERIAL PRIMARY KEY,
+  household_id INT NOT NULL DEFAULT 1 REFERENCES households(id) ON DELETE RESTRICT,
+  created_by_user_id INT REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMP NOT NULL DEFAULT NOW(),
   image_ref TEXT,
   image_width INT,
@@ -49,6 +134,7 @@ CREATE TABLE IF NOT EXISTS scans (
 -- Events
 CREATE TABLE IF NOT EXISTS events (
   id SERIAL PRIMARY KEY,
+  household_id INT NOT NULL DEFAULT 1 REFERENCES households(id) ON DELETE RESTRICT,
   scan_id INT REFERENCES scans(id),
   item_id INT REFERENCES items(id),
   action TEXT NOT NULL, -- Added | Removed | DoorOpened | DoorClosed
@@ -98,6 +184,8 @@ CREATE INDEX IF NOT EXISTS idx_detection_reviews_scan_id ON detection_reviews(sc
 -- Human annotation submissions for future model improvement
 CREATE TABLE IF NOT EXISTS annotation_submissions (
   id SERIAL PRIMARY KEY,
+  household_id INT NOT NULL DEFAULT 1 REFERENCES households(id) ON DELETE RESTRICT,
+  created_by_user_id INT REFERENCES users(id) ON DELETE SET NULL,
   scan_id INT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
   status TEXT NOT NULL DEFAULT 'pending' CONSTRAINT annotation_submissions_status_check CHECK (
     status IN ('pending', 'approved', 'rejected', 'used')
@@ -115,6 +203,17 @@ CREATE TABLE IF NOT EXISTS annotation_submissions (
 CREATE INDEX IF NOT EXISTS idx_annotation_submissions_scan_id ON annotation_submissions(scan_id);
 CREATE INDEX IF NOT EXISTS idx_annotation_submissions_status ON annotation_submissions(status);
 CREATE INDEX IF NOT EXISTS idx_annotation_submissions_training_state ON annotation_submissions(training_state);
+
+CREATE TABLE IF NOT EXISTS freshness_analyses (
+  id TEXT PRIMARY KEY,
+  household_id INT NOT NULL DEFAULT 1 REFERENCES households(id) ON DELETE RESTRICT,
+  created_by_user_id INT REFERENCES users(id) ON DELETE SET NULL,
+  image_path TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_freshness_analyses_household_user
+  ON freshness_analyses(household_id, created_by_user_id, created_at DESC);
 
 -- Individual human corrections within an annotation submission
 CREATE TABLE IF NOT EXISTS annotations (

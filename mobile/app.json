@@ -46,7 +46,8 @@
           "cameraPermission": "Allow Fridge9000 to use your camera to take photos for manual annotations."
         }
       ],
-      "expo-web-browser"
+      "expo-web-browser",
+      "expo-secure-store"
     ],
     "experiments": {
       "typedRoutes": true,

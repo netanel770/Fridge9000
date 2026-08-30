@@ -12,7 +12,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { getInventory, getInventoryBatches } from "../src/services/api";
+import { getApiRequestHeaders, getInventory, getInventoryBatches } from "../src/services/api";
 import { API_BASE_URL } from "../src/services/config";
 import type { InventoryBatchItem, InventoryItem } from "../src/types/api";
 import { EmptyState, ScreenHeader } from "../src/components/ui";
@@ -24,7 +24,7 @@ function ProductThumbnail({ itemId }: { itemId: number }) {
     <View style={styles.thumbnailBox}>
       {available ? (
         <Image
-          source={{ uri: `${API_BASE_URL}/items/${itemId}/representative-image?generate=false` }}
+          source={{ uri: `${API_BASE_URL}/items/${itemId}/representative-image?generate=false`, headers: getApiRequestHeaders() }}
           style={styles.thumbnail}
           resizeMode="contain"
           onError={() => setAvailable(false)}

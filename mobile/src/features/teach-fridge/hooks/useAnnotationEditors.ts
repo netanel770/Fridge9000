@@ -1,7 +1,7 @@
 import { Image } from "react-native";
 import { useState } from "react";
 
-import { createAnnotationSubmission, getAllInventory, getScanImageUrl, updateAnnotationBox, updateAnnotationLabel } from "../../../services/api";
+import { createAnnotationSubmission, getAllInventory, getApiRequestHeaders, getScanImageUrl, updateAnnotationBox, updateAnnotationLabel } from "../../../services/api";
 import type { DetectionItem, InventoryItem, RecentScan } from "../../../types/api";
 import { areImageDimensionsCompatible, getMinimumAnnotationBoxSize } from "../../../utils/imageCoordinates";
 import { detectionBox } from "../annotationUtils";
@@ -169,7 +169,7 @@ export function useAnnotationEditors({
     }
     const imageUrl = getScanImageUrl(scan.id);
     await new Promise<void>((resolve, reject) => {
-      Image.getSize(imageUrl, (width, height) => {
+      Image.getSizeWithHeaders(imageUrl, getApiRequestHeaders(), (width, height) => {
         if (width <= 0 || height <= 0) {
           reject(new Error(`Scan #${scan.id} image dimensions could not be read.`));
           return;

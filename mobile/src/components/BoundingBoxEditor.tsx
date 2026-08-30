@@ -4,6 +4,7 @@ import { Image, PanResponder, StyleSheet, Text, View } from "react-native";
 import { colors, radius } from "../theme";
 import { getContainedImageLayout, getMinimumAnnotationBoxSize, projectBoundingBox, resizeBoundingBox, screenPointToImage, translateBoundingBox } from "../utils/imageCoordinates";
 import type { BoxCorner, ImageBoundingBox } from "../utils/imageCoordinates";
+import { getApiRequestHeaders } from "../services/api";
 
 type Props = { imageUri: string; imageWidth: number; imageHeight: number; box: ImageBoundingBox | null; label?: string; onBoxChange: (box: ImageBoundingBox | null) => void };
 type Snapshot = { box: ImageBoundingBox | null; scale: number };
@@ -117,7 +118,7 @@ export function BoundingBoxEditor({ imageUri, imageWidth, imageHeight, box, labe
   const editor = (
       <View collapsable={false} {...(!box ? editorResponders.draw.panHandlers : {})} style={styles.container} onLayout={(event) => setViewSize(event.nativeEvent.layout)}>
         <Image
-          source={{ uri: imageUri }}
+          source={{ uri: imageUri, headers: getApiRequestHeaders() }}
           style={[StyleSheet.absoluteFillObject, styles.image]}
           resizeMode="contain"
           onLoadStart={() => setImageStatus("LOADING")}

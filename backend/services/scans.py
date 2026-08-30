@@ -24,7 +24,9 @@ except ModuleNotFoundError:
 _normalize_uploaded_image = normalize_uploaded_image
 
 
-async def door_closed_upload(file: UploadFile = File(...)):
+async def door_closed_upload(
+    file: UploadFile = File(...), household_id: int = 1, user_id: int | None = None
+):
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="Uploaded image is empty")
@@ -32,12 +34,15 @@ async def door_closed_upload(file: UploadFile = File(...)):
         contents, file.content_type or ""
     )
 
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
     file_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4()}.{extension}")
     try:
         with open(file_path, "wb") as f:
             f.write(normalized_contents)
 
-        result = door_closed({"image_ref": file_path, "conf": 0.25})
+        result = door_closed(
+            {"image_ref": file_path, "conf": 0.25}, household_id, user_id
+        )
         if not result.get("ok"):
             raise HTTPException(
                 status_code=400,
@@ -59,7 +64,12 @@ async def door_closed_upload(file: UploadFile = File(...)):
             os.remove(file_path)
         raise HTTPException(status_code=500, detail=str(e))
 
-def review_scan(scan_id: int, payload: Dict[str, Any]):
+def review_scan(
+    scan_id: int,
+    payload: Dict[str, Any],
+    household_id: int = 1,
+    user_id: int | None = None,
+):
     items = payload.get("items", [])
     mode = payload.get("mode", "Added")
     source = payload.get("source", "scan")
@@ -143,7 +153,16 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT id FROM scans WHERE id = %s FOR UPDATE;", (scan_id,))
+            cur.execute(
+                """
+                SELECT id FROM scans
+                WHERE id = %s AND household_id = %s
+                  AND (created_by_user_id = %s OR
+                       (household_id = 1 AND created_by_user_id IS NULL))
+                FOR UPDATE;
+                """,
+                (scan_id, household_id, user_id),
+            )
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="Scan not found")
             cur.execute(
@@ -237,26 +256,26 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
                         cur.execute(
                             """
                             SELECT id, quantity FROM inventory_batches
-                            WHERE item_id = %s
+                            WHERE household_id = %s AND item_id = %s
                               AND quantity > 0
                               AND expiry_date IS NULL
                               AND expiry_estimate_date IS NULL
                             ORDER BY created_at
                             FOR UPDATE
                             """,
-                            (item_id,),
+                            (household_id, item_id),
                         )
                     else:
                         cur.execute(
                             """
                             SELECT id, quantity FROM inventory_batches
-                            WHERE item_id = %s
+                            WHERE household_id = %s AND item_id = %s
                               AND quantity > 0
                               AND COALESCE(expiry_date, expiry_estimate_date) = %s
                             ORDER BY created_at
                             FOR UPDATE
                             """,
-                            (item_id, expiry_date),
+                            (household_id, item_id, expiry_date),
                         )
                     batches = cur.fetchall()
 
@@ -292,11 +311,12 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
                     cur.execute(
                         """
                         SELECT id, quantity FROM inventory_batches
-                        WHERE item_id = %s
+                        WHERE household_id = %s AND item_id = %s
                           AND COALESCE(expiry_date, expiry_estimate_date)::text = COALESCE(%s, %s)::text
                           AND COALESCE(expiry_source, 'estimated') = %s;
                         """,
                         (
+                            household_id,
                             item_id,
                             expiry_date,
                             expiry_estimate_date,
@@ -318,10 +338,11 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
                     else:
                         cur.execute(
                             """
-                            INSERT INTO inventory_batches(item_id, quantity, expiry_date, expiry_estimate_date, expiry_source)
-                            VALUES (%s, %s, %s, %s, %s);
+                            INSERT INTO inventory_batches(household_id, item_id, quantity, expiry_date, expiry_estimate_date, expiry_source)
+                            VALUES (%s, %s, %s, %s, %s, %s);
                             """,
                             (
+                                household_id,
                                 item_id,
                                 quantity_change,
                                 expiry_date,
@@ -332,13 +353,13 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
 
                 cur.execute(
                     """
-                    INSERT INTO events(scan_id, item_id, action, confidence, quantity_change)
-                    VALUES (%s, %s, %s, %s, %s);
+                    INSERT INTO events(household_id, scan_id, item_id, action, confidence, quantity_change)
+                    VALUES (%s, %s, %s, %s, %s, %s);
                     """,
-                    (scan_id, item_id, mode, confidence, quantity_change),
+                    (household_id, scan_id, item_id, mode, confidence, quantity_change),
                 )
 
-            sync_inventory_summary(conn)
+            sync_inventory_summary(conn, household_id)
             conn.commit()
 
     return {
@@ -347,34 +368,43 @@ def review_scan(scan_id: int, payload: Dict[str, Any]):
         "updated_items": included_items,
     }
 
-def get_scan_detections(scan_id: int):
+def get_scan_detections(
+    scan_id: int, household_id: int = 1, user_id: int | None = None
+):
     sql = """
-    SELECT id, label, confidence, x1, y1, x2, y2, created_at
-    FROM scan_detections
-    WHERE scan_id = %s
-    ORDER BY confidence DESC;
+    SELECT d.id, d.label, d.confidence, d.x1, d.y1, d.x2, d.y2, d.created_at
+    FROM scan_detections d
+    JOIN scans s ON s.id = d.scan_id
+    WHERE d.scan_id = %s AND s.household_id = %s
+      AND (s.created_by_user_id = %s OR
+           (s.household_id = 1 AND s.created_by_user_id IS NULL))
+    ORDER BY d.confidence DESC;
     """
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql, (scan_id,))
+            cur.execute(sql, (scan_id, household_id, user_id))
             return cur.fetchall()
 
-def latest_scan():
+def latest_scan(household_id: int = 1, user_id: int | None = None):
     sql = """
     SELECT id, created_at, image_ref
     FROM scans
-    WHERE source = 'detector'
+    WHERE source = 'detector' AND household_id = %s
+      AND (created_by_user_id = %s OR
+           (household_id = 1 AND created_by_user_id IS NULL))
     ORDER BY created_at DESC
     LIMIT 1;
     """
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql)
+            cur.execute(sql, (household_id, user_id))
             row = cur.fetchone()
             return row or {}
 
 
-def recent_scans(limit: int = 10):
+def recent_scans(
+    limit: int = 10, household_id: int = 1, user_id: int | None = None
+):
     limit = max(1, min(limit, 50))
     sql = """
     SELECT s.id, s.created_at, s.image_width, s.image_height,
@@ -384,17 +414,20 @@ def recent_scans(limit: int = 10):
     WHERE s.image_width IS NOT NULL
       AND s.image_height IS NOT NULL
       AND s.source = 'detector'
+      AND s.household_id = %s
+      AND (s.created_by_user_id = %s OR
+           (s.household_id = 1 AND s.created_by_user_id IS NULL))
     GROUP BY s.id
     ORDER BY s.created_at DESC, s.id DESC
     LIMIT %s;
     """
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql, (limit,))
+            cur.execute(sql, (household_id, user_id, limit))
             return cur.fetchall()
 
 
-def get_scan(scan_id: int):
+def get_scan(scan_id: int, household_id: int = 1, user_id: int | None = None):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -404,11 +437,14 @@ def get_scan(scan_id: int):
                 FROM scans s
                 LEFT JOIN scan_detections d ON d.scan_id = s.id
                 WHERE s.id = %s
+                  AND s.household_id = %s
+                  AND (s.created_by_user_id = %s OR
+                       (s.household_id = 1 AND s.created_by_user_id IS NULL))
                   AND s.image_width IS NOT NULL
                   AND s.image_height IS NOT NULL
                 GROUP BY s.id;
                 """,
-                (scan_id,),
+                (scan_id, household_id, user_id),
             )
             scan = cur.fetchone()
     if not scan:
@@ -416,7 +452,7 @@ def get_scan(scan_id: int):
     return scan
 
 
-def get_scan_image(scan_id: int):
+def get_scan_image(scan_id: int, household_id: int = 1, user_id: int | None = None):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -424,10 +460,13 @@ def get_scan_image(scan_id: int):
                 SELECT image_ref
                 FROM scans
                 WHERE id = %s
+                  AND household_id = %s
+                  AND (created_by_user_id = %s OR
+                       (household_id = 1 AND created_by_user_id IS NULL))
                   AND image_width IS NOT NULL
                   AND image_height IS NOT NULL;
                 """,
-                (scan_id,),
+                (scan_id, household_id, user_id),
             )
             scan = cur.fetchone()
     if not scan:
@@ -443,22 +482,26 @@ def get_scan_image(scan_id: int):
         raise HTTPException(status_code=415, detail="Stored scan is not a supported image")
     return FileResponse(image_path, media_type=media_type)
 
-def create_scan(payload: Dict[str, Any]):
+def create_scan(
+    payload: Dict[str, Any], household_id: int = 1, user_id: int | None = None
+):
 
     image_ref = payload.get("image_ref")
 
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO scans(image_ref) VALUES (%s) RETURNING id, created_at;",
-                (image_ref,),
+                "INSERT INTO scans(household_id, created_by_user_id, image_ref) VALUES (%s, %s, %s) RETURNING id, created_at;",
+                (household_id, user_id, image_ref),
             )
             scan_id, created_at = cur.fetchone()
             conn.commit()
 
     return {"ok": True, "scan_id": scan_id, "created_at": created_at}
 
-def door_closed(payload: Dict[str, Any]):
+def door_closed(
+    payload: Dict[str, Any], household_id: int = 1, user_id: int | None = None
+):
     image_ref = payload.get("image_ref")
     conf = float(payload.get("conf", 0.25))
 
@@ -477,11 +520,11 @@ def door_closed(payload: Dict[str, Any]):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO scans(image_ref, image_width, image_height, source)
-                VALUES (%s, %s, %s, 'detector')
+                INSERT INTO scans(household_id, created_by_user_id, image_ref, image_width, image_height, source)
+                VALUES (%s, %s, %s, %s, %s, 'detector')
                 RETURNING id;
                 """,
-                (image_ref, infer_res["image_width"], infer_res["image_height"]),
+                (household_id, user_id, image_ref, infer_res["image_width"], infer_res["image_height"]),
             )
             scan_id = cur.fetchone()[0]
 
@@ -513,7 +556,12 @@ def door_closed(payload: Dict[str, Any]):
         "image_height": infer_res["image_height"],
     }
 
-def get_detection_boxed_image(scan_id: int, detection_id: int):
+def get_detection_boxed_image(
+    scan_id: int,
+    detection_id: int,
+    household_id: int = 1,
+    user_id: int | None = None,
+):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -521,9 +569,12 @@ def get_detection_boxed_image(scan_id: int, detection_id: int):
                 SELECT s.image_ref, d.x1, d.y1, d.x2, d.y2
                 FROM scan_detections d
                 JOIN scans s ON s.id = d.scan_id
-                WHERE d.scan_id = %s AND d.id = %s;
+                WHERE d.scan_id = %s AND d.id = %s
+                  AND s.household_id = %s
+                  AND (s.created_by_user_id = %s OR
+                       (s.household_id = 1 AND s.created_by_user_id IS NULL));
                 """,
-                (scan_id, detection_id),
+                (scan_id, detection_id, household_id, user_id),
             )
             row = cur.fetchone()
 

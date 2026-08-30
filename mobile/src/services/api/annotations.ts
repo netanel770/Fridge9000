@@ -7,7 +7,7 @@ import type {
   CreateAnnotationSubmissionResponse,
   ManualAnnotationImageUpload,
 } from "../../types/api";
-import { JSON_HEADERS, requestJson } from "./client";
+import { apiUrl, JSON_HEADERS, requestJson } from "./client";
 
 export function uploadManualAnnotationImage(
   imageUri: string,
@@ -59,6 +59,19 @@ export function getAnnotationStats(): Promise<AnnotationStats> {
 
 export function getAnnotationSubmission(submissionId: number): Promise<AnnotationSubmissionDetail> {
   return requestJson<AnnotationSubmissionDetail>(`/annotation-submissions/${submissionId}`);
+}
+
+export function getMyAnnotationSubmissions(status?: AnnotationStatus): Promise<AnnotationSubmission[]> {
+  const query = status ? `?status=${encodeURIComponent(status)}` : "";
+  return requestJson<AnnotationSubmission[]>(`/annotation-submissions/mine${query}`);
+}
+
+export function getMyAnnotationSubmission(submissionId: number): Promise<AnnotationSubmissionDetail> {
+  return requestJson<AnnotationSubmissionDetail>(`/annotation-submissions/mine/${submissionId}`);
+}
+
+export function getAnnotationSubmissionImageUrl(submissionId: number) {
+  return apiUrl(`/annotation-submissions/${submissionId}/image`);
 }
 
 export async function moderateAnnotationSubmission(

@@ -12,7 +12,7 @@ except ModuleNotFoundError:
 
 
 
-def alerts() -> List[Dict[str, Any]]:
+def alerts(household_id: int = 1) -> List[Dict[str, Any]]:
     sql = """
     WITH inventory_totals AS (
         SELECT i.id AS item_id, i.name, i.category,
@@ -25,7 +25,7 @@ def alerts() -> List[Dict[str, Any]]:
                ) FILTER (WHERE b.quantity > 0), 0) AS quantity,
                MAX(b.last_updated) AS last_updated
         FROM items i
-        LEFT JOIN inventory_batches b ON b.item_id = i.id
+        LEFT JOIN inventory_batches b ON b.item_id = i.id AND b.household_id = %s
         GROUP BY i.id, i.name, i.category
     ), active_alerts AS (
         SELECT t.item_id AS id, t.item_id, NULL::integer AS batch_id,
@@ -50,7 +50,7 @@ def alerts() -> List[Dict[str, Any]]:
                b.last_updated
         FROM inventory_batches b
         JOIN items i ON i.id = b.item_id
-        WHERE b.quantity > 0
+        WHERE b.household_id = %s AND b.quantity > 0
           AND COALESCE(b.expiry_date, b.expiry_estimate_date) <= CURRENT_DATE + INTERVAL '3 days'
     )
     SELECT * FROM active_alerts
@@ -58,26 +58,27 @@ def alerts() -> List[Dict[str, Any]]:
     """
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql)
+            cur.execute(sql, (household_id, household_id))
             return cur.fetchall()
 
 
-def events(limit: int = 50) -> List[Dict[str, Any]]:
+def events(limit: int = 50, household_id: int = 1) -> List[Dict[str, Any]]:
     sql = """
     SELECT e.id, e.action, e.confidence, e.created_at,
            i.name AS item_name, i.category AS item_category,e.quantity_change,
            e.scan_id
     FROM events e
     LEFT JOIN items i ON i.id = e.item_id
+    WHERE e.household_id = %s
     ORDER BY e.created_at DESC
     LIMIT %s;
     """
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql, (limit,))
+            cur.execute(sql, (household_id, limit))
             return cur.fetchall()
 
-def create_event(payload: Dict[str, Any]):
+def create_event(payload: Dict[str, Any], household_id: int = 1):
 
     action = payload.get("action")
     item_name = payload.get("item_name")
@@ -89,6 +90,13 @@ def create_event(payload: Dict[str, Any]):
 
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if scan_id is not None:
+                cur.execute(
+                    "SELECT 1 FROM scans WHERE id = %s AND household_id = %s;",
+                    (scan_id, household_id),
+                )
+                if cur.fetchone() is None:
+                    raise HTTPException(status_code=404, detail="Scan not found")
             # get item id
             cur.execute("SELECT id FROM items WHERE name = %s;", (item_name,))
             row = cur.fetchone()
@@ -98,15 +106,15 @@ def create_event(payload: Dict[str, Any]):
             item_id = row["id"]
 
             if action in ("Added", "Removed"):
-                change_inventory_batches(cur, item_id, action, 1)
+                change_inventory_batches(cur, item_id, action, 1, household_id)
 
             # insert event
             cur.execute(
-                "INSERT INTO events(scan_id, item_id, action, confidence) VALUES (%s,%s,%s,%s) RETURNING id;",
-                (scan_id, item_id, action, confidence),
+                "INSERT INTO events(household_id, scan_id, item_id, action, confidence) VALUES (%s,%s,%s,%s,%s) RETURNING id;",
+                (household_id, scan_id, item_id, action, confidence),
             )
             event_id = cur.fetchone()["id"]
-            sync_inventory_summary(conn)
+            sync_inventory_summary(conn, household_id)
 
             conn.commit()
 

@@ -7,6 +7,8 @@ import type { AlertItem, InventoryBatchItem, InventoryItem } from "../src/types/
 import { AppButton, Card, EmptyState, ScreenHeader, SectionTitle, StatusBadge } from "../src/components/ui";
 import { colors, radius, spacing, typography } from "../src/theme";
 import { formatAmount } from "../src/utils/number";
+import { useAuth } from "../src/features/auth/AuthContext";
+import { useHousehold } from "../src/features/households/HouseholdContext";
 
 type Suggestion = {
   key: string;
@@ -60,6 +62,8 @@ function openSuggestion(batch: InventoryBatchItem): Suggestion {
 }
 
 export default function HomeScreen() {
+  const auth = useAuth();
+  const household = useHousehold();
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [batches, setBatches] = useState<InventoryBatchItem[]>([]);
@@ -133,6 +137,11 @@ export default function HomeScreen() {
   return <ScrollView style={styles.screen} contentContainerStyle={styles.container} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => loadData(true)} />}>
     <ScreenHeader eyebrow="Fridge9000" title="Your Fridge" subtitle="See what needs attention or update your inventory." />
 
+    <Card><View style={styles.householdHeader}><View style={styles.householdCopy}><Text style={styles.householdCaption}>CURRENT HOUSEHOLD</Text><Text style={styles.householdName}>{household.selected?.fridge_name}</Text><StatusBadge label={household.selected?.role || "MEMBER"} tone="neutral" /></View><Pressable accessibilityLabel="Sign out" hitSlop={10} onPress={() => { void auth.signOut(); }}><Ionicons name="log-out-outline" size={24} color={colors.textMuted} /></Pressable></View>
+      {household.activeMemberships.length > 1 ? <View style={styles.householdChoices}>{household.activeMemberships.map((membership) => <Pressable key={membership.fridge_id} onPress={() => { void household.selectHousehold(membership.fridge_id); }} style={[styles.householdChip, household.selected?.fridge_id === membership.fridge_id && styles.householdChipSelected]}><Text style={[styles.householdChipText, household.selected?.fridge_id === membership.fridge_id && styles.householdChipTextSelected]}>{membership.fridge_name}</Text></Pressable>)}</View> : null}
+      {household.selected && ["OWNER", "MANAGER"].includes(household.selected.role) ? <View style={styles.householdAction}><AppButton label="Manage Household" icon="people-outline" variant="secondary" onPress={() => router.push("/household-management" as never)} /></View> : null}
+    </Card>
+
     {notice ? <View style={styles.notice}><Ionicons name="cloud-offline-outline" size={20} color={colors.warningFg} /><Text style={styles.noticeText}>{notice}</Text><Pressable onPress={() => loadData()}><Text style={styles.retry}>Retry</Text></Pressable></View> : null}
 
     <View style={styles.summaryRow}>
@@ -150,7 +159,7 @@ export default function HomeScreen() {
     <Pressable
       accessibilityRole="button"
       accessibilityLabel="Open Teach Fridge 9000"
-      onPress={() => router.push("/teach-fridge")}
+      onPress={() => router.push((auth.user?.is_system_admin ? "/teach-fridge" : "/teach-user") as never)}
       style={({ pressed }) => [styles.teachCard, pressed && styles.pressed]}
     >
       <View style={styles.teachIcon}><Ionicons name="school-outline" size={28} color={colors.primaryText} /></View>
@@ -161,6 +170,8 @@ export default function HomeScreen() {
       </View>
       <Ionicons name="chevron-forward" size={22} color={colors.primary} />
     </Pressable>
+
+    {auth.user?.is_system_admin ? <AppButton label="Manage System Admins" icon="shield-checkmark-outline" variant="ghost" onPress={() => router.push("/system-admins" as never)} /> : null}
 
     <SectionTitle title="Suggested updates" action={suggestions.length > 2 ? "View all" : undefined} onAction={() => router.push("/alerts")} />
     {suggestions.length ? suggestions.slice(0, 2).map((suggestion) => <Card key={suggestion.key}>
@@ -191,4 +202,5 @@ const styles = StyleSheet.create({
   teachIcon: { width: 54, height: 54, borderRadius: 18, backgroundColor: colors.primary, alignItems: "center", justifyContent: "center" },
   teachCopy: { flex: 1, gap: spacing.xs }, teachTitle: { ...typography.section, fontSize: 18, color: colors.navy }, teachMessage: { color: colors.textMuted, fontSize: 13, lineHeight: 18 },
   activityLink: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: spacing.sm, paddingVertical: spacing.sm }, activityText: { color: colors.textMuted, fontWeight: "700", flex: 0 },
+  householdHeader: { flexDirection: "row", alignItems: "flex-start", gap: spacing.md }, householdCopy: { flex: 1, gap: spacing.xs }, householdCaption: { color: colors.textMuted, fontSize: 11, fontWeight: "900", letterSpacing: 0.8 }, householdName: { color: colors.navy, fontSize: 19, fontWeight: "900" }, householdChoices: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm, marginTop: spacing.md }, householdChip: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderWidth: 1, borderColor: colors.border, borderRadius: radius.pill }, householdChipSelected: { backgroundColor: colors.primary, borderColor: colors.primary }, householdChipText: { color: colors.textSecondary, fontWeight: "700" }, householdChipTextSelected: { color: colors.primaryText }, householdAction: { marginTop: spacing.md, paddingTop: spacing.md, borderTopWidth: 1, borderTopColor: colors.border },
 });

@@ -2,14 +2,27 @@ import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { LifecycleJobProvider } from "../src/components/LifecycleJobProvider";
+import { AuthProvider } from "../src/features/auth/AuthContext";
+import { HouseholdProvider, useHousehold } from "../src/features/households/HouseholdContext";
+import { AppGate } from "../src/features/navigation/AppGate";
 import { colors } from "../src/theme";
 
 export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <LifecycleJobProvider>
+      <AuthProvider><HouseholdProvider><AppGate><LifecycleJobProvider>
+      <AppStack />
+      </LifecycleJobProvider></AppGate></HouseholdProvider></AuthProvider>
+    </GestureHandlerRootView>
+  );
+}
+
+function AppStack() {
+  const { householdEpoch } = useHousehold();
+  return <>
       <StatusBar hidden />
       <Stack
+        key={householdEpoch}
         screenOptions={{
           headerStyle: { backgroundColor: colors.surface },
           headerTintColor: colors.navy,
@@ -19,6 +32,12 @@ export default function RootLayout() {
         }}
       >
         <Stack.Screen name="index" options={{ headerShown: false }} />
+        <Stack.Screen name="login" options={{ headerShown: false }} />
+        <Stack.Screen name="register" options={{ headerShown: false }} />
+        <Stack.Screen name="account" options={{ title: "Account" }} />
+        <Stack.Screen name="household-onboarding" options={{ title: "Household Setup" }} />
+        <Stack.Screen name="household-management" options={{ title: "Manage Household" }} />
+        <Stack.Screen name="system-admins" options={{ title: "System Admins" }} />
         <Stack.Screen name="inventory" options={{ title: "Inventory" }} />
         <Stack.Screen name="alerts" options={{ title: "Alerts" }} />
         <Stack.Screen name="events" options={{ title: "Events" }} />
@@ -31,11 +50,10 @@ export default function RootLayout() {
         <Stack.Screen name="image-inventory" options={{ title: "Update by Image" }} />
         <Stack.Screen name="rot-detection" options={{ title: "Rot Detection" }} />
         <Stack.Screen name="teach-fridge" options={{ title: "Teach Fridge 9000" }} />
+        <Stack.Screen name="teach-user" options={{ title: "Teach Fridge 9000" }} />
         <Stack.Screen name="manual-annotation" options={{ title: "Annotate Image" }} />
         <Stack.Screen name="expired-items" options={{ title: "Expired Products" }} />
         <Stack.Screen name="manual-confirm" options={{ title: "Confirm Update" }} />
       </Stack>
-      </LifecycleJobProvider>
-    </GestureHandlerRootView>
-  );
+    </>;
 }
