@@ -21,6 +21,7 @@ import {
 } from "../src/services/api";
 import type { OutlinePreparationJob } from "../src/services/api";
 import type { InventoryBatchItem, InventoryItem } from "../src/types/api";
+import { showMessage } from "../src/utils/confirm";
 
 type Mode = "Added" | "Removed";
 const NO_EXPIRY_VALUE = "__NO_EXPIRY__";
@@ -230,13 +231,12 @@ export default function ManualInventoryScreen() {
       }
 
       setPreparingOutlines(false);
-      Alert.alert(
+      await showMessage(
         "Product outlines ready",
         `${job.ready} ready, ${job.skipped} without a scan, ${job.failed} could not be isolated. `
           + "Every product can still be adjusted.",
-        [{ text: "Continue", onPress: () => router.push("/adjust-open-products") }],
-        { cancelable: false },
       );
+      router.push("/adjust-open-products");
     } catch (e: any) {
       setPreparingOutlines(false);
       Alert.alert("Preparation failed", e.message || "Could not prepare product outlines.");

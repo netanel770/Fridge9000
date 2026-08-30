@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { ActivityIndicator, Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import * as ImagePicker from "expo-image-picker";
 import { Ionicons } from "@expo/vector-icons";
 
 import { AppButton, Card, ScreenHeader, StatusBadge } from "../src/components/ui";
 import { useAuthenticatedImage } from "../src/components/useAuthenticatedImage";
+import { useWebImageAcquisition } from "../src/components/useWebImageAcquisition";
 import { analyzeFreshness, getInventoryBatches, removeInventoryBatchQuantity } from "../src/services/api";
 import { API_BASE_URL } from "../src/services/config";
 import { colors, radius, spacing, typography } from "../src/theme";
@@ -47,6 +48,10 @@ export default function RotDetectionScreen() {
   const [inventoryMessage, setInventoryMessage] = useState("");
   const [removalBatch, setRemovalBatch] = useState<InventoryBatchItem | null>(null);
   const [removalQuantity, setRemovalQuantity] = useState(1);
+  const webImages = useWebImageAcquisition({
+    onImage: (image) => selectImage(image.uri),
+    onError: (message) => setError(message),
+  });
 
   function selectImage(uri: string) {
     setImageUri(uri);
@@ -57,6 +62,10 @@ export default function RotDetectionScreen() {
   }
 
   async function takePhoto() {
+    if (Platform.OS === "web") {
+      webImages.openWebcam();
+      return;
+    }
     const permission = await ImagePicker.requestCameraPermissionsAsync();
     if (permission.status !== "granted") {
       Alert.alert("Permission required", "Camera access is required to photograph fruit.");
@@ -70,6 +79,10 @@ export default function RotDetectionScreen() {
   }
 
   async function choosePhoto() {
+    if (Platform.OS === "web") {
+      webImages.uploadPicture();
+      return;
+    }
     const selection = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ["images"],
       allowsEditing: false,
@@ -147,6 +160,7 @@ export default function RotDetectionScreen() {
         title="Rot Detection"
         subtitle="Photograph fruit to check its visible freshness."
       />
+      {webImages.cameraModal}
 
       {!imageUri ? (
         <Card>
@@ -155,8 +169,8 @@ export default function RotDetectionScreen() {
             <Text style={styles.actionTitle}>Add a fruit photo</Text>
             <Text style={styles.actionMessage}>Use a clear image of one apple, banana, or orange.</Text>
             <View style={styles.actions}>
-              <AppButton label="Take Photo" icon="camera-outline" onPress={takePhoto} />
-              <AppButton label="Choose Photo" icon="images-outline" variant="secondary" onPress={choosePhoto} />
+              <AppButton label={Platform.OS === "web" ? "Use Webcam" : "Take Photo"} icon="camera-outline" onPress={takePhoto} />
+              <AppButton label={Platform.OS === "web" ? "Upload Picture" : "Choose Photo"} icon="images-outline" variant="secondary" onPress={choosePhoto} />
             </View>
           </View>
         </Card>

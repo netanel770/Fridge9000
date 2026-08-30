@@ -7,15 +7,25 @@ import {
   Pressable,
   ActivityIndicator,
   Alert,
+  Platform,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
+import { useWebImageAcquisition } from "../src/components/useWebImageAcquisition";
 import { uploadScanImage } from "../src/services/api";
 
 export default function ScanScreen() {
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const webImages = useWebImageAcquisition({
+    onImage: (image) => setImageUri(image.uri),
+    onError: (message) => Alert.alert("Image unavailable", message),
+  });
 
   async function pickImage() {
+    if (Platform.OS === "web") {
+      webImages.uploadPicture();
+      return;
+    }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ["images"],
       allowsEditing: false,
@@ -56,11 +66,17 @@ export default function ScanScreen() {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Scan Fridge</Text>
-      <Text style={styles.subtitle}>Choose a fridge image from your gallery</Text>
+      <Text style={styles.subtitle}>
+        {Platform.OS === "web" ? "Use your webcam or upload a fridge image" : "Choose a fridge image from your gallery"}
+      </Text>
+
+      {Platform.OS === "web" ? <Pressable style={styles.secondaryButton} onPress={webImages.openWebcam}>
+        <Text style={styles.secondaryButtonText}>Use Webcam</Text>
+      </Pressable> : null}
 
       <Pressable style={styles.secondaryButton} onPress={pickImage}>
         <Text style={styles.secondaryButtonText}>
-          {imageUri ? "Choose Another Image" : "Pick Image"}
+          {imageUri ? "Choose Another Image" : Platform.OS === "web" ? "Upload Picture" : "Pick Image"}
         </Text>
       </Pressable>
 
@@ -81,6 +97,7 @@ export default function ScanScreen() {
           <Text style={styles.primaryButtonText}>Upload Image</Text>
         )}
       </Pressable>
+      {webImages.cameraModal}
     </View>
   );
 }

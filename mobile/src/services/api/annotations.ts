@@ -8,18 +8,30 @@ import type {
   ManualAnnotationImageUpload,
 } from "../../types/api";
 import { apiUrl, JSON_HEADERS, requestJson } from "./client";
+import { appendUploadFile } from "./upload";
 
-export function uploadManualAnnotationImage(
+export async function uploadManualAnnotationImage(
   imageUri: string,
   fileName = "manual-annotation.jpg",
   mimeType = "image/jpeg",
 ): Promise<ManualAnnotationImageUpload> {
   const formData = new FormData();
-  formData.append("file", { uri: imageUri, name: fileName, type: mimeType } as any);
-  return requestJson<ManualAnnotationImageUpload>("/annotation-images/upload", {
-    method: "POST",
-    body: formData,
-  });
+
+  await appendUploadFile(
+    formData,
+    "file",
+    imageUri,
+    fileName,
+    mimeType,
+  );
+
+  return requestJson<ManualAnnotationImageUpload>(
+    "/annotation-images/upload",
+    {
+      method: "POST",
+      body: formData,
+    },
+  );
 }
 
 export function createAnnotationSubmission(
@@ -34,11 +46,14 @@ export function createAnnotationSubmission(
     final_y2?: number;
   }[],
 ): Promise<CreateAnnotationSubmissionResponse> {
-  return requestJson<CreateAnnotationSubmissionResponse>(`/scans/${scanId}/annotation-submissions`, {
-    method: "POST",
-    headers: JSON_HEADERS,
-    body: JSON.stringify({ annotations }),
-  });
+  return requestJson<CreateAnnotationSubmissionResponse>(
+    `/scans/${scanId}/annotation-submissions`,
+    {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ annotations }),
+    },
+  );
 }
 
 export function getAnnotationSubmissions(
@@ -46,28 +61,46 @@ export function getAnnotationSubmissions(
   includeArchived = false,
 ): Promise<AnnotationSubmission[]> {
   const params = new URLSearchParams();
+
   if (status) params.set("status", status);
   if (includeArchived) params.set("include_archived", "true");
+
   const serializedParams = params.toString();
   const query = serializedParams ? `?${serializedParams}` : "";
-  return requestJson<AnnotationSubmission[]>(`/annotation-submissions${query}`);
+
+  return requestJson<AnnotationSubmission[]>(
+    `/annotation-submissions${query}`,
+  );
 }
 
 export function getAnnotationStats(): Promise<AnnotationStats> {
   return requestJson<AnnotationStats>("/annotation-submissions/stats");
 }
 
-export function getAnnotationSubmission(submissionId: number): Promise<AnnotationSubmissionDetail> {
-  return requestJson<AnnotationSubmissionDetail>(`/annotation-submissions/${submissionId}`);
+export function getAnnotationSubmission(
+  submissionId: number,
+): Promise<AnnotationSubmissionDetail> {
+  return requestJson<AnnotationSubmissionDetail>(
+    `/annotation-submissions/${submissionId}`,
+  );
 }
 
-export function getMyAnnotationSubmissions(status?: AnnotationStatus): Promise<AnnotationSubmission[]> {
+export function getMyAnnotationSubmissions(
+  status?: AnnotationStatus,
+): Promise<AnnotationSubmission[]> {
   const query = status ? `?status=${encodeURIComponent(status)}` : "";
-  return requestJson<AnnotationSubmission[]>(`/annotation-submissions/mine${query}`);
+
+  return requestJson<AnnotationSubmission[]>(
+    `/annotation-submissions/mine${query}`,
+  );
 }
 
-export function getMyAnnotationSubmission(submissionId: number): Promise<AnnotationSubmissionDetail> {
-  return requestJson<AnnotationSubmissionDetail>(`/annotation-submissions/mine/${submissionId}`);
+export function getMyAnnotationSubmission(
+  submissionId: number,
+): Promise<AnnotationSubmissionDetail> {
+  return requestJson<AnnotationSubmissionDetail>(
+    `/annotation-submissions/mine/${submissionId}`,
+  );
 }
 
 export function getAnnotationSubmissionImageUrl(submissionId: number) {
@@ -78,14 +111,15 @@ export async function moderateAnnotationSubmission(
   submissionId: number,
   status: "approved" | "rejected",
 ): Promise<AnnotationSubmission> {
-  const data = await requestJson<{ ok: boolean; submission: AnnotationSubmission }>(
-    `/annotation-submissions/${submissionId}`,
-    {
-      method: "PATCH",
-      headers: JSON_HEADERS,
-      body: JSON.stringify({ status }),
-    },
-  );
+  const data = await requestJson<{
+    ok: boolean;
+    submission: AnnotationSubmission;
+  }>(`/annotation-submissions/${submissionId}`, {
+    method: "PATCH",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ status }),
+  });
+
   return data.submission;
 }
 
@@ -93,23 +127,32 @@ export async function manageQuarantinedSubmission(
   submissionId: number,
   action: "quarantine" | "restore" | "archive" | "unarchive",
 ): Promise<AnnotationSubmission> {
-  const data = await requestJson<{ ok: boolean; action: string; submission: AnnotationSubmission }>(
-    `/annotation-submissions/${submissionId}/quarantine`,
-    {
-      method: "POST",
-      headers: JSON_HEADERS,
-      body: JSON.stringify({ action }),
-    },
-  );
+  const data = await requestJson<{
+    ok: boolean;
+    action: string;
+    submission: AnnotationSubmission;
+  }>(`/annotation-submissions/${submissionId}/quarantine`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ action }),
+  });
+
   return data.submission;
 }
 
-export async function updateAnnotationLabel(annotationId: number, finalLabel: string): Promise<AnnotationItem> {
-  const data = await requestJson<{ ok: boolean; annotation: AnnotationItem }>(`/annotations/${annotationId}`, {
+export async function updateAnnotationLabel(
+  annotationId: number,
+  finalLabel: string,
+): Promise<AnnotationItem> {
+  const data = await requestJson<{
+    ok: boolean;
+    annotation: AnnotationItem;
+  }>(`/annotations/${annotationId}`, {
     method: "PATCH",
     headers: JSON_HEADERS,
     body: JSON.stringify({ final_label: finalLabel }),
   });
+
   return data.annotation;
 }
 
@@ -117,7 +160,10 @@ export async function updateAnnotationBox(
   annotationId: number,
   box: { x1: number; y1: number; x2: number; y2: number },
 ): Promise<AnnotationItem> {
-  const data = await requestJson<{ ok: boolean; annotation: AnnotationItem }>(`/annotations/${annotationId}`, {
+  const data = await requestJson<{
+    ok: boolean;
+    annotation: AnnotationItem;
+  }>(`/annotations/${annotationId}`, {
     method: "PATCH",
     headers: JSON_HEADERS,
     body: JSON.stringify({
@@ -127,5 +173,6 @@ export async function updateAnnotationBox(
       final_y2: box.y2,
     }),
   });
+
   return data.annotation;
 }

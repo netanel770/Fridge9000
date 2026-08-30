@@ -5,6 +5,7 @@ import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleShee
 import { Ionicons } from "@expo/vector-icons";
 
 import { BoundingBoxEditor } from "../src/components/BoundingBoxEditor";
+import { useWebImageAcquisition } from "../src/components/useWebImageAcquisition";
 import { ProductLabelInput } from "../src/components/ProductLabelInput";
 import { AppButton, Card, ScreenHeader, StatusBadge } from "../src/components/ui";
 import { createAnnotationSubmission, getAllInventory, uploadManualAnnotationImage } from "../src/services/api";
@@ -13,6 +14,7 @@ import { getMinimumAnnotationBoxSize } from "../src/utils/imageCoordinates";
 import type { ImageBoundingBox } from "../src/utils/imageCoordinates";
 import { colors, radius, spacing, typography } from "../src/theme";
 import { useAuth } from "../src/features/auth/AuthContext";
+import { showMessage } from "../src/utils/confirm";
 
 type ManualProduct = {
   id: string;
@@ -32,6 +34,16 @@ export default function ManualAnnotationScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [labelSuggestions, setLabelSuggestions] = useState<string[]>([]);
+  const webImages = useWebImageAcquisition({
+    onImage: (image) => applySelectedImage({
+      uri: image.uri,
+      width: image.width || 0,
+      height: image.height || 0,
+      fileName: image.fileName,
+      mimeType: image.mimeType,
+    } as ImagePicker.ImagePickerAsset),
+    onError: setError,
+  });
 
   useEffect(() => {
     getAllInventory()
@@ -48,6 +60,10 @@ export default function ManualAnnotationScreen() {
   }
 
   async function chooseImage() {
+    if (Platform.OS === "web") {
+      webImages.uploadPicture();
+      return;
+    }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ["images"],
       allowsEditing: false,
@@ -58,6 +74,10 @@ export default function ManualAnnotationScreen() {
   }
 
   async function takePhoto() {
+    if (Platform.OS === "web") {
+      webImages.openWebcam();
+      return;
+    }
     try {
       const permission = await ImagePicker.requestCameraPermissionsAsync();
       if (!permission.granted) {
@@ -152,11 +172,11 @@ export default function ManualAnnotationScreen() {
         final_x2: product.box.x2,
         final_y2: product.box.y2,
       })));
-      Alert.alert(
+      await showMessage(
         "Annotations submitted",
         "Your contribution is pending moderation in Teach Fridge 9000.",
-        [{ text: "Done", onPress: () => router.replace((user?.is_system_admin ? "/teach-fridge" : "/teach-user") as never) }],
       );
+      router.replace((user?.is_system_admin ? "/teach-fridge" : "/teach-user") as never);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not submit annotations.");
     } finally {
@@ -172,14 +192,15 @@ export default function ManualAnnotationScreen() {
         title="Annotate a new image"
         subtitle="Choose an image, draw boxes, and label each product."
       />
+      {webImages.cameraModal}
 
       <Card>
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>1. Choose an image</Text>
           <Text style={styles.help}>This image is used only for your annotation.</Text>
           <View style={styles.imageSourceActions}>
-            <View style={styles.imageSourceAction}><AppButton label="Gallery" icon="images-outline" variant="secondary" onPress={chooseImage} /></View>
-            <View style={styles.imageSourceAction}><AppButton label="Take Photo" icon="camera-outline" variant="secondary" onPress={takePhoto} /></View>
+            <View style={styles.imageSourceAction}><AppButton label={Platform.OS === "web" ? "Upload Picture" : "Gallery"} icon="images-outline" variant="secondary" onPress={chooseImage} /></View>
+            <View style={styles.imageSourceAction}><AppButton label={Platform.OS === "web" ? "Use Webcam" : "Take Photo"} icon="camera-outline" variant="secondary" onPress={takePhoto} /></View>
           </View>
           {asset ? <Text style={styles.selected}>{asset.fileName || "Image selected"}</Text> : null}
           {asset && !uploaded ? <AppButton label="Upload for annotation" icon="cloud-upload-outline" loading={uploading} onPress={uploadImage} /> : null}

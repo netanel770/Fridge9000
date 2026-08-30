@@ -4,8 +4,14 @@ import type { ImageBoundingBox } from "../../utils/imageCoordinates";
 export const CONTRIBUTION_FILTERS = ["All", "Pending", "Approved", "Rejected", "Used"] as const;
 
 export type ContributionFilter = typeof CONTRIBUTION_FILTERS[number];
-export type ContributionSort = "Newest" | "Oldest" | "Product";
-export type Contribution = { submission: AnnotationSubmission; annotation: AnnotationItem };
+export type ContributionSort = "Newest" | "Oldest" | "Product" | "User";
+
+export type Contribution = {
+  key: string;
+  submission: AnnotationSubmission;
+  annotation: AnnotationItem;
+  annotations: AnnotationItem[];
+};
 
 export type BoxEditorTarget = {
   source: "suggestion" | "contribution" | "add";

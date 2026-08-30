@@ -1,5 +1,6 @@
 import type { InventoryBatchItem, InventoryItem, ManualInventoryResponse } from "../../types/api";
 import { ApiError, JSON_HEADERS, normalizeApiError, requestJson, requestJsonResponse } from "./client";
+import { appendUploadFile } from "./upload";
 
 export type { ManualInventoryResponse } from "../../types/api";
 
@@ -63,13 +64,9 @@ export async function addInventoryItem(
   return data;
 }
 
-export function updateInventoryByImage(imageUri: string, action: "Added" | "Removed") {
+export async function updateInventoryByImage(imageUri: string, action: "Added" | "Removed") {
   const formData = new FormData();
-  formData.append("file", {
-    uri: imageUri,
-    name: "inventory-image.jpg",
-    type: "image/jpeg",
-  } as any);
+  await appendUploadFile(formData, "file", imageUri, "inventory-image.jpg", "image/jpeg");
   return requestJson<any>(`/inventory/image/update?action=${action}`, {
     method: "POST",
     body: formData,

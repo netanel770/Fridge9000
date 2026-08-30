@@ -19,6 +19,7 @@ import {
   updateInventoryBatchExpiry,
 } from "../src/services/api";
 import type { InventoryBatchItem } from "../src/types/api";
+import { confirmAction } from "../src/utils/confirm";
 
 function effectiveExpiry(batch: InventoryBatchItem) {
   return batch.expiry_date || batch.expiry_estimate_date || null;
@@ -78,29 +79,18 @@ export default function ExpiredItemsScreen() {
     loadData();
   }, []));
 
-  function confirmRemove(batch: InventoryBatchItem) {
-    Alert.alert(
-      "Remove expired products?",
-      `Remove ${batch.quantity} ${batch.name} item(s) expiring on ${effectiveExpiry(batch)}?`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Remove",
-          style: "destructive",
-          onPress: async () => {
-            setBusyBatchId(batch.id);
-            try {
-              await removeInventoryBatch(batch.id);
-              setBatches((previous) => previous.filter((item) => item.id !== batch.id));
-            } catch (e: any) {
-              Alert.alert("Remove failed", e.message || "Could not remove this batch.");
-            } finally {
-              setBusyBatchId(null);
-            }
-          },
-        },
-      ],
-    );
+  async function confirmRemove(batch: InventoryBatchItem) {
+    const confirmed = await confirmAction({ title: "Remove expired products?", message: `Remove ${batch.quantity} ${batch.name} item(s) expiring on ${effectiveExpiry(batch)}?`, confirmText: "Remove", destructive: true });
+    if (!confirmed) return;
+    setBusyBatchId(batch.id);
+    try {
+      await removeInventoryBatch(batch.id);
+      setBatches((previous) => previous.filter((item) => item.id !== batch.id));
+    } catch (e: any) {
+      Alert.alert("Remove failed", e.message || "Could not remove this batch.");
+    } finally {
+      setBusyBatchId(null);
+    }
   }
 
   async function saveExpiry(batch: InventoryBatchItem) {

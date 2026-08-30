@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { router, useFocusEffect } from "expo-router";
-import { ActivityIndicator, Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { getAlerts, getInventory, getInventoryBatches } from "../src/services/api";
 import type { AlertItem, InventoryBatchItem, InventoryItem } from "../src/types/api";
@@ -125,6 +125,16 @@ export default function HomeScreen() {
   const openCount = batches.filter((batch) => batch.quantity > 0 && batch.open_unit_remaining_percent != null).length;
 
   function openSuggestionMenu(suggestion: Suggestion) {
+    if (Platform.OS === "web") {
+      if (window.confirm(`${suggestion.title}\n\nDismiss this suggestion permanently?`)) {
+        setHiddenUntil((value) => ({ ...value, [suggestion.key]: Number.MAX_SAFE_INTEGER }));
+        return;
+      }
+      if (window.confirm(`${suggestion.title}\n\nRemind you again in 4 hours?`)) {
+        setHiddenUntil((value) => ({ ...value, [suggestion.key]: Date.now() + 4 * 3600000 }));
+      }
+      return;
+    }
     Alert.alert(suggestion.title, "Hide this suggestion?", [
       { text: "Cancel", style: "cancel" },
       { text: "Remind later", onPress: () => setHiddenUntil((value) => ({ ...value, [suggestion.key]: Date.now() + 4 * 3600000 })) },

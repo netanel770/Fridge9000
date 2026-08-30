@@ -4,6 +4,7 @@ import {
   Text,
   StyleSheet,
   Alert,
+  Platform,
 } from "react-native";
 
 import * as DocumentPicker from "expo-document-picker";
@@ -12,11 +13,16 @@ import { router } from "expo-router";
 
 import { uploadReceiptPdf } from "../src/services/api";
 import { AppButton, Card, ScreenHeader } from "../src/components/ui";
+import { useWebImageAcquisition } from "../src/components/useWebImageAcquisition";
 import { colors, spacing, typography } from "../src/theme";
 
 export default function ReceiptUploadScreen() {
   const [selectedFile, setSelectedFile] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+  const webImages = useWebImageAcquisition({
+    onImage: (image) => setSelectedFile({ uri: image.uri, name: image.fileName, mimeType: image.mimeType }),
+    onError: (message) => Alert.alert("Camera unavailable", message),
+  });
 
   async function pickReceipt() {
     const result = await DocumentPicker.getDocumentAsync({
@@ -36,6 +42,10 @@ export default function ReceiptUploadScreen() {
   }
 
   async function takePhoto() {
+    if (Platform.OS === "web") {
+      webImages.openWebcam();
+      return;
+    }
     const permission = await ImagePicker.requestCameraPermissionsAsync();
     if (permission.status !== "granted") {
       Alert.alert("Permission required", "Camera access is required to take a photo.");
@@ -84,11 +94,12 @@ export default function ReceiptUploadScreen() {
 
   return (
     <View style={styles.container}>
+      {webImages.cameraModal}
       <ScreenHeader title="Upload receipt" subtitle="Choose a receipt photo, image, or PDF." />
       <Card>
         <View style={styles.actions}>
-          <AppButton label="Take photo" icon="camera-outline" variant="secondary" onPress={takePhoto} />
-          <AppButton label={selectedFile ? "Choose another file" : "Choose receipt"} icon="document-attach-outline" variant="secondary" onPress={pickReceipt} />
+          <AppButton label={Platform.OS === "web" ? "Use Webcam" : "Take photo"} icon="camera-outline" variant="secondary" onPress={takePhoto} />
+          <AppButton label={selectedFile ? "Choose another file" : Platform.OS === "web" ? "Upload receipt file" : "Choose receipt"} icon="document-attach-outline" variant="secondary" onPress={pickReceipt} />
           <Text style={styles.fileText} numberOfLines={2}>
             {selectedFile ? `Selected: ${selectedFile.name}` : "No receipt selected"}
           </Text>

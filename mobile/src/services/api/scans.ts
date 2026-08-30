@@ -1,5 +1,19 @@
-import type { DetectionItem, LatestScan, RecentScan, ReviewItem, UploadScanResponse } from "../../types/api";
-import { ApiError, JSON_HEADERS, apiUrl, normalizeApiError, requestJson, requestJsonResponse } from "./client";
+import type {
+  DetectionItem,
+  LatestScan,
+  RecentScan,
+  ReviewItem,
+  UploadScanResponse,
+} from "../../types/api";
+import {
+  ApiError,
+  JSON_HEADERS,
+  apiUrl,
+  normalizeApiError,
+  requestJson,
+  requestJsonResponse,
+} from "./client";
+import { appendUploadFile } from "./upload";
 
 export async function getLatestScan(): Promise<LatestScan | null> {
   const data = await requestJson<any>("/scans/latest");
@@ -17,24 +31,39 @@ export async function submitReview(
   mode: "Added" | "Removed",
   source: "scan" | "receipt" = "scan",
 ) {
-  const { data, response } = await requestJsonResponse<any>(`/scans/${scanId}/review`, {
-    method: "POST",
-    headers: JSON_HEADERS,
-    body: JSON.stringify({ mode, items, source }),
-  });
+  const { data, response } = await requestJsonResponse<any>(
+    `/scans/${scanId}/review`,
+    {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ mode, items, source }),
+    },
+  );
+
   if (data.ok === false) {
-    throw new ApiError(normalizeApiError(data, "Review submit failed"), response.status, data);
+    throw new ApiError(
+      normalizeApiError(data, "Review submit failed"),
+      response.status,
+      data,
+    );
   }
+
   return data;
 }
 
-export function uploadScanImage(imageUri: string): Promise<UploadScanResponse> {
+export async function uploadScanImage(
+  imageUri: string,
+): Promise<UploadScanResponse> {
   const formData = new FormData();
-  formData.append("file", {
-    uri: imageUri,
-    name: "fridge-scan.jpg",
-    type: "image/jpeg",
-  } as any);
+
+  await appendUploadFile(
+    formData,
+    "file",
+    imageUri,
+    "fridge-scan.jpg",
+    "image/jpeg",
+  );
+
   return requestJson<UploadScanResponse>("/door/closed/upload", {
     method: "POST",
     body: formData,

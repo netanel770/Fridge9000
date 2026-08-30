@@ -7,8 +7,10 @@ import {
   Pressable,
   ActivityIndicator,
   Alert,
+  Platform,
 } from "react-native";
 import * as ImagePicker from "expo-image-picker";
+import { useWebImageAcquisition } from "../src/components/useWebImageAcquisition";
 import { uploadScanImage } from "../src/services/api";
 
 type Mode = "Added" | "Removed";
@@ -17,8 +19,16 @@ export default function UpdateInventoryScreen() {
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("Added");
   const [loading, setLoading] = useState(false);
+  const webImages = useWebImageAcquisition({
+    onImage: (image) => setImageUri(image.uri),
+    onError: (message) => Alert.alert("Image unavailable", message),
+  });
 
   async function pickImage() {
+    if (Platform.OS === "web") {
+      webImages.uploadPicture();
+      return;
+    }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ["images"],
       allowsEditing: false,
@@ -31,6 +41,10 @@ export default function UpdateInventoryScreen() {
   }
 
   async function takePhoto() {
+    if (Platform.OS === "web") {
+      webImages.openWebcam();
+      return;
+    }
     const permission = await ImagePicker.requestCameraPermissionsAsync();
     if (permission.status !== "granted") {
       Alert.alert("Permission required", "Camera access is required to take a photo.");
@@ -96,12 +110,12 @@ export default function UpdateInventoryScreen() {
       </View>
 
       <Pressable style={styles.secondaryButton} onPress={takePhoto}>
-        <Text style={styles.secondaryButtonText}>Take Photo</Text>
+        <Text style={styles.secondaryButtonText}>{Platform.OS === "web" ? "Use Webcam" : "Take Photo"}</Text>
       </Pressable>
 
       <Pressable style={styles.secondaryButton} onPress={pickImage}>
         <Text style={styles.secondaryButtonText}>
-          {imageUri ? "Choose Another Image" : "Pick Image"}
+          {imageUri ? "Choose Another Image" : Platform.OS === "web" ? "Upload Picture" : "Pick Image"}
         </Text>
       </Pressable>
 
@@ -122,6 +136,7 @@ export default function UpdateInventoryScreen() {
           </Text>
         )}
       </Pressable>
+      {webImages.cameraModal}
     </View>
   );
 }

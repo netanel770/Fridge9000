@@ -20,6 +20,7 @@ import {
 import { API_BASE_URL } from "../src/services/config";
 import type { InventoryBatchItem } from "../src/types/api";
 import { useAuthenticatedImage } from "../src/components/useAuthenticatedImage";
+import { confirmAction, showMessage } from "../src/utils/confirm";
 
 const QUICK_LEVELS = [
   { label: "Full", value: 100 },
@@ -194,18 +195,14 @@ export default function AdjustOpenProductScreen() {
     try {
       const result = await updateInventoryBatchRemaining(selectedBatch.id, percent);
       setSaving(false);
-      Alert.alert(
+      await showMessage(
         percent === 0 ? "Product finished" : "Amount saved",
         percent === 0
           ? `One ${itemName} unit was removed from inventory.`
           : `${itemName} was updated to ${percent}% remaining.`,
-        [{
-          text: "OK",
-          onPress: () => loadBatches(result.batch.id).catch((e: any) =>
-            Alert.alert("Refresh failed", e.message || "Could not refresh the product.")),
-        }],
-        { cancelable: false },
       );
+      await loadBatches(result.batch.id).catch((e: any) =>
+        Alert.alert("Refresh failed", e.message || "Could not refresh the product."));
     } catch (e: any) {
       Alert.alert("Update failed", e.message || "Could not update the remaining amount.");
       setSaving(false);
@@ -216,19 +213,13 @@ export default function AdjustOpenProductScreen() {
     setRemainingPercent(percent);
   }
 
-  function saveDraft() {
+  async function saveDraft() {
     if (remainingPercent === 0 && selectedBatch) {
-      Alert.alert(
-        "Mark product as finished?",
-        `This will remove one ${itemName} unit from the ${expiryDate(selectedBatch)} batch.`,
-        [
-          { text: "Cancel", style: "cancel" },
-          { text: "Finish", style: "destructive", onPress: () => persistRemaining(0) },
-        ],
-      );
+      const confirmed = await confirmAction({ title: "Mark product as finished?", message: `This will remove one ${itemName} unit from the ${expiryDate(selectedBatch)} batch.`, confirmText: "Finish", destructive: true });
+      if (confirmed) await persistRemaining(0);
       return;
     }
-    persistRemaining(remainingPercent);
+    await persistRemaining(remainingPercent);
   }
 
   function updateFromImageTap(y: number) {

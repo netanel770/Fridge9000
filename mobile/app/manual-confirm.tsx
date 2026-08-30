@@ -9,6 +9,7 @@ import {
 } from "react-native";
 import { useState } from "react";
 import { manualInventoryUpdate } from "../src/services/api";
+import { showMessage } from "../src/utils/confirm";
 
 export default function ManualConfirmScreen() {
   const params = useLocalSearchParams<{
@@ -37,12 +38,8 @@ export default function ManualConfirmScreen() {
     try {
       await manualInventoryUpdate(itemName, mode, quantityChange, expiryDate, expirySource);
 
-      Alert.alert("Success", "Inventory updated successfully.", [
-        {
-          text: "OK",
-          onPress: () => router.replace("/inventory"),
-        },
-      ]);
+      await showMessage("Success", "Inventory updated successfully.");
+      router.replace("/inventory");
     } catch (e: any) {
       Alert.alert("Update failed", e.message || "Unknown error");
     } finally {
