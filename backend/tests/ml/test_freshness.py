@@ -1,9 +1,14 @@
 import unittest
 
+import pytest
+
 try:
     from backend.freshness import classification_probabilities, parse_freshness_class
 except ImportError:
     from freshness import classification_probabilities, parse_freshness_class
+
+
+pytestmark = pytest.mark.ml
 
 
 class FreshnessClassificationHelpersTest(unittest.TestCase):

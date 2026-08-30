@@ -3,6 +3,9 @@ import pytest
 from core import google_auth
 
 
+pytestmark = pytest.mark.unit
+
+
 def _valid_claims(**overrides):
     claims = {
         "sub": "google-subject-123",

@@ -8,8 +8,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, call, patch
 
+import pytest
+
 import training_providers as providers
 from core.config import DEFAULT_KAGGLE_MACHINE_SHAPE, _training_setting
+
+
+pytestmark = pytest.mark.ml
 
 
 class TrainingProviderTests(unittest.TestCase):

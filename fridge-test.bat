@@ -36,17 +36,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [3/9] Running training-provider tests...
-pytest backend/test_training_providers.py -v
-if errorlevel 1 (
-    echo [FAIL] Training-provider tests failed.
-    set "FAILED=1"
-) else (
-    echo [PASS] Training-provider tests passed.
-)
-
-echo.
-echo [4/9] Running Kaggle worker tests...
+echo [3/9] Running Kaggle worker tests...
 pytest kaggle_trainer/test_train.py -v
 if errorlevel 1 (
     echo [FAIL] Kaggle worker tests failed.
@@ -56,17 +46,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [5/9] Stopping isolated test database...
-docker compose -f "%TEST_COMPOSE%" -p "%TEST_PROJECT%" down
-if errorlevel 1 (
-    echo [FAIL] Could not cleanly stop the test environment.
-    set "FAILED=1"
-) else (
-    echo [PASS] Test environment stopped.
-)
-
-echo.
-echo [6/9] Running TypeScript checks...
+echo [4/9] Running TypeScript checks...
 pushd "mobile" >nul
 call npx tsc --noEmit
 if errorlevel 1 (
@@ -77,7 +57,17 @@ if errorlevel 1 (
 )
 
 echo.
-echo [7/9] Running mobile lint...
+echo [5/9] Running mobile Jest tests...
+call npm run test:ci
+if errorlevel 1 (
+    echo [FAIL] Mobile Jest tests failed.
+    set "FAILED=1"
+) else (
+    echo [PASS] Mobile Jest tests passed.
+)
+
+echo.
+echo [6/9] Running mobile lint...
 call npm run lint
 if errorlevel 1 (
     echo [FAIL] Mobile lint failed.
@@ -87,7 +77,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [8/9] Running Expo Doctor...
+echo [7/9] Running Expo Doctor...
 call npx expo-doctor
 if errorlevel 1 (
     echo [FAIL] Expo Doctor failed.
@@ -98,13 +88,23 @@ if errorlevel 1 (
 popd >nul
 
 echo.
-echo [9/9] Checking Git diff whitespace/errors...
+echo [8/9] Checking Git diff whitespace/errors...
 git diff --check
 if errorlevel 1 (
     echo [FAIL] git diff --check failed.
     set "FAILED=1"
 ) else (
     echo [PASS] git diff --check passed.
+)
+
+echo.
+echo [9/9] Stopping isolated test database...
+docker compose -f "%TEST_COMPOSE%" -p "%TEST_PROJECT%" down
+if errorlevel 1 (
+    echo [FAIL] Could not cleanly stop the test environment.
+    set "FAILED=1"
+) else (
+    echo [PASS] Test environment stopped.
 )
 
 echo.

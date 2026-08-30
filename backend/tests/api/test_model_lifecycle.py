@@ -17,6 +17,19 @@ from backend.class_aware_metrics import build_class_aware_comparison
 
 pytestmark = [pytest.mark.integration, pytest.mark.api]
 
+DEFAULT_ACTIVE_CLASSES = ["Apple", "Banana", "Milk"]
+DEFAULT_COMPARISON_CLASSES = ["Apple", "Milk"]
+
+
+def _metric_row(map50_95, *, precision=None, recall=None, map50=None):
+    """Build one complete metric row while keeping scenario intent visible."""
+    return {
+        "precision": map50_95 if precision is None else precision,
+        "recall": map50_95 if recall is None else recall,
+        "map50": map50_95 if map50 is None else map50,
+        "map50_95": map50_95,
+    }
+
 
 class ImmediateThread:
     def __init__(self, target, args=(), daemon=None):
@@ -43,12 +56,7 @@ class DeferredThread:
 
 
 class FakeYolo:
-    metrics = {
-        "precision": 0.81,
-        "recall": 0.76,
-        "map50": 0.79,
-        "map50_95": 0.62,
-    }
+    metrics = _metric_row(0.62, precision=0.81, recall=0.76, map50=0.79)
 
     def __init__(self, path):
         self.path = Path(path)
@@ -237,6 +245,16 @@ def _active_count(connection):
         return cursor.fetchone()[0]
 
 
+def _assert_unchanged_active_model(connection, expected_version):
+    """Assert the fail-closed invariant shared by rejected lifecycle actions."""
+    assert _active_count(connection) == 1
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT version FROM model_versions WHERE status = 'active';")
+        assert cursor.fetchone()[0] == expected_version
+        cursor.execute("SELECT COUNT(*) FROM model_activation_history;")
+        assert cursor.fetchone()[0] == 0
+
+
 def _prepare_contributions(submission_factory):
     return {
         "assisted": submission_factory("assisted", "approved", "Apple"),
@@ -291,10 +309,12 @@ def _run_comparison(
     candidate_per_class=None,
 ):
     active_evaluation = _evaluation(
-        active_classes or ["Apple", "Milk"], active_metrics, active_per_class
+        active_classes or DEFAULT_COMPARISON_CLASSES,
+        active_metrics,
+        active_per_class,
     )
     candidate_evaluation = _evaluation(
-        candidate_classes or ["Apple", "Milk"],
+        candidate_classes or DEFAULT_COMPARISON_CLASSES,
         candidate_metrics,
         candidate_per_class,
     )
@@ -324,16 +344,16 @@ def _run_policy_comparison(
     submission_factory("manual", "approved", "Milk")
     trained = _run_successful_training(test_client, lifecycle_context)
     candidate_version = trained["result"]["model_version"]
-    active_classes = ["Apple", "Banana", "Milk"]
-    active_overall = {
-        "precision": 0.84, "recall": 0.82, "map50": 0.86, "map50_95": 0.80
-    }
-    candidate_overall = {
-        "precision": 0.77, "recall": 0.75, "map50": 0.79,
-        "map50_95": candidate_overall_map50_95,
-    }
+    active_classes = DEFAULT_ACTIVE_CLASSES
+    active_overall = _metric_row(0.80, precision=0.84, recall=0.82, map50=0.86)
+    candidate_overall = _metric_row(
+        candidate_overall_map50_95,
+        precision=0.77,
+        recall=0.75,
+        map50=0.79,
+    )
     active_per_class = {
-        name: {"precision": 0.84, "recall": 0.82, "map50": 0.86, "map50_95": 0.80}
+        name: _metric_row(0.80, precision=0.84, recall=0.82, map50=0.86)
         for name in active_classes
     }
     active_identities = {name.casefold() for name in active_classes}
@@ -341,16 +361,15 @@ def _run_policy_comparison(
     candidate_per_class = {}
     for name in candidate_classes:
         if name.casefold() in active_identities:
-            candidate_per_class[name] = {
-                "precision": 0.83, "recall": 0.81, "map50": 0.85,
-                "map50_95": shared_candidate_map50_95,
-            }
+            candidate_per_class[name] = _metric_row(
+                shared_candidate_map50_95,
+                precision=0.83,
+                recall=0.81,
+                map50=0.85,
+            )
         else:
             score = added_map50_95[name]
-            candidate_per_class[name] = {
-                "precision": score, "recall": score, "map50": score,
-                "map50_95": score,
-            }
+            candidate_per_class[name] = _metric_row(score)
     compared = _run_comparison(
         test_client,
         lifecycle_context,
@@ -2405,12 +2424,7 @@ def test_invalid_promotion_and_rollback_leave_active_model_unchanged(
     ]
     assert [response.status_code for response in attempts] == [404, 400, 409, 409, 404, 409]
     assert "did not outperform" in attempts[2].json()["detail"]
-    assert _active_count(db_connection) == 1
-    with db_connection.cursor() as cursor:
-        cursor.execute("SELECT version FROM model_versions WHERE status = 'active';")
-        assert cursor.fetchone()[0] == lifecycle_context.active_version
-        cursor.execute("SELECT COUNT(*) FROM model_activation_history;")
-        assert cursor.fetchone()[0] == 0
+    _assert_unchanged_active_model(db_connection, lifecycle_context.active_version)
 
 
 def test_stale_comparison_cannot_promote_against_a_new_active_model(
@@ -2459,12 +2473,7 @@ def test_stale_comparison_cannot_promote_against_a_new_active_model(
     assert progress["promotion_evaluation"]["reasons"][0]["code"] == "stale_comparison"
     assert progress["actions"]["can_promote"] is False
     assert progress["latest_candidate"]["version"] == candidate_version
-    assert _active_count(db_connection) == 1
-    with db_connection.cursor() as cursor:
-        cursor.execute("SELECT version FROM model_versions WHERE status = 'active';")
-        assert cursor.fetchone()[0] == "replacement-active"
-        cursor.execute("SELECT COUNT(*) FROM model_activation_history;")
-        assert cursor.fetchone()[0] == 0
+    _assert_unchanged_active_model(db_connection, "replacement-active")
 
 
 def test_reordered_same_classes_use_global_rule_and_can_promote(
@@ -2621,12 +2630,7 @@ def test_expansion_policy_blocks_regression_low_quality_and_removed_classes(
         f"/models/{candidate_version}/promote", json={"comparison_id": comparison_id}
     )
     assert rejected.status_code == 409
-    assert _active_count(db_connection) == 1
-    with db_connection.cursor() as cursor:
-        cursor.execute("SELECT version FROM model_versions WHERE status = 'active';")
-        assert cursor.fetchone()[0] == lifecycle_context.active_version
-        cursor.execute("SELECT COUNT(*) FROM model_activation_history;")
-        assert cursor.fetchone()[0] == 0
+    _assert_unchanged_active_model(db_connection, lifecycle_context.active_version)
 
 
 def test_malformed_expansion_metrics_fail_closed_everywhere(
@@ -2690,12 +2694,7 @@ def test_invalid_candidate_file_blocks_eligible_promotion_without_history(
     )
     assert rejected.status_code == 409
     assert "missing" in rejected.json()["detail"].lower()
-    assert _active_count(db_connection) == 1
-    with db_connection.cursor() as cursor:
-        cursor.execute("SELECT version FROM model_versions WHERE status = 'active';")
-        assert cursor.fetchone()[0] == lifecycle_context.active_version
-        cursor.execute("SELECT COUNT(*) FROM model_activation_history;")
-        assert cursor.fetchone()[0] == 0
+    _assert_unchanged_active_model(db_connection, lifecycle_context.active_version)
 
 
 @pytest.mark.parametrize("value", ["nan", "inf", "-0.1", "1.1"])

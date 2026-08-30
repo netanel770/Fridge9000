@@ -4,7 +4,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
+
 import train_yolo_candidate as trainer
+
+
+pytestmark = pytest.mark.ml
 
 
 class FakeTrainingModel:
