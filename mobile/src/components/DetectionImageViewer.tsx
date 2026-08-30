@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { StyleProp, ViewStyle } from "react-native";
-import { Image, StyleSheet, Text, View } from "react-native";
+import { Image, Pressable, StyleSheet, Text, View } from "react-native";
 
 import type { DetectionItem } from "../types/api";
 import { colors, radius } from "../theme";
 import { projectBoundingBox } from "../utils/imageCoordinates";
-import { getApiRequestHeaders } from "../services/api";
+import { useAuthenticatedImage } from "./useAuthenticatedImage";
 
 type DetectionImageViewerProps = {
   imageUri: string;
@@ -27,11 +27,8 @@ export function DetectionImageViewer({
   style,
 }: DetectionImageViewerProps) {
   const [viewSize, setViewSize] = useState({ width: 0, height: 0 });
-  const [imageUnavailable, setImageUnavailable] = useState(false);
-
-  useEffect(() => {
-    setImageUnavailable(false);
-  }, [imageUri]);
+  const image = useAuthenticatedImage(imageUri);
+  const imageUnavailable = image.status === "ERROR";
 
   return (
     <View
@@ -41,16 +38,18 @@ export function DetectionImageViewer({
         setViewSize((current) => current.width === width && current.height === height ? current : { width, height });
       }}
     >
-      <Image
-        source={{ uri: imageUri, headers: getApiRequestHeaders() }}
+      {image.resolvedUri ? <Image
+        source={{ uri: image.resolvedUri }}
         style={StyleSheet.absoluteFillObject}
         resizeMode="contain"
-        onError={() => setImageUnavailable(true)}
-      />
+        onLoad={image.onLoad}
+        onError={image.onError}
+      /> : null}
       {imageUnavailable ? (
-        <View accessibilityRole="text" style={styles.imageFallback}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Retry image" style={styles.imageFallback} onPress={image.retry}>
           <Text style={styles.imageFallbackText}>Image unavailable</Text>
-        </View>
+          <Text style={styles.imageRetryText}>Tap to retry</Text>
+        </Pressable>
       ) : null}
       <View pointerEvents="none" style={StyleSheet.absoluteFillObject}>
         {!imageUnavailable ? detections.map((detection) => {
@@ -98,4 +97,5 @@ const styles = StyleSheet.create({
   labelText: { color: colors.primaryText, fontSize: 12, fontWeight: "800" },
   imageFallback: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center", padding: 16 },
   imageFallbackText: { color: colors.textMuted, fontSize: 13, fontWeight: "700" },
+  imageRetryText: { color: colors.primary, fontSize: 12, fontWeight: "700", marginTop: 4 },
 });

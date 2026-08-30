@@ -20,10 +20,10 @@ import {
   getScanDetections,
   getAllInventory,
   getInventoryBatches,
-  getApiRequestHeaders,
   submitReview,
 } from "../src/services/api";
 import { ProductLabelInput } from "../src/components/ProductLabelInput";
+import { useAuthenticatedImage } from "../src/components/useAuthenticatedImage";
 import { useAuth } from "../src/features/auth/AuthContext";
 
 import { API_BASE_URL } from "../src/services/config";
@@ -32,6 +32,18 @@ import type { DetectionItem, InventoryBatchItem, ReviewItem } from "../src/types
 
 function normalizeItemName(value: string) {
   return value.trim().toLowerCase();
+}
+
+function BoxedDetectionImage({ scanId, detectionId }: { scanId: number; detectionId: number }) {
+  const image = useAuthenticatedImage(`${API_BASE_URL}/scans/${scanId}/detections/${detectionId}/boxed`);
+  if (!image.resolvedUri) {
+    return image.status === "ERROR" ? (
+      <Pressable style={styles.imageRetry} onPress={image.retry} accessibilityRole="button">
+        <Text>Image unavailable - tap to retry</Text>
+      </Pressable>
+    ) : null;
+  }
+  return <Image source={{ uri: image.resolvedUri }} style={styles.detectedImage} resizeMode="contain" onLoad={image.onLoad} onError={image.onError} />;
 }
 
 function getBatchExpiryDate(batch: InventoryBatchItem) {
@@ -339,14 +351,7 @@ export default function ReviewScreen() {
           <View style={styles.card}>
             {scanId && item.id && item.x1 != null && (
               <View style={styles.imageBox}>
-                <Image
-                  source={{
-                    uri: `${API_BASE_URL}/scans/${scanId}/detections/${item.id}/boxed`,
-                    headers: getApiRequestHeaders(),
-                  }}
-                  style={styles.detectedImage}
-                  resizeMode="contain"
-                />
+                <BoxedDetectionImage scanId={scanId} detectionId={item.id} />
               </View>
             )}
 
@@ -543,6 +548,12 @@ const styles = StyleSheet.create({
   detectedImage: {
     width: "100%",
     height: "100%",
+  },
+  imageRetry: {
+    width: "100%",
+    height: "100%",
+    alignItems: "center",
+    justifyContent: "center",
   },
   label: {
     fontSize: 14,

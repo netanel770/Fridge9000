@@ -14,12 +14,12 @@ import {
 import type { LayoutChangeEvent } from "react-native";
 import {
   getInventoryBatches,
-  getApiRequestHeaders,
   updateInventoryBatchRemaining,
   uploadProductRepresentativeImage,
 } from "../src/services/api";
 import { API_BASE_URL } from "../src/services/config";
 import type { InventoryBatchItem } from "../src/types/api";
+import { useAuthenticatedImage } from "../src/components/useAuthenticatedImage";
 
 const QUICK_LEVELS = [
   { label: "Full", value: 100 },
@@ -148,7 +148,6 @@ export default function AdjustOpenProductScreen() {
   const [remainingPercent, setRemainingPercent] = useState(100);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [imageAvailable, setImageAvailable] = useState(true);
   const [imageVersion, setImageVersion] = useState(0);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [highContrastOutline, setHighContrastOutline] = useState(initialHighContrastPreference);
@@ -181,6 +180,8 @@ export default function AdjustOpenProductScreen() {
   const selectedUnit = unitOptions.find((option) => option.key === selectedUnitKey) || null;
   const selectedBatch = selectedUnit?.batch || null;
   const imageUri = `${API_BASE_URL}/items/${itemId}/representative-image?v=${imageVersion}`;
+  const image = useAuthenticatedImage(imageUri);
+  const imageAvailable = image.status !== "ERROR";
 
   function selectUnit(option: UnitOption) {
     setSelectedUnitKey(option.key);
@@ -251,7 +252,6 @@ export default function AdjustOpenProductScreen() {
     setUploadingImage(true);
     try {
       await uploadProductRepresentativeImage(itemId, result.assets[0].uri);
-      setImageAvailable(true);
       setImageVersion((version) => version + 1);
       Alert.alert("Outline created", "The product outline is now available.");
     } catch (e: any) {
@@ -309,27 +309,32 @@ export default function AdjustOpenProductScreen() {
             <View style={styles.productVisual}>
               {imageAvailable ? (
                 <>
-                  <Image
-                    source={{ uri: imageUri, headers: getApiRequestHeaders() }}
+                  {image.resolvedUri ? <Image
+                    source={{ uri: image.resolvedUri }}
                     style={styles.productImage}
                     tintColor={highContrastOutline ? "#ffffff" : "#d1d5db"}
                     resizeMode="contain"
-                    onError={() => setImageAvailable(false)}
-                  />
+                    onLoad={image.onLoad}
+                    onError={image.onError}
+                  /> : null}
                   <View style={[styles.remainingImageClip, { height: `${remainingPercent}%` }]}>
-                    <Image
-                      source={{ uri: imageUri, headers: getApiRequestHeaders() }}
+                    {image.resolvedUri ? <Image
+                      source={{ uri: image.resolvedUri }}
                       style={styles.filledProductImage}
                       tintColor={highContrastOutline ? "#111111" : undefined}
                       resizeMode="contain"
-                      onError={() => setImageAvailable(false)}
-                    />
+                      onLoad={image.onLoad}
+                      onError={image.onError}
+                    /> : null}
                   </View>
                 </>
               ) : (
                 <View style={styles.placeholder}>
                   <Text style={styles.placeholderIcon}>[ ]</Text>
                   <Text style={styles.placeholderText}>No scan image available for {itemName}</Text>
+                  <Pressable style={styles.addImageButton} onPress={image.retry}>
+                    <Text style={styles.addImageText}>Retry image</Text>
+                  </Pressable>
                   <Pressable
                     style={[styles.addImageButton, uploadingImage && styles.disabled]}
                     onPress={addProductImage}
@@ -348,7 +353,7 @@ export default function AdjustOpenProductScreen() {
                   highContrastOutline && styles.fillLineHighContrast,
                 ]}
               />
-              {imageAvailable && (
+              {image.status === "LOADED" && (
                 <Pressable
                   style={styles.imageTapLayer}
                   onPress={(event) => updateFromImageTap(event.nativeEvent.locationY)}

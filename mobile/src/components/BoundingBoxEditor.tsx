@@ -1,10 +1,10 @@
 import { useRef, useState } from "react";
-import { Image, PanResponder, StyleSheet, Text, View } from "react-native";
+import { Image, PanResponder, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { colors, radius } from "../theme";
 import { getContainedImageLayout, getMinimumAnnotationBoxSize, projectBoundingBox, resizeBoundingBox, screenPointToImage, translateBoundingBox } from "../utils/imageCoordinates";
 import type { BoxCorner, ImageBoundingBox } from "../utils/imageCoordinates";
-import { getApiRequestHeaders } from "../services/api";
+import { useAuthenticatedImage } from "./useAuthenticatedImage";
 
 type Props = { imageUri: string; imageWidth: number; imageHeight: number; box: ImageBoundingBox | null; label?: string; onBoxChange: (box: ImageBoundingBox | null) => void };
 type Snapshot = { box: ImageBoundingBox | null; scale: number };
@@ -13,8 +13,8 @@ type EditorResponders = { draw: Responder; move: Responder; handles: Record<BoxC
 
 export function BoundingBoxEditor({ imageUri, imageWidth, imageHeight, box, label, onBoxChange }: Props) {
   const [viewSize, setViewSize] = useState({ width: 0, height: 0 });
-  const [imageStatus, setImageStatus] = useState("WAITING");
   const [activeControl, setActiveControl] = useState<BoxCorner | "move" | "draw" | null>(null);
+  const image = useAuthenticatedImage(imageUri);
   const latest = useRef({ box, imageWidth, imageHeight, viewSize, onBoxChange });
   const snapshot = useRef<Snapshot>({ box: null, scale: 1 });
   const drawStart = useRef<{ x: number; y: number } | null>(null);
@@ -117,17 +117,16 @@ export function BoundingBoxEditor({ imageUri, imageWidth, imageHeight, box, labe
 
   const editor = (
       <View collapsable={false} {...(!box ? editorResponders.draw.panHandlers : {})} style={styles.container} onLayout={(event) => setViewSize(event.nativeEvent.layout)}>
-        <Image
-          source={{ uri: imageUri, headers: getApiRequestHeaders() }}
+        {image.resolvedUri ? <Image
+          source={{ uri: image.resolvedUri }}
           style={[StyleSheet.absoluteFillObject, styles.image]}
           resizeMode="contain"
-          onLoadStart={() => setImageStatus("LOADING")}
-          onLoad={() => setImageStatus("LOADED")}
-          onError={(event) => setImageStatus(`ERROR: ${event.nativeEvent.error || "unknown image error"}`)}
-        />
-        <View pointerEvents="none" style={styles.debugBadge}>
-          <Text style={styles.debugText}>{imageStatus}</Text>
-        </View>
+          onLoad={image.onLoad}
+          onError={image.onError}
+        /> : null}
+        <Pressable style={styles.debugBadge} onPress={image.retry} disabled={image.status !== "ERROR"}>
+          <Text style={styles.debugText}>{image.status}{image.status === "ERROR" ? " - tap to retry" : ""}</Text>
+        </Pressable>
         {!box ? <View pointerEvents="none" style={styles.drawPrompt}><Text style={styles.drawPromptText}>Tap or drag on the product to create a box</Text></View> : null}
         <View pointerEvents="box-none" style={styles.overlayLayer}>
           {projected ? <View collapsable={false} style={[styles.box, projected, activeControl && styles.activeBox]}>

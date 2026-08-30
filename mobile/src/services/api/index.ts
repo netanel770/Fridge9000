@@ -7,6 +7,7 @@ export * from "./inventory";
 export * from "./households";
 export * from "./models";
 export * from "./outlines";
+export * from "./protectedImages";
 export * from "./receipts";
 export * from "./scans";
 export * from "./systemAdmins";

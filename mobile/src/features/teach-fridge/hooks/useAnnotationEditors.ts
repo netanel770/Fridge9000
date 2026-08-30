@@ -1,7 +1,6 @@
-import { Image } from "react-native";
 import { useState } from "react";
 
-import { createAnnotationSubmission, getAllInventory, getApiRequestHeaders, getScanImageUrl, updateAnnotationBox, updateAnnotationLabel } from "../../../services/api";
+import { createAnnotationSubmission, getAllInventory, getAuthenticatedImageSize, getScanImageUrl, updateAnnotationBox, updateAnnotationLabel } from "../../../services/api";
 import type { DetectionItem, InventoryItem, RecentScan } from "../../../types/api";
 import { areImageDimensionsCompatible, getMinimumAnnotationBoxSize } from "../../../utils/imageCoordinates";
 import { detectionBox } from "../annotationUtils";
@@ -168,19 +167,15 @@ export function useAnnotationEditors({
       throw new Error(`Scan #${scan.id} does not have valid image dimensions.`);
     }
     const imageUrl = getScanImageUrl(scan.id);
-    await new Promise<void>((resolve, reject) => {
-      Image.getSizeWithHeaders(imageUrl, getApiRequestHeaders(), (width, height) => {
-        if (width <= 0 || height <= 0) {
-          reject(new Error(`Scan #${scan.id} image dimensions could not be read.`));
-          return;
-        }
-        if (!areImageDimensionsCompatible(scan.image_width, scan.image_height, width, height)) {
-          reject(new Error(`Scan #${scan.id} image geometry is incompatible: stored ${scan.image_width} × ${scan.image_height}, decoded ${width} × ${height}.`));
-          return;
-        }
-        resolve();
-      }, () => reject(new Error(`The original image for scan #${scan.id} could not be loaded.`)));
+    const { width, height } = await getAuthenticatedImageSize(imageUrl).catch(() => {
+      throw new Error(`The original image for scan #${scan.id} could not be loaded.`);
     });
+    if (width <= 0 || height <= 0) {
+      throw new Error(`Scan #${scan.id} image dimensions could not be read.`);
+    }
+    if (!areImageDimensionsCompatible(scan.image_width, scan.image_height, width, height)) {
+      throw new Error(`Scan #${scan.id} image geometry is incompatible: stored ${scan.image_width} × ${scan.image_height}, decoded ${width} × ${height}.`);
+    }
     setBoxError("");
     setBoxEditor({ source: "add", scanId: scan.id, imageWidth: scan.image_width, imageHeight: scan.image_height, label: "", originalBox: null, box: null });
     await loadInventoryLabels();

@@ -28,25 +28,41 @@ export type AuthTokenPayload = {
   user: unknown;
 };
 
-type RequestOptions = RequestInit & { auth?: boolean; retryAuth?: boolean };
+type AuthOptions = { auth?: boolean; retryAuth?: boolean; headers?: HeadersInit };
+type RequestOptions = RequestInit & AuthOptions;
+type StatusResponse = { status: number };
 
 let sessionTransport: SessionTransport | null = null;
 let selectedHouseholdId: number | null = null;
 let refreshRequest: Promise<boolean> | null = null;
+const apiContextListeners = new Set<() => void>();
 
 export function configureSessionTransport(transport: SessionTransport | null) {
   sessionTransport = transport;
 }
 
 export function setSelectedHouseholdHeader(householdId: number | null) {
+  if (selectedHouseholdId === householdId) return;
   selectedHouseholdId = householdId;
+  notifyApiContextChanged();
 }
 
-export function getApiRequestHeaders() {
-  const headers: Record<string, string> = {};
-  const token = sessionTransport?.getAccessToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
-  if (selectedHouseholdId != null) headers["X-Fridge-ID"] = String(selectedHouseholdId);
+export function notifyApiContextChanged() {
+  apiContextListeners.forEach((listener) => listener());
+}
+
+export function subscribeToApiContextChanges(listener: () => void) {
+  apiContextListeners.add(listener);
+  return () => { apiContextListeners.delete(listener); };
+}
+
+function requestHeaders(providedHeaders: HeadersInit | undefined, auth: boolean) {
+  const headers = new Headers(providedHeaders);
+  if (auth) {
+    const token = sessionTransport?.getAccessToken();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+  }
+  if (selectedHouseholdId != null) headers.set("X-Fridge-ID", String(selectedHouseholdId));
   return headers;
 }
 
@@ -126,25 +142,35 @@ async function refreshAccessToken() {
   return refreshRequest;
 }
 
-export async function requestJsonResponse<T>(path: string, options: RequestOptions = {}) {
-  const { auth = true, retryAuth = true, headers: providedHeaders, ...init } = options;
-  const headers = new Headers(providedHeaders);
-  if (auth) {
-    const token = sessionTransport?.getAccessToken();
-    if (token) headers.set("Authorization", `Bearer ${token}`);
-  }
-  if (selectedHouseholdId != null) headers.set("X-Fridge-ID", String(selectedHouseholdId));
-  let response = await fetch(apiUrl(path), { ...init, headers });
+export async function requestWithAuthRetry<T extends StatusResponse>(
+  execute: (headers: Headers) => Promise<T>,
+  options: AuthOptions = {},
+) {
+  const { auth = true, retryAuth = true, headers: providedHeaders } = options;
+  let response = await execute(requestHeaders(providedHeaders, auth));
   if (auth && retryAuth && response.status === 401 && await refreshAccessToken()) {
-    const retryHeaders = new Headers(providedHeaders);
-    const token = sessionTransport?.getAccessToken();
-    if (token) retryHeaders.set("Authorization", `Bearer ${token}`);
-    if (selectedHouseholdId != null) retryHeaders.set("X-Fridge-ID", String(selectedHouseholdId));
-    response = await fetch(apiUrl(path), { ...init, headers: retryHeaders });
+    response = await execute(requestHeaders(providedHeaders, auth));
     if (response.status === 401) await sessionTransport?.clearSession();
   }
+  return response;
+}
+
+export async function requestJsonResponse<T>(path: string, options: RequestOptions = {}) {
+  const { auth = true, retryAuth = true, headers: providedHeaders, ...init } = options;
+  const response = await requestWithAuthRetry(
+    (headers) => fetch(apiUrl(path), { ...init, headers }),
+    { auth, retryAuth, headers: providedHeaders },
+  );
   const data = await handleJsonResponse<T>(response);
   return { data, response };
+}
+
+export function requestApiResponse(path: string, options: RequestOptions = {}) {
+  const { auth = true, retryAuth = true, headers: providedHeaders, ...init } = options;
+  return requestWithAuthRetry(
+    (headers) => fetch(apiUrl(path), { ...init, headers }),
+    { auth, retryAuth, headers: providedHeaders },
+  );
 }
 
 export async function requestJson<T>(path: string, init?: RequestOptions): Promise<T> {

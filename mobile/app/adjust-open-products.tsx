@@ -12,26 +12,30 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { getApiRequestHeaders, getInventory, getInventoryBatches } from "../src/services/api";
+import { getInventory, getInventoryBatches } from "../src/services/api";
 import { API_BASE_URL } from "../src/services/config";
 import type { InventoryBatchItem, InventoryItem } from "../src/types/api";
 import { EmptyState, ScreenHeader } from "../src/components/ui";
+import { useAuthenticatedImage } from "../src/components/useAuthenticatedImage";
 import { colors, radius, spacing } from "../src/theme";
 
 function ProductThumbnail({ itemId }: { itemId: number }) {
-  const [available, setAvailable] = useState(true);
+  const image = useAuthenticatedImage(`${API_BASE_URL}/items/${itemId}/representative-image?generate=false`);
   return (
     <View style={styles.thumbnailBox}>
-      {available ? (
+      {image.resolvedUri ? (
         <Image
-          source={{ uri: `${API_BASE_URL}/items/${itemId}/representative-image?generate=false`, headers: getApiRequestHeaders() }}
+          source={{ uri: image.resolvedUri }}
           style={styles.thumbnail}
           resizeMode="contain"
-          onError={() => setAvailable(false)}
+          onLoad={image.onLoad}
+          onError={image.onError}
         />
-      ) : (
-        <Text style={styles.thumbnailFallback}>[ ]</Text>
-      )}
+      ) : image.status === "ERROR" ? (
+        <Pressable accessibilityRole="button" accessibilityLabel="Retry product image" onPress={image.retry}>
+          <Text style={styles.thumbnailFallback}>[ ]</Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }

@@ -1,7 +1,7 @@
 import * as SecureStore from "expo-secure-store";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { configureSessionTransport, getCurrentUser, loginGoogle, loginPassword, logoutSession, refreshSession, registerPassword, type AuthTokenPayload } from "../../services/api";
+import { configureSessionTransport, getCurrentUser, loginGoogle, loginPassword, logoutSession, notifyApiContextChanged, refreshSession, registerPassword, type AuthTokenPayload } from "../../services/api";
 import type { AuthSessionResponse, PublicUser } from "../../types/api";
 
 const REFRESH_TOKEN_KEY = "fridge9000.refresh-token";
@@ -26,12 +26,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     accessTokenRef.current = null;
     setUser(null);
     await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
+    notifyApiContextChanged();
   }, []);
 
   const acceptSession = useCallback(async (session: AuthTokenPayload | AuthSessionResponse) => {
     await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, session.refresh_token);
     accessTokenRef.current = session.access_token;
     setUser(session.user as PublicUser);
+    notifyApiContextChanged();
   }, []);
 
   useEffect(() => {

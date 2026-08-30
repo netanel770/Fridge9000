@@ -4,7 +4,8 @@ import * as ImagePicker from "expo-image-picker";
 import { Ionicons } from "@expo/vector-icons";
 
 import { AppButton, Card, ScreenHeader, StatusBadge } from "../src/components/ui";
-import { analyzeFreshness, getApiRequestHeaders, getInventoryBatches, removeInventoryBatchQuantity } from "../src/services/api";
+import { useAuthenticatedImage } from "../src/components/useAuthenticatedImage";
+import { analyzeFreshness, getInventoryBatches, removeInventoryBatchQuantity } from "../src/services/api";
 import { API_BASE_URL } from "../src/services/config";
 import { colors, radius, spacing, typography } from "../src/theme";
 import type {
@@ -15,6 +16,18 @@ import type {
 function absoluteImageUrl(path: string) {
   if (path.startsWith("http://") || path.startsWith("https://")) return path;
   return `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function FreshnessPreview({ uri }: { uri: string }) {
+  const image = useAuthenticatedImage(uri);
+  if (!image.resolvedUri) {
+    return image.status === "ERROR" ? (
+      <Pressable style={styles.previewRetry} onPress={image.retry} accessibilityRole="button">
+        <Text style={styles.analyzingText}>Image unavailable - tap to retry</Text>
+      </Pressable>
+    ) : <View style={styles.preview} />;
+  }
+  return <Image source={{ uri: image.resolvedUri }} style={styles.preview} resizeMode="contain" onLoad={image.onLoad} onError={image.onError} />;
 }
 
 function normalizedItemName(value: string) {
@@ -150,11 +163,7 @@ export default function RotDetectionScreen() {
       ) : (
         <>
           <Card>
-            <Image
-              source={{ uri: result ? absoluteImageUrl(result.image_url) : imageUri, ...(result ? { headers: getApiRequestHeaders() } : {}) }}
-              style={styles.preview}
-              resizeMode="contain"
-            />
+            <FreshnessPreview uri={result ? absoluteImageUrl(result.image_url) : imageUri} />
             {!result ? (
               <View style={styles.actions}>
                 <AppButton
@@ -261,6 +270,7 @@ const styles = StyleSheet.create({
   actionMessage: { ...typography.body, color: colors.textMuted, textAlign: "center", lineHeight: 21 },
   actions: { alignSelf: "stretch", gap: spacing.sm, marginTop: spacing.md },
   preview: { width: "100%", height: 320, borderRadius: radius.lg, backgroundColor: colors.surfaceMuted },
+  previewRetry: { width: "100%", height: 320, borderRadius: radius.lg, backgroundColor: colors.surfaceMuted, alignItems: "center", justifyContent: "center" },
   analyzing: { flexDirection: "row", justifyContent: "center", alignItems: "center", gap: spacing.sm, marginTop: spacing.md },
   analyzingText: { color: colors.textSecondary, fontWeight: "700" },
   errorBox: { gap: spacing.sm, marginTop: spacing.md, padding: spacing.md, borderRadius: radius.lg, backgroundColor: colors.dangerBg },
