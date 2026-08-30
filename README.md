@@ -12,16 +12,17 @@ Fridge 9000 is **mobile-first** with Android/iOS as the primary experience, whil
 
 ## Highlights
 
-- **YOLO product detection** with labels, confidence scores and bounding boxes
-- **Inventory tracking** with quantities, batches, expiration dates and open-product state
-- **Receipt OCR** for images and PDFs
-- **Freshness classification** using a dedicated image-classification pipeline
-- **SAM2 segmentation** for representative product masks and outlines
-- **Users and households** with role-based access and household isolation
-- **Teach Fridge**, a moderated human-in-the-loop annotation and retraining workflow
-- **Versioned model lifecycle** with training, comparison, promotion, rejection and rollback
-- **Local or Kaggle training** with shared training and provenance semantics
-- **Mobile and web support** while preserving native app behavior
+* **YOLO product detection** with labels, confidence scores and bounding boxes
+* **Inventory tracking** with quantities, batches, expiration dates and open-product state
+* **Receipt OCR** for images and PDFs
+* **Freshness classification** using a dedicated image-classification pipeline
+* **SAM2 segmentation** for representative product masks and outlines
+* **Users and households** with role-based access and household isolation
+* **Teach Fridge**, a moderated human-in-the-loop annotation and retraining workflow
+* **Versioned model lifecycle** with training, comparison, promotion, rejection and rollback
+* **Local or Kaggle training** with shared training and provenance semantics
+* **Mobile and web support** while preserving native app behavior
+* **Automated validation** across backend, ML, API, end-to-end, mobile and web-facing application logic
 
 ---
 
@@ -51,9 +52,9 @@ Fridge 9000 supports authenticated users organized into households.
 
 Household roles include:
 
-- **Owner**
-- **Manager**
-- **Member**
+* **Owner**
+* **Manager**
+* **Member**
 
 Users can create or join households, switch between households, and manage membership according to their role.
 
@@ -107,11 +108,11 @@ The raw `RELABEL` and `ADJUST_BOX` actions remain separate for provenance and tr
 
 Contribution history includes:
 
-- Correction status
-- Submitter identity
-- Product information
-- Training usage
-- Moderation state
+* Correction status
+* Submitter identity
+* Product information
+* Training usage
+* Moderation state
 
 Contributions that have already been used for training remain available as read-only history, but are hidden from the normal contribution view unless the **Used** filter is selected.
 
@@ -185,17 +186,17 @@ The active detector continues serving predictions while another model is trained
 
 The system records:
 
-- Dataset versions
-- Training runs
-- Starting weights
-- Model versions
-- Model artifacts
-- Evaluation metrics
-- Class-aware comparisons
-- Training provenance
-- Promotion history
-- Activation history
-- Rollback history
+* Dataset versions
+* Training runs
+* Starting weights
+* Model versions
+* Model artifacts
+* Evaluation metrics
+* Class-aware comparisons
+* Training provenance
+* Promotion history
+* Activation history
+* Rollback history
 
 Promotion is always explicit.
 
@@ -235,14 +236,14 @@ Candidates are compared against the current active detector.
 
 Evaluation includes:
 
-- Precision
-- Recall
-- mAP50
-- mAP50-95
-- Shared-class performance
-- Added-class performance
-- Per-class metrics
-- Class preservation
+* Precision
+* Recall
+* mAP50
+* mAP50-95
+* Shared-class performance
+* Added-class performance
+* Per-class metrics
+* Class preservation
 
 The comparison separates established products from newly introduced products so strong performance on a new class cannot hide a serious regression on existing classes.
 
@@ -311,11 +312,11 @@ Fridge 9000 is designed as an app first.
 
 On Android/iOS, the project keeps native Expo/React Native behavior for:
 
-- Camera capture
-- Gallery selection
-- Secure storage
-- Navigation
-- Native file handling
+* Camera capture
+* Gallery selection
+* Secure storage
+* Navigation
+* Native file handling
 
 Expo Web provides equivalent capabilities using browser-specific implementations where necessary:
 
@@ -345,6 +346,12 @@ Fridge9000/
 │   ├── db/           # Database access
 │   ├── services/     # Domain/application services
 │   └── tests/
+│       ├── unit/
+│       ├── integration/
+│       ├── api/
+│       ├── ml/
+│       ├── e2e/
+│       └── fixtures/
 │
 ├── mobile/
 │   ├── app/          # Expo Router screens
@@ -367,18 +374,40 @@ The mobile code follows the same direction, with feature-specific components, ho
 
 ## Tech Stack
 
-| Area | Technology |
-| --- | --- |
-| Mobile / Web | Expo, React Native, React, Expo Router, TypeScript |
-| Backend | FastAPI, Python |
-| Database | PostgreSQL |
-| Object Detection | Ultralytics YOLO |
-| Segmentation | SAM2 |
-| Freshness | PyTorch |
-| OCR | Tesseract |
-| Authentication | JWT, Argon2, Google OAuth |
-| Training | Local or Kaggle |
-| Infrastructure | Docker Compose |
+| Area             | Technology                                            |
+| ---------------- | ----------------------------------------------------- |
+| Mobile / Web     | Expo, React Native, React, Expo Router, TypeScript    |
+| Backend          | FastAPI, Python                                       |
+| Database         | PostgreSQL                                            |
+| Object Detection | Ultralytics YOLO                                      |
+| Segmentation     | SAM2                                                  |
+| Freshness        | PyTorch                                               |
+| OCR              | Tesseract                                             |
+| Authentication   | JWT, Argon2, Google OAuth                             |
+| Training         | Local or Kaggle                                       |
+| Testing          | pytest, Jest, jest-expo, React Native Testing Library |
+| Infrastructure   | Docker Compose                                        |
+
+---
+
+## AI-Assisted Development
+
+Generative AI tools, including **ChatGPT and Codex**, were used during the development of Fridge 9000 as engineering assistants.
+
+They were used for tasks such as:
+
+* Code review and identifying potential issues
+* Exploring implementation and refactoring approaches
+* Generating and expanding automated tests
+* Debugging assistance
+* Reviewing architecture and project structure
+* Improving technical documentation
+
+AI-generated suggestions were not treated as authoritative or integrated automatically. Changes were reviewed, adapted where necessary, and validated against the project's requirements and automated test suite before being accepted.
+
+The project's architecture, feature requirements, system behavior, machine-learning lifecycle, integration decisions and final implementation remained under the responsibility of the development team.
+
+Development-time generative AI is separate from the AI/ML systems implemented by Fridge 9000 itself, including **YOLO object detection, SAM2 segmentation, freshness classification, and the Teach Fridge human-in-the-loop training workflow**.
 
 ---
 
@@ -386,10 +415,10 @@ The mobile code follows the same direction, with feature-specific components, ho
 
 ### Requirements
 
-- Docker Desktop
-- Node.js and npm
-- Expo-compatible Android/iOS device, emulator, or modern browser
-- PowerShell on Windows for the provided launcher
+* Docker Desktop
+* Node.js and npm
+* Expo-compatible Android/iOS device, emulator, or modern browser
+* PowerShell on Windows for the provided launcher
 
 ### Setup
 
@@ -406,12 +435,12 @@ Configuration can be copied from `.env.example` into `.env` when needed.
 
 This includes settings for:
 
-- JWT authentication
-- Google OAuth
-- Training provider
-- Kaggle
-- Promotion thresholds
-- API configuration
+* JWT authentication
+* Google OAuth
+* Training provider
+* Kaggle
+* Promotion thresholds
+* API configuration
 
 Never commit real credentials or production secrets.
 
@@ -474,33 +503,146 @@ See `.env.example` for the available training and Kaggle configuration.
 
 ## Testing
 
-A full Windows validation runner is included:
+Fridge 9000 includes automated testing across the backend, machine-learning lifecycle, API workflows, Kaggle training worker, and shared mobile/web frontend.
+
+The current validation suite contains **319 automated tests**:
+
+* **229 backend tests**
+* **23 Kaggle worker tests**
+* **67 mobile/web frontend tests across 8 Jest suites**
+
+### Backend Testing
+
+The backend uses **pytest** with an isolated PostgreSQL test database.
+
+Tests are organized by purpose:
+
+```text
+backend/tests/
+├── unit/
+├── integration/
+├── api/
+├── ml/
+├── e2e/
+└── fixtures/
+```
+
+Coverage includes:
+
+* Authentication and JWT behavior
+* Refresh-session security
+* User and household permissions
+* Cross-household data isolation
+* Inventory and batch management
+* Scanning and annotations
+* Annotation moderation
+* Receipt processing
+* Freshness analysis
+* Model training and lifecycle behavior
+* Dataset and training-provider behavior
+* Class-aware model comparison
+* Model-promotion policy and edge cases
+* End-to-end workflows across the HTTP API and PostgreSQL database
+
+Expensive ML boundaries are replaced with deterministic test doubles where appropriate so the normal suite does not require full model training or external services.
+
+Backend tests can be run with:
+
+```bash
+pytest
+```
+
+### Mobile and Web Frontend Testing
+
+The Expo frontend uses **Jest**, **jest-expo**, and **React Native Testing Library**.
+
+Because Fridge 9000 shares application logic across Android, iOS and Expo Web, the frontend suite validates behavior used across both the native and browser experiences.
+
+The frontend tests cover:
+
+* API request and error handling
+* Access-token authentication
+* Refresh-token recovery
+* Automatic request retry after authentication refresh
+* Concurrent `401` handling with single-flight token refresh
+* Authentication session restoration
+* Sign-in, registration, Google authentication and logout state
+* Household loading, selection and switching
+* `X-Fridge-ID` household propagation
+* Authentication and household navigation gates
+* Teach Fridge annotation and contribution logic
+* Model lifecycle presentation logic
+* Bounding-box and image-coordinate transformations
+* Authenticated image loading
+* Product-label behavior
+
+Frontend tests can be run with:
+
+```bash
+cd mobile
+npm test
+```
+
+For deterministic non-watch validation:
+
+```bash
+npm run test:ci
+```
+
+Additional frontend validation includes:
+
+```bash
+npx tsc --noEmit
+npm run lint
+npx expo-doctor
+```
+
+### Kaggle Worker Testing
+
+The remote training worker has its own automated test suite:
+
+```bash
+pytest kaggle_trainer/test_train.py -v
+```
+
+The worker tests validate training behavior without requiring live Kaggle execution during normal project validation.
+
+### Full Validation
+
+A complete Windows validation runner is included:
 
 ```bat
 fridge-test.bat
 ```
 
-It runs:
+It performs the project's backend, ML, frontend and repository checks using an isolated test environment.
 
-- Backend tests
-- Training-provider tests
-- Kaggle worker tests
-- TypeScript checks
-- Expo lint
-- Expo Doctor
-- Git diff validation
+The validation pipeline includes:
 
-using an isolated test database.
+1. Starting the isolated PostgreSQL test database
+2. Running the complete backend pytest suite
+3. Running the Kaggle worker tests
+4. Running TypeScript validation
+5. Running the frontend Jest suite
+6. Running Expo lint
+7. Running Expo Doctor
+8. Running Git diff validation
+9. Cleaning up the isolated test database
 
-Frontend checks can also be run manually:
+The current full validation passes with:
 
-```bash
-cd mobile
-
-npx tsc --noEmit
-npm run lint
-npx expo-doctor
+```text
+Backend             229 passed
+Kaggle worker        23 passed
+Frontend Jest        67 passed
+TypeScript           passed
+Expo lint            passed
+Expo Doctor          18/18
+Git diff check       passed
+Full validation      passed
 ```
+
+The test database is removed after validation, including when the validation runner exits after a failed stage.
 
 ---
 
