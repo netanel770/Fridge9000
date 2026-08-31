@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { Pressable, ScrollView, Text, View } from "react-native";
-import { Redirect, useLocalSearchParams } from "expo-router";
+import { Redirect, useLocalSearchParams, useRouter } from "expo-router";
 
 import { useLifecycleJob } from "../src/components/LifecycleJobProvider";
 import { uniqueProductLabels } from "../src/components/ProductLabelInput";
 import { ScreenHeader } from "../src/components/ui";
 import { ContributionsTab } from "../src/features/teach-fridge/components/contributions/ContributionsTab";
+import { ContributionsMenu } from "../src/features/teach-fridge/components/contributions/ContributionsMenu";
+import { ReviewQueueScreen } from "../src/features/teach-fridge/components/contributions/ReviewQueueScreen";
 import { AnnotationModals } from "../src/features/teach-fridge/components/modals/AnnotationModals";
 import { QuarantineSheet } from "../src/features/teach-fridge/components/modals/QuarantineSheet";
 import { RollbackSheet } from "../src/features/teach-fridge/components/modals/RollbackSheet";
@@ -41,8 +43,9 @@ export default function TeachFridgeScreen() {
 }
 
 function AdminTeachFridgeScreen() {
+  const router = useRouter();
   const { selected } = useHousehold();
-  const { scanId: requestedScanIdParam, detectionId: requestedDetectionIdParam, addMissed, tab } = useLocalSearchParams<{ scanId?: string; detectionId?: string; addMissed?: string; tab?: string }>();
+  const { scanId: requestedScanIdParam, detectionId: requestedDetectionIdParam, addMissed, tab, contributionView } = useLocalSearchParams<{ scanId?: string; detectionId?: string; addMissed?: string; tab?: string; contributionView?: string }>();
   const requestedScanId = Number(requestedScanIdParam);
   const requestedDetectionId = Number(requestedDetectionIdParam);
   const hasValidRequestedScan = Number.isInteger(requestedScanId) && requestedScanId > 0;
@@ -54,9 +57,9 @@ function AdminTeachFridgeScreen() {
   const selectionStartHandler = useRef<(() => void) | null>(null);
   const suggestions = useSuggestions({ active: Boolean(selected), requestedScanId, requestedDetectionId, hasValidRequestedScan, hasTargetedDetection, addMissed, addMissedHandler, selectionStartHandler });
   const contributionsState = useContributions(Boolean(selected) && activeTab === "Contributions");
-  const moderation = useModeration(activeTab === "Contributions");
   const { scans, selectedScan, detections, loadingScans, loadingDetections, error: suggestionsError, setError: setSuggestionsError, selectScan, loadSuggestions } = suggestions;
   const { contributions, loadContributions } = contributionsState;
+  const moderation = useModeration(activeTab === "Contributions" && contributionView === "review", loadContributions);
   const editors = useAnnotationEditors({ selectedScan, refreshScan: selectScan, loadContributions, setSuggestionsError });
   const {
     imageDetection, setImageDetection, editDetection, setEditDetection, finalLabel, setFinalLabel, inventoryLabels,
@@ -94,7 +97,22 @@ function AdminTeachFridgeScreen() {
 
   useEffect(() => {
     if (tab === "AI Progress") setActiveTab("AI Progress");
+    if (tab === "Contributions") setActiveTab("Contributions");
   }, [tab]);
+
+  const selectTab = useCallback((teachTab: TeachTab) => {
+    setActiveTab(teachTab);
+    if (teachTab === "Contributions") {
+      router.setParams({ tab: "Contributions", contributionView: undefined });
+    }
+  }, [router]);
+
+  const openContributionView = useCallback((view: "history" | "review") => {
+    router.push({
+      pathname: "/teach-fridge",
+      params: { tab: "Contributions", contributionView: view },
+    });
+  }, [router]);
 
   const productLabelSuggestions = useMemo(() => uniqueProductLabels([
     ...inventoryLabels.map((item) => item.name),
@@ -110,7 +128,7 @@ function AdminTeachFridgeScreen() {
       <View accessibilityRole="tablist" style={styles.tabs}>
         {(selected ? TABS : ["AI Progress"] as TeachTab[]).map((teachTab) => {
           const selected = activeTab === teachTab;
-          return <Pressable key={teachTab} accessibilityRole="tab" accessibilityState={{ selected }} onPress={() => setActiveTab(teachTab)} style={[styles.tab, selected && styles.activeTab]}><Text style={[styles.tabText, selected && styles.activeTabText]}>{teachTab}</Text></Pressable>;
+          return <Pressable key={teachTab} accessibilityRole="tab" accessibilityState={{ selected }} onPress={() => selectTab(teachTab)} style={[styles.tab, selected && styles.activeTab]}><Text style={[styles.tabText, selected && styles.activeTabText]}>{teachTab}</Text></Pressable>;
         })}
       </View>
 
@@ -133,7 +151,7 @@ function AdminTeachFridgeScreen() {
           onReload={loadSuggestions}
           onSelectScan={(scan) => { void selectScan(scan); }}
           onAddMissed={() => { void openAddBoxEditor(); }}
-          onViewContributions={() => setActiveTab("Contributions")}
+          onViewContributions={() => selectTab("Contributions")}
           onCorrectLabel={(detection) => { void openLabelEditor(detection); }}
           onRemove={(detection) => { setRemoveError(""); setRemoveDetection(detection); }}
           onViewImage={setImageDetection}
@@ -141,7 +159,13 @@ function AdminTeachFridgeScreen() {
           onConfirm={(detection) => { setConfirmError(""); setConfirmDetection(detection); }}
         />
       ) : activeTab === "Contributions" ? (
-        <ContributionsTab contributions={contributionsState} productLabelSuggestions={productLabelSuggestions} contributionMessage={contributionMessage} displayNameForModel={displayNameForModel} onViewImage={setContributionImage} onEditLabel={(contribution) => { void openContributionEditor(contribution); }} onEditBox={openContributionBoxEditor} moderation={moderation} allowEditing={false} />
+        contributionView === "history" ? (
+          <ContributionsTab contributions={contributionsState} productLabelSuggestions={productLabelSuggestions} contributionMessage={contributionMessage} displayNameForModel={displayNameForModel} onViewImage={setContributionImage} onEditLabel={(contribution) => { void openContributionEditor(contribution); }} onEditBox={openContributionBoxEditor} allowEditing={false} />
+        ) : contributionView === "review" ? (
+          <ReviewQueueScreen moderation={moderation} />
+        ) : (
+          <ContributionsMenu onHistory={() => openContributionView("history")} onReviewQueue={() => openContributionView("review")} />
+        )
       ) : (
         <AiProgressTab progress={progress} training={training} quarantine={quarantine} rollback={rollback} actions={actions} lifecycle={lifecycle} />
       )}

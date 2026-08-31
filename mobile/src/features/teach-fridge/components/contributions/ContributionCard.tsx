@@ -4,13 +4,14 @@ import { Ionicons } from "@expo/vector-icons";
 import { AppButton, Card, StatusBadge } from "../../../../components/ui";
 import { colors } from "../../../../theme";
 import type { AnnotationSubmission } from "../../../../types/api";
-import { formatIsraelTime, parseApiDate } from "../../../../utils/date";
+import { formatIsraelTime } from "../../../../utils/date";
 import {
   contributionActionTitle,
   contributionProductLabelForContribution,
 } from "../../annotationUtils";
 import {
   contributionChange,
+  contributionLifecycleUsage,
   contributionStatus,
   statusTone,
   trainingState,
@@ -42,14 +43,10 @@ export function ContributionCard({
   showSubmitter?: boolean;
 }) {
   const { annotation, annotations, submission } = contribution;
-  const usages = annotations
-    .flatMap((item) => item.training_usages || [])
-    .sort(
-      (left, right) =>
-        parseApiDate(right.used_at).getTime() - parseApiDate(left.used_at).getTime(),
-    );
-  const latestUsage = usages[0] ?? submission.training_usages?.[0];
-  const displayedStatus = latestUsage ? "used" : submission.status;
+  const lifecycleUsage = contributionLifecycleUsage(contribution);
+  const hasTrainingHistory = annotations.some((item) => item.training_usages?.length)
+    || Boolean(submission.training_usages?.length);
+  const displayedStatus = hasTrainingHistory ? "used" : submission.status;
   const lifecycleCopy = trainingStateCopy(trainingState(submission));
   const canEdit =
     allowEditing
@@ -102,7 +99,7 @@ export function ContributionCard({
           </Text>
         </View>
         <StatusBadge
-          label={contributionStatus(displayedStatus, Boolean(latestUsage))}
+          label={contributionStatus(displayedStatus, hasTrainingHistory)}
           tone={statusTone(displayedStatus)}
         />
       </View>
@@ -174,12 +171,12 @@ export function ContributionCard({
         ) : null}
       </View>
 
-      {latestUsage ? (
+      {lifecycleUsage ? (
         <View style={styles.usedModelBox}>
           <Ionicons name="sparkles" size={20} color={colors.successFg} />
           <View style={styles.detectionCopy}>
             <Text style={styles.usedModelTitle}>
-              Used in {displayNameForModel({ version: latestUsage.model_version })}
+              Used in {displayNameForModel({ version: lifecycleUsage.model_version })}
             </Text>
             <Text style={styles.usedModelMeta}>
               Used for training · This contribution is read-only.
@@ -188,7 +185,7 @@ export function ContributionCard({
         </View>
       ) : null}
 
-      {!latestUsage && submission.status === "used" ? (
+      {!hasTrainingHistory && submission.status === "used" ? (
         <Text style={styles.readOnlyText}>
           Used for AI learning · Read-only
         </Text>

@@ -8,11 +8,9 @@ import type {
   ContributionSort,
   Contribution,
 } from "../../types";
-import type { ModerationState } from "../../hooks/useModeration";
 import { styles } from "../../styles";
 import { ContributionCard } from "./ContributionCard";
 import { ContributionFilters } from "./ContributionFilters";
-import { ModerationQueue } from "./ModerationQueue";
 
 export function ContributionsTab({
   contributions,
@@ -22,7 +20,6 @@ export function ContributionsTab({
   onViewImage,
   onEditLabel,
   onEditBox,
-  moderation,
   allowEditing = true,
 }: {
   contributions: {
@@ -49,7 +46,6 @@ export function ContributionsTab({
   onViewImage: (contribution: Contribution) => void;
   onEditLabel: (contribution: Contribution) => void;
   onEditBox: (contribution: Contribution) => void;
-  moderation?: ModerationState;
   allowEditing?: boolean;
 }) {
   const viewingTrainingHistory = contributions.filter === "Used";
@@ -184,20 +180,6 @@ export function ContributionsTab({
             ))}
           </View>
         ))}
-
-      {moderation ? (
-        <ModerationQueue
-          submissions={moderation.submissions}
-          loading={moderation.loading}
-          error={moderation.error}
-          message={moderation.message}
-          moderatingSubmissionId={moderation.moderatingSubmissionId}
-          expandedAnnotationIds={moderation.expandedAnnotationIds}
-          onReload={moderation.loadModeration}
-          onModerate={moderation.moderateSubmission}
-          onToggleDetails={moderation.toggleAnnotationDetails}
-        />
-      ) : null}
     </View>
   );
 }

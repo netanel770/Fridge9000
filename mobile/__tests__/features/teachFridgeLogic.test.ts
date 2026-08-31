@@ -12,6 +12,7 @@ import {
 } from "../../src/features/teach-fridge/submissionCorrections";
 import {
   contributionChange,
+  contributionLifecycleUsage,
   contributionStatus,
   filterAndSortContributions,
   groupContributions,
@@ -148,6 +149,37 @@ describe("contribution status, filtering, and grouping", () => {
     expect(filterAndSortContributions([apple, pear, used], "All", "", "", "Newest").map((item) => item.key)).toEqual(["apple", "pear"]);
     expect(filterAndSortContributions([apple, pear, used], "Used", "", "", "Newest").map((item) => item.key)).toEqual(["used"]);
     expect(filterAndSortContributions([apple, pear], "All", "pea", "", "Newest")).toEqual([pear]);
+  });
+
+  test("uses active provenance for trusted contributions while preserving rejected history", () => {
+    const trusted = contribution("trusted", [annotation(4, "ADD", {
+      submission_id: 13,
+      source_detection_id: null,
+      final_label: "Lemon",
+      training_usages: [
+        { dataset_version: "d2", training_run_id: "r2", model_version: "model-8", model_status: "rejected", used_at: "2026-01-06T00:00:00Z" },
+        { dataset_version: "d1", training_run_id: "r1", model_version: "model-7", model_status: "active", used_at: "2026-01-05T00:00:00Z" },
+      ],
+    })], { id: 13, status: "approved", training_lifecycle_state: "trusted" });
+
+    expect(contributionLifecycleUsage(trusted)?.model_version).toBe("model-7");
+    expect(trusted.annotations[0].training_usages?.map((usage) => usage.model_version)).toEqual(["model-8", "model-7"]);
+  });
+
+  test("uses candidate provenance only for experimental contributions", () => {
+    const usages = [
+      { dataset_version: "d2", training_run_id: "r2", model_version: "candidate-8", model_status: "candidate" as const, used_at: "2026-01-06T00:00:00Z" },
+      { dataset_version: "d1", training_run_id: "r1", model_version: "model-7", model_status: "archived" as const, used_at: "2026-01-05T00:00:00Z" },
+    ];
+    const experimental = contribution("experimental", [annotation(5, "CONFIRM", { submission_id: 14, training_usages: usages })], {
+      id: 14, status: "approved", training_lifecycle_state: "experimental",
+    });
+    const eligible = contribution("eligible", [annotation(6, "CONFIRM", { submission_id: 15, training_usages: usages })], {
+      id: 15, status: "approved", training_lifecycle_state: "eligible",
+    });
+
+    expect(contributionLifecycleUsage(experimental)?.model_version).toBe("candidate-8");
+    expect(contributionLifecycleUsage(eligible)).toBeUndefined();
   });
 
   test("sorts and groups by effective product or submitter", () => {

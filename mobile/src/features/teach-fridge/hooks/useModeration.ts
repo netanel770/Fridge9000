@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getAnnotationSubmission, getAnnotationSubmissions, moderateAnnotationSubmission } from "../../../services/api";
 import type { AnnotationSubmissionDetail } from "../../../types/api";
 
-export function useModeration(active: boolean) {
+export function useModeration(active: boolean, onModerated?: () => Promise<void>) {
   const [submissions, setSubmissions] = useState<AnnotationSubmissionDetail[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -41,6 +41,7 @@ export function useModeration(active: boolean) {
     try {
       await moderateAnnotationSubmission(submissionId, status);
       setSubmissions((current) => current.filter((detail) => detail.submission.id !== submissionId));
+      await onModerated?.();
       setMessage(`Submission #${submissionId} ${status}. Contributions will show the updated status.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : `Could not mark the submission as ${status}.`);
@@ -48,7 +49,7 @@ export function useModeration(active: boolean) {
     } finally {
       setModeratingSubmissionId(null);
     }
-  }, [loadModeration, moderatingSubmissionId]);
+  }, [loadModeration, moderatingSubmissionId, onModerated]);
 
   const toggleAnnotationDetails = useCallback((annotationId: number) => {
     setExpandedAnnotationIds((current) => {

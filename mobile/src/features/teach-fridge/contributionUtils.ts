@@ -110,6 +110,24 @@ export function trainingStateCopy(state: AnnotationTrainingState) {
   };
 }
 
+export function contributionLifecycleUsage(contribution: Contribution) {
+  const usages = contribution.annotations
+    .flatMap((annotation) => annotation.training_usages || [])
+    .sort(
+      (left, right) =>
+        parseApiDate(right.used_at).getTime() - parseApiDate(left.used_at).getTime(),
+    );
+  const allUsages = usages.length ? usages : contribution.submission.training_usages || [];
+  const state = trainingState(contribution.submission);
+  if (state === "trusted") {
+    return allUsages.find((usage) => usage.model_status === "active");
+  }
+  if (state === "experimental") {
+    return allUsages.find((usage) => usage.model_status === "candidate");
+  }
+  return undefined;
+}
+
 function latestContributionUsage(contribution: Contribution) {
   const usages = contribution.annotations
     .flatMap((annotation) => annotation.training_usages || [])
