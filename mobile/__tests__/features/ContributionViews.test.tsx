@@ -1,4 +1,5 @@
 import { fireEvent, render } from "@testing-library/react-native";
+import { Text } from "react-native";
 
 import { ContributionsMenu } from "../../src/features/teach-fridge/components/contributions/ContributionsMenu";
 import { ContributionCard } from "../../src/features/teach-fridge/components/contributions/ContributionCard";
@@ -9,15 +10,34 @@ jest.mock("@expo/vector-icons", () => ({ Ionicons: () => null }));
 jest.mock("../../src/components/DetectionImageViewer", () => ({ DetectionImageViewer: () => null }));
 
 describe("contribution views", () => {
-  test("parent offers Contribution History and Review Queue navigation", async () => {
-    const onHistory = jest.fn();
-    const onReviewQueue = jest.fn();
-    const view = await render(<ContributionsMenu onHistory={onHistory} onReviewQueue={onReviewQueue} />);
+  test("both authorized sections are collapsed by default and expand independently", async () => {
+    const view = await render(<ContributionsMenu
+      history={<Text>History content</Text>}
+      reviewQueue={<Text>Queue content</Text>}
+    />);
+
+    expect(view.getByText("Contribution History")).toBeTruthy();
+    expect(view.getByText("Review Queue")).toBeTruthy();
+    expect(view.queryByText("History content")).toBeNull();
+    expect(view.queryByText("Queue content")).toBeNull();
 
     await fireEvent.press(view.getByText("Contribution History"));
+    expect(view.getByText("History content")).toBeTruthy();
+    expect(view.queryByText("Queue content")).toBeNull();
+
     await fireEvent.press(view.getByText("Review Queue"));
-    expect(onHistory).toHaveBeenCalledTimes(1);
-    expect(onReviewQueue).toHaveBeenCalledTimes(1);
+    expect(view.getByText("History content")).toBeTruthy();
+    expect(view.getByText("Queue content")).toBeTruthy();
+
+    await fireEvent.press(view.getByText("Contribution History"));
+    expect(view.queryByText("History content")).toBeNull();
+    expect(view.getByText("Queue content")).toBeTruthy();
+  });
+
+  test("does not expose Review Queue when no authorized view is supplied", async () => {
+    const view = await render(<ContributionsMenu history={<Text>History content</Text>} />);
+    expect(view.getByText("Contribution History")).toBeTruthy();
+    expect(view.queryByText("Review Queue")).toBeNull();
   });
 
   test("history retains filters and does not embed the review queue", async () => {
