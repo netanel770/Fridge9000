@@ -145,6 +145,10 @@ export function useModelLifecycleActions({
 
   const confirmRollback = useCallback(
     (version: string) => {
+      if (!progress?.actions.can_rollback) {
+        setError("Resolve the current candidate before rolling back.");
+        return;
+      }
       const targetName = rollbackTargetName(version);
 
       requestConfirmation({
@@ -183,6 +187,7 @@ export function useModelLifecycleActions({
     [
       activeModelName,
       onRollbackComplete,
+      progress,
       refreshLifecycleData,
       rollbackTargetName,
     ],

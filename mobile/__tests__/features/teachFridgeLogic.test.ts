@@ -1,4 +1,4 @@
-import type { AnnotationItem, AnnotationSubmission, AnnotationSubmissionDetail } from "../../src/types/api";
+import type { AIProgressResponse, AnnotationItem, AnnotationSubmission, AnnotationSubmissionDetail } from "../../src/types/api";
 import {
   annotationGroupActionTitle,
   combineAnnotationGroup,
@@ -20,6 +20,7 @@ import {
 } from "../../src/features/teach-fridge/contributionUtils";
 import {
   candidateStateCopy,
+  candidateLifecycleControls,
   formatMetric,
   formatMetricDifference,
   groupSubmissionsByLabel,
@@ -159,7 +160,7 @@ describe("model display and policy interpretation helpers", () => {
   test.each([
     ["eligible", "ELIGIBLE FOR PROMOTION"],
     ["comparison_stale", "COMPARISON STALE"],
-    ["not_eligible", "NOT ELIGIBLE"],
+    ["not_eligible", "NOT ELIGIBLE FOR PROMOTION"],
     ["none", "NO CANDIDATE"],
   ] as const)("maps %s candidate state", (state, label) => {
     expect(candidateStateCopy(state).label).toBe(label);
@@ -185,5 +186,22 @@ describe("model display and policy interpretation helpers", () => {
       annotation(2, "ADJUST_BOX"),
     ]);
     expect(groupSubmissionsByLabel([combined])).toEqual([{ label: "Pear", submissions: [combined] }]);
+  });
+
+  test.each([
+    ["eligible candidate", "eligible", true, { can_train: false, can_compare: false, can_promote: true, can_reject: true, can_rollback: false }, { showPromote: true, showReject: true, showTrain: false, showRollback: false }],
+    ["invalid comparison", "comparison_invalid", true, { can_train: false, can_compare: true, can_promote: false, can_reject: true, can_rollback: false }, { showCompare: true, showPromote: false, showReject: true, showRollback: false }],
+    ["auto-rejected candidate", "not_eligible", false, { can_train: true, can_compare: false, can_promote: false, can_reject: false, can_rollback: true }, { showComparisonDetails: true, showPromote: false, showReject: false, showTrain: true, showRollback: true }],
+    ["no candidate", "none", false, { can_train: true, can_compare: false, can_promote: false, can_reject: false, can_rollback: true }, { showComparisonDetails: false, showPromote: false, showReject: false, showTrain: true, showRollback: true }],
+  ] as const)("renders backend-authoritative controls for %s", (_name, state, unresolved, actions, expected) => {
+    const model = { id: 2, version: "candidate-v2", status: unresolved ? "candidate" : "rejected", created_at: createdAt };
+    const progress = {
+      candidate: unresolved ? model : null,
+      latest_candidate: state === "none" ? null : model,
+      candidate_state: state,
+      comparison: state === "none" ? null : {},
+      actions,
+    } as unknown as AIProgressResponse;
+    expect(candidateLifecycleControls(progress)).toMatchObject(expected);
   });
 });

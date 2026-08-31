@@ -35,7 +35,7 @@ export function RollbackSheet({ progress, rollback, actions, lifecycle }: {
             <UniqueProductPerformance title="Products only in Current Active" products={rollback.comparison.comparison.class_comparison.only_in_active} supportedBy="Current Active" unsupportedBy="Previous Production" cached />
             <UniqueProductPerformance title="Products only in Previous Model" products={rollback.comparison.comparison.class_comparison.only_in_rollback_target} metrics={rollback.comparison.comparison.added_class_metrics} supportedBy="Previous Production" unsupportedBy="Current Active" cached />
             <Text style={styles.rollbackInformational}>This cached historical comparison is informational and does not affect rollback availability.</Text>
-            <AppButton label={`Roll Back to ${rollbackTargetName(rollback.target.version)}`} icon="arrow-undo-outline" variant="danger" disabled={lifecycle.busy || Boolean(actions.mutation)} loading={actions.mutation === "Rollback Model"} onPress={() => actions.confirmRollback(rollback.target!.version)} />
+            <AppButton label={`Roll Back to ${rollbackTargetName(rollback.target.version)}`} icon="arrow-undo-outline" variant="danger" disabled={!progress.stats?.actions.can_rollback || lifecycle.busy || Boolean(actions.mutation)} loading={actions.mutation === "Rollback Model"} onPress={() => actions.confirmRollback(rollback.target!.version)} />
           </> : !rollback.error ? <EmptyState icon="information-circle-outline" title="No cached comparison" message={`No cached comparison is available between ${rollbackTargetName(rollback.target.version)} and ${activeModelName}. You can still select this model for rollback.`} /> : null}
         </ScrollView>
         <AppButton label="Back" variant="secondary" onPress={rollback.back} />
@@ -49,7 +49,7 @@ export function RollbackSheet({ progress, rollback, actions, lifecycle }: {
           }) : <EmptyState icon="arrow-undo-outline" title="No previous production models" message="A previous active model will appear here when rollback is available." />}
           {rollback.error ? <View style={styles.errorBox}><Text style={styles.errorText}>{rollback.error}</Text></View> : null}
         </ScrollView>
-        <View style={styles.rollbackFooter}><View style={styles.detectionAction}><AppButton label="Cancel" variant="secondary" onPress={rollback.close} /></View><View style={styles.detectionAction}><AppButton label={rollback.selectedVersion ? `Rollback to ${rollbackTargetName(rollback.selectedVersion)}` : "Select a model"} icon="arrow-undo-outline" variant="danger" disabled={!rollback.selectedVersion || lifecycle.busy || Boolean(actions.mutation)} loading={actions.mutation === "Rollback Model"} onPress={() => rollback.selectedVersion && actions.confirmRollback(rollback.selectedVersion)} /></View></View>
+        <View style={styles.rollbackFooter}><View style={styles.detectionAction}><AppButton label="Cancel" variant="secondary" onPress={rollback.close} /></View><View style={styles.detectionAction}><AppButton label={rollback.selectedVersion ? `Rollback to ${rollbackTargetName(rollback.selectedVersion)}` : "Select a model"} icon="arrow-undo-outline" variant="danger" disabled={!progress.stats?.actions.can_rollback || !rollback.selectedVersion || lifecycle.busy || Boolean(actions.mutation)} loading={actions.mutation === "Rollback Model"} onPress={() => rollback.selectedVersion && actions.confirmRollback(rollback.selectedVersion)} /></View></View>
       </>}
     </View></View>
   </Modal>;

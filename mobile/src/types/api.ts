@@ -271,6 +271,7 @@ export type PromotionReason = {
 export type PromotionEvaluation = {
   policy: string;
   eligible: boolean;
+  comparison_valid: boolean;
   mode: "same_classes" | "expanded_classes" | null;
   stale: boolean;
   thresholds: {
@@ -404,6 +405,7 @@ export type AIProgressResponse = {
     can_train: boolean;
     can_compare: boolean;
     can_promote: boolean;
+    can_reject: boolean;
     can_rollback: boolean;
   };
 };

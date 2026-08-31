@@ -696,6 +696,50 @@ def test_provider_failure_leaves_selected_submissions_eligible(
     assert _active_count(db_connection) == 1
 
 
+def test_kaggle_training_completion_immediately_finalizes_promotion_policy(
+    test_client, lifecycle_context, submission_factory, monkeypatch
+):
+    submission_factory("manual", "approved", "Lemon")
+    core_config = importlib.import_module("core.config")
+    monkeypatch.setattr(core_config, "TRAINING_PROVIDER", "kaggle")
+    monkeypatch.setattr(
+        lifecycle_context.providers,
+        "training_provider",
+        lambda name: (
+            lambda job_id, progress: {
+                "provider": name,
+                "training_run_id": f"remote-{job_id}",
+                "model_version": "candidate-kaggle-v2",
+                "comparison_id": "remote-comparison-v2",
+            }
+        ),
+    )
+    finalized = {
+        "provider": "kaggle",
+        "model_version": "candidate-kaggle-v2",
+        "comparison_id": "remote-comparison-v2",
+        "promotion_evaluation": {"eligible": True},
+        "auto_rejected": False,
+    }
+    with patch.object(
+        lifecycle_context.runtime,
+        "_finalize_candidate_comparison",
+        return_value=finalized,
+    ) as finalize:
+        response = test_client.post("/model-lifecycle/train")
+
+    assert response.status_code == 200
+    job = response.json()
+    assert job["status"] == "completed"
+    assert job["provider"] == "kaggle"
+    assert job["phase"] == "evaluating_promotion_policy"
+    assert job["result"] == finalized
+    finalize.assert_called_once()
+    version, provider_result = finalize.call_args.args
+    assert version == "candidate-kaggle-v2"
+    assert provider_result["comparison_id"] == "remote-comparison-v2"
+
+
 def test_ai_progress_is_read_only(
     test_client, db_connection, lifecycle_context, submission_factory
 ):
@@ -853,19 +897,24 @@ def test_comparison_persists_fingerprints_metrics_and_decision(
     decision = compared["result"]["promotion_evaluation"]
     assert decision["mode"] == "same_classes"
     assert decision["eligible"] is outperforms
-    assert compared["result"]["auto_rejected"] is False
+    assert compared["result"]["auto_rejected"] is (not outperforms)
     assert [reason["code"] for reason in decision["reasons"]] == (
         [] if outperforms else ["candidate_lost"]
     )
     progress = test_client.get("/ai-progress").json()
     assert progress["actions"]["can_promote"] is outperforms
+    assert progress["actions"]["can_reject"] is outperforms
     assert progress["candidate_state"] == (
         "eligible" if outperforms else "not_eligible"
     )
     assert progress["comparison"] is not None
+    if outperforms:
+        assert progress["candidate"] == progress["latest_candidate"]
+    else:
+        assert progress["candidate"] is None
 
 
-def test_losing_candidate_blocks_training_until_explicit_rejection(
+def test_losing_candidate_is_automatically_rejected_and_releases_lifecycle(
     test_client, db_connection, lifecycle_context, submission_factory
 ):
     selected = [
@@ -904,12 +953,11 @@ def test_losing_candidate_blocks_training_until_explicit_rejection(
         {"precision": 0.7, "recall": 0.7, "map50": 0.7, "map50_95": 0.6},
     )
     assert compared["result"]["promotion_evaluation"]["reasons"][0]["code"] == "candidate_lost"
-    assert compared["result"]["auto_rejected"] is False
+    assert compared["result"]["auto_rejected"] is True
     assert test_client.get("/ai-progress").json()["latest_candidate"]["version"] == candidate_version
 
     rejected = test_client.post(f"/models/{candidate_version}/reject")
-    assert rejected.status_code == 200
-    assert rejected.json()["quarantined_submission_count"] == 2
+    assert rejected.status_code == 409
     with db_connection.cursor() as cursor:
         cursor.execute("SELECT status FROM model_versions WHERE version = %s;", (candidate_version,))
         assert cursor.fetchone()[0] == "rejected"
@@ -1054,6 +1102,52 @@ def test_expanded_candidate_records_shared_regression_and_added_class_quality(
 
     assert compared["result"]["auto_rejected"] is True
     assert compared["result"]["promotion_evaluation"]["eligible"] is False
+
+
+def test_incomplete_shared_metrics_do_not_auto_reject_despite_quality_failures(
+    test_client, db_connection, lifecycle_context, submission_factory
+):
+    submission_factory("assisted", "approved", "Apple")
+    submission_factory("manual", "approved", "Milk")
+    trained = _run_successful_training(test_client, lifecycle_context)
+    candidate_version = trained["result"]["model_version"]
+    active_metrics = _metric_row(0.70)
+    candidate_metrics = _metric_row(0.45)
+    compared = _run_comparison(
+        test_client,
+        lifecycle_context,
+        candidate_version,
+        active_metrics,
+        candidate_metrics,
+        active_classes=["Apple", "Milk"],
+        candidate_classes=["Apple", "Milk", "Cheese"],
+        active_per_class={
+            "Apple": _metric_row(0.70),
+            "Milk": _metric_row(0.70),
+        },
+        candidate_per_class={
+            "Apple": _metric_row(0.68),
+            "Cheese": _metric_row(0.20),
+        },
+    )
+    decision = compared["result"]["promotion_evaluation"]
+    assert {reason["code"] for reason in decision["reasons"]} >= {
+        "missing_shared_classes",
+        "added_class_quality",
+    }
+    assert decision["comparison_valid"] is False
+    assert compared["result"]["auto_rejected"] is False
+    progress = test_client.get("/ai-progress").json()
+    assert progress["candidate"]["version"] == candidate_version
+    assert progress["candidate_state"] == "comparison_invalid"
+    assert progress["actions"]["can_reject"] is True
+    assert progress["actions"]["can_rollback"] is False
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT status FROM model_versions WHERE version = %s;",
+            (candidate_version,),
+        )
+        assert cursor.fetchone()[0] == "candidate"
 
 
 @pytest.mark.parametrize("invalid_metric", [float("nan"), float("inf"), float("-inf"), "0.5"])
@@ -1249,7 +1343,6 @@ def test_promotion_and_rollback_preserve_single_active_and_history(
         None,
     )
     db_connection.commit()
-
     historical_provenance = {
         "dataset_version": "historical-initial-vs-lemon",
         "dataset_content_sha256": "historical-content-hash",
@@ -1383,6 +1476,127 @@ def test_promotion_and_rollback_preserve_single_active_and_history(
     assert final_candidate[:3] == candidate_identity
     assert final_candidate[3] == "active"
     assert _active_count(db_connection) == 1
+
+
+def test_unresolved_candidate_blocks_rollback_and_reject_is_candidate_only(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    submission_factory("assisted", "approved", "Apple")
+    submission_factory("manual", "approved", "Milk")
+    first = _run_successful_training(test_client, lifecycle_context)
+    first_version = first["result"]["model_version"]
+    first_comparison = _run_comparison(
+        test_client,
+        lifecycle_context,
+        first_version,
+        _metric_row(0.50),
+        _metric_row(0.60),
+    )
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (
+            SimpleNamespace(task="detect"),
+            str(Path(record["model_path"]).resolve()),
+        ),
+    )
+    assert test_client.post(
+        f"/models/{first_version}/promote",
+        json={"comparison_id": first_comparison["result"]["comparison_id"]},
+    ).status_code == 200
+
+    experimental = submission_factory("manual", "approved", "Lemon")
+    second = _run_successful_training(
+        test_client, lifecycle_context, [experimental["submission_id"]]
+    )
+    second_version = second["result"]["model_version"]
+
+    def snapshot():
+        with db_connection.cursor() as cursor:
+            cursor.execute("SELECT version, status FROM model_versions ORDER BY id;")
+            models = cursor.fetchall()
+            cursor.execute(
+                "SELECT action, from_model_id, to_model_id, comparison_id FROM model_activation_history ORDER BY id;"
+            )
+            history = cursor.fetchall()
+            cursor.execute(
+                "SELECT id, status, training_state FROM annotation_submissions ORDER BY id;"
+            )
+            annotations = cursor.fetchall()
+        return models, history, annotations, lifecycle_context.detection._MODEL_VERSION
+
+    before = snapshot()
+    missing_comparison_rollback = test_client.post(
+        f"/models/{lifecycle_context.active_version}/rollback"
+    )
+    assert missing_comparison_rollback.status_code == 409
+    assert "resolved before rollback" in missing_comparison_rollback.json()["detail"]
+    assert snapshot() == before
+    progress = test_client.get("/ai-progress").json()
+    assert progress["candidate_state"] == "needs_comparison"
+    assert progress["actions"]["can_rollback"] is False
+
+    second_comparison = _run_comparison(
+        test_client,
+        lifecycle_context,
+        second_version,
+        _metric_row(0.50),
+        _metric_row(0.60),
+    )
+    assert second_comparison["result"]["promotion_evaluation"]["eligible"] is True
+    before = snapshot()
+    eligible_rollback = test_client.post(
+        f"/models/{lifecycle_context.active_version}/rollback"
+    )
+    assert eligible_rollback.status_code == 409
+    assert snapshot() == before
+
+    rejected = test_client.post(f"/models/{second_version}/reject")
+    assert rejected.status_code == 200
+    progress = test_client.get("/ai-progress").json()
+    assert progress["candidate"] is None
+    assert progress["latest_candidate"] is None
+    assert progress["actions"]["can_rollback"] is True
+
+    for invalid_version in (
+        second_version,
+        first_version,
+        lifecycle_context.active_version,
+    ):
+        before = snapshot()
+        response = test_client.post(f"/models/{invalid_version}/reject")
+        assert response.status_code == 409
+        assert snapshot() == before
+
+    active_job_id = "lifecycle-train-still-running"
+    with lifecycle_context.runtime._LIFECYCLE_JOB_LOCK:
+        lifecycle_context.runtime._LIFECYCLE_JOBS[active_job_id] = {
+            "job_id": active_job_id,
+            "kind": "TRAIN",
+            "status": "running",
+        }
+        lifecycle_context.runtime._ACTIVE_LIFECYCLE_JOB_ID = active_job_id
+    before = snapshot()
+    in_progress_rollback = test_client.post(
+        f"/models/{lifecycle_context.active_version}/rollback"
+    )
+    assert in_progress_rollback.status_code == 409
+    assert "must finish before rollback" in in_progress_rollback.json()["detail"]
+    assert test_client.get("/ai-progress").json()["actions"]["can_rollback"] is False
+    assert snapshot() == before
+    with lifecycle_context.runtime._LIFECYCLE_JOB_LOCK:
+        lifecycle_context.runtime._LIFECYCLE_JOBS.clear()
+        lifecycle_context.runtime._ACTIVE_LIFECYCLE_JOB_ID = None
+
+    rolled_back = test_client.post(
+        f"/models/{lifecycle_context.active_version}/rollback"
+    )
+    assert rolled_back.status_code == 200
+    for invalid_version in (lifecycle_context.active_version, first_version):
+        before = snapshot()
+        response = test_client.post(f"/models/{invalid_version}/reject")
+        assert response.status_code == 409
+        assert snapshot() == before
 
 
 def test_rollback_reconciles_shared_and_model_specific_training_lineage(
@@ -2089,6 +2303,11 @@ def test_failed_candidate_auto_quarantines_only_selected_experimental_submission
     )
     assert compared["result"]["auto_rejected"] is True
     assert compared["result"]["quarantined_submission_count"] == 2
+    progress = test_client.get("/ai-progress").json()
+    assert progress["candidate"] is None
+    assert progress["candidate_state"] == "not_eligible"
+    assert progress["actions"]["can_reject"] is False
+    assert progress["actions"]["can_rollback"] is True
     with db_connection.cursor() as cursor:
         cursor.execute(
             "SELECT id, training_state FROM annotation_submissions ORDER BY id;"
@@ -2422,8 +2641,8 @@ def test_invalid_promotion_and_rollback_leave_active_model_unchanged(
         test_client.post("/models/unknown/rollback"),
         test_client.post(f"/models/{candidate_version}/rollback"),
     ]
-    assert [response.status_code for response in attempts] == [404, 400, 409, 409, 404, 409]
-    assert "did not outperform" in attempts[2].json()["detail"]
+    assert [response.status_code for response in attempts] == [404, 409, 409, 409, 404, 409]
+    assert "status 'candidate'" in attempts[2].json()["detail"]
     _assert_unchanged_active_model(db_connection, lifecycle_context.active_version)
 
 
@@ -2613,7 +2832,10 @@ def test_expansion_policy_blocks_regression_low_quality_and_removed_classes(
     assert reason_code in {reason["code"] for reason in decision["reasons"]}
     assert compared["result"]["auto_rejected"] is True
     progress = test_client.get("/ai-progress").json()
-    assert progress["latest_candidate"] is None
+    assert progress["candidate"] is None
+    assert progress["latest_candidate"]["version"] == candidate_version
+    assert progress["candidate_state"] == "not_eligible"
+    assert progress["actions"]["can_reject"] is False
     assert progress["actions"]["can_promote"] is False
     with db_connection.cursor() as cursor:
         cursor.execute(

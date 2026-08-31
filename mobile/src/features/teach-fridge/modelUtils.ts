@@ -1,5 +1,6 @@
 import type {
   AddedClassMetrics,
+  AIProgressResponse,
   AnnotationSubmissionDetail,
   CandidateState,
   ModelMetrics,
@@ -21,6 +22,28 @@ export const METRIC_ROWS: { key: keyof ModelMetrics; label: string }[] = [
   { key: "map50", label: "mAP50" },
   { key: "map50_95", label: "mAP50–95" },
 ];
+
+export function candidateLifecycleControls(progress: AIProgressResponse) {
+  const unresolved = progress.candidate ?? null;
+  return {
+    showComparisonDetails: Boolean(
+      (unresolved ?? progress.latest_candidate) && progress.comparison,
+    ),
+    showCompare: Boolean(
+      unresolved
+      && progress.actions.can_compare
+      && ["needs_comparison", "comparison_stale", "comparison_invalid"].includes(progress.candidate_state),
+    ),
+    showPromote: Boolean(
+      unresolved
+      && progress.candidate_state === "eligible"
+      && progress.actions.can_promote,
+    ),
+    showReject: Boolean(unresolved && progress.actions.can_reject),
+    showTrain: progress.actions.can_train,
+    showRollback: progress.actions.can_rollback,
+  };
+}
 
 export function candidateStateCopy(state: CandidateState) {
   if (state === "needs_comparison")
@@ -46,7 +69,7 @@ export function candidateStateCopy(state: CandidateState) {
     };
   if (state === "not_eligible")
     return {
-      label: "NOT ELIGIBLE",
+      label: "NOT ELIGIBLE FOR PROMOTION",
       tone: "danger" as const,
       description: "This candidate did not pass the promotion policy.",
     };

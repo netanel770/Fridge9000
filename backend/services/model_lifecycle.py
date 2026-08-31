@@ -34,8 +34,23 @@ _LIFECYCLE_JOBS = {}
 _ACTIVE_LIFECYCLE_JOB_ID = None
 
 
+def _active_candidate_job():
+    """Return active candidate work represented by this API process, if any."""
+    with _LIFECYCLE_JOB_LOCK:
+        if not _ACTIVE_LIFECYCLE_JOB_ID:
+            return None
+        job = _LIFECYCLE_JOBS.get(_ACTIVE_LIFECYCLE_JOB_ID)
+        if (
+            job
+            and job.get("kind") in {"TRAIN", "COMPARE"}
+            and job.get("status") in {"queued", "running"}
+        ):
+            return dict(job)
+    return None
+
+
 def _promotion_decision(comparison, current_active_id, candidate_id):
-    return evaluate_promotion(
+    decision = evaluate_promotion(
         comparison,
         current_active_id=current_active_id,
         candidate_id=candidate_id,
@@ -43,6 +58,40 @@ def _promotion_decision(comparison, current_active_id, candidate_id):
         min_added_class_map50_95=MIN_ADDED_CLASS_MAP50_95,
         min_added_class_per_class_map50_95=MIN_ADDED_CLASS_PER_CLASS_MAP50_95,
     )
+    decision["comparison_valid"] = bool(
+        comparison is not None and not _invalid_promotion_reason_codes(decision)
+    )
+    return decision
+
+
+def _invalid_promotion_reason_codes(decision):
+    """Identify failures that do not constitute a trustworthy quality decision."""
+    reasons = [
+        reason for reason in decision.get("reasons", [])
+        if isinstance(reason, dict)
+    ]
+    codes = {reason.get("code") for reason in reasons if reason.get("code")}
+    invalid = codes & {
+        "comparison_missing", "stale_comparison", "malformed_class_metrics"
+    }
+    missing_shared = next(
+        (reason for reason in reasons if reason.get("code") == "missing_shared_classes"),
+        None,
+    )
+    if missing_shared:
+        removed = {
+            str(name).strip().casefold()
+            for reason in reasons
+            if reason.get("code") == "removed_classes"
+            for name in reason.get("classes", [])
+        }
+        missing = {
+            str(name).strip().casefold()
+            for name in missing_shared.get("missing_classes", [])
+        }
+        if not missing or not missing.issubset(removed):
+            invalid.add("missing_shared_classes")
+    return invalid
 
 
 def _activate_model(version: str, action: str, comparison_id: Optional[str] = None):
@@ -56,6 +105,19 @@ def _activate_model(version: str, action: str, comparison_id: Optional[str] = No
                 current = cur.fetchone()
                 if not current:
                     raise HTTPException(status_code=409, detail="No current active model is registered")
+                if action == "ROLLBACK":
+                    cur.execute(
+                        "SELECT version FROM model_versions WHERE status = 'candidate' LIMIT 1 FOR UPDATE;"
+                    )
+                    unresolved = cur.fetchone()
+                    active_job = _active_candidate_job()
+                    if unresolved or active_job:
+                        detail = (
+                            f"Candidate {unresolved['version']} must be resolved before rollback"
+                            if unresolved
+                            else "Candidate training or evaluation must finish before rollback"
+                        )
+                        raise HTTPException(status_code=409, detail=detail)
                 cur.execute("SELECT * FROM model_versions WHERE version = %s FOR UPDATE;", (version,))
                 target = cur.fetchone()
                 if not target:
@@ -195,6 +257,7 @@ def _finalize_candidate_comparison(version: str, result: Dict[str, Any]):
     decision = _promotion_decision(comparison, active["id"], candidate["id"])
     finalized = {**result, "promotion_evaluation": decision, "auto_rejected": False}
     quality_failure_codes = {
+        "candidate_lost",
         "removed_classes",
         "shared_class_regression",
         "added_class_quality",
@@ -204,12 +267,9 @@ def _finalize_candidate_comparison(version: str, result: Dict[str, Any]):
         reason.get("code") for reason in decision.get("reasons", [])
         if reason.get("code")
     }
-    non_destructive_codes = {
-        "comparison_missing", "stale_comparison", "malformed_class_metrics"
-    }
     if (
         decision["eligible"]
-        or reason_codes & non_destructive_codes
+        or _invalid_promotion_reason_codes(decision)
         or not (reason_codes & quality_failure_codes)
     ):
         return finalized
@@ -253,16 +313,7 @@ def _candidate_lifecycle_state(candidate, comparison, promotion_evaluation):
         return "needs_comparison"
     if promotion_evaluation.get("stale"):
         return "comparison_stale"
-    reason_codes = {
-        reason.get("code")
-        for reason in promotion_evaluation.get("reasons", [])
-        if isinstance(reason, dict)
-    }
-    if reason_codes & {
-        "comparison_missing",
-        "missing_shared_classes",
-        "malformed_class_metrics",
-    }:
+    if _invalid_promotion_reason_codes(promotion_evaluation):
         return "comparison_invalid"
     return "eligible" if promotion_evaluation.get("eligible") else "not_eligible"
 
@@ -329,8 +380,21 @@ def get_ai_progress():
             )
             candidate = cur.fetchone()
 
+            display_candidate = candidate
+            if display_candidate is None:
+                cur.execute(
+                    """
+                    SELECT id, version, status, created_at, dataset_version, training_run_id,
+                           precision, recall, map50, map50_95
+                    FROM model_versions
+                    WHERE status = 'rejected'
+                    ORDER BY created_at DESC, id DESC LIMIT 1;
+                    """
+                )
+                display_candidate = cur.fetchone()
+
             comparison = None
-            if candidate:
+            if display_candidate:
                 cur.execute(
                     """
                     SELECT id, dataset_version, created_at, active_model_id, candidate_model_id,
@@ -342,7 +406,7 @@ def get_ai_progress():
                     WHERE candidate_model_id = %s
                     ORDER BY created_at DESC LIMIT 1;
                     """,
-                    (candidate["id"],),
+                    (display_candidate["id"],),
                 )
                 comparison = cur.fetchone()
 
@@ -423,18 +487,45 @@ def get_ai_progress():
             )
             training_history = cur.fetchall()
 
+    if (
+        candidate is None
+        and display_candidate is not None
+        and training_history
+        and training_history[0].get("status") == "failed"
+        and training_history[0].get("started_at")
+        and display_candidate.get("created_at")
+        and training_history[0]["started_at"] > display_candidate["created_at"]
+    ):
+        display_candidate = None
+        comparison = None
+
     promotion_evaluation = _promotion_decision(
         comparison,
         active["id"] if active else None,
-        candidate["id"] if candidate else None,
+        display_candidate["id"] if display_candidate else None,
     )
+    invalid_reason_codes = _invalid_promotion_reason_codes(promotion_evaluation)
+    if (
+        candidate is None
+        and display_candidate is not None
+        and (
+            display_candidate.get("status") != "rejected"
+            or promotion_evaluation.get("eligible")
+            or invalid_reason_codes
+        )
+    ):
+        display_candidate = None
+        comparison = None
+        promotion_evaluation = _promotion_decision(None, active["id"] if active else None, None)
 
     if comparison:
         comparison["promotion_evaluation"] = promotion_evaluation
 
     candidate_state = _candidate_lifecycle_state(
-        candidate, comparison, promotion_evaluation
+        display_candidate, comparison, promotion_evaluation
     )
+
+    candidate_job = _active_candidate_job()
 
     return {
         "active_model": active,
@@ -445,7 +536,7 @@ def get_ai_progress():
             "classes": active_classes,
         },
         "candidate": candidate,
-        "latest_candidate": candidate,
+        "latest_candidate": display_candidate,
         "candidate_state": candidate_state,
         "comparison": comparison,
         "promotion_evaluation": promotion_evaluation,
@@ -459,12 +550,22 @@ def get_ai_progress():
                 contributions["approved_waiting"] > 0
                 and candidate is None
             ),
-            "can_compare": candidate is not None,
+            "can_compare": (
+                candidate is not None
+                and candidate_state in {
+                    "needs_comparison", "comparison_stale", "comparison_invalid"
+                }
+            ),
             "can_promote": (
                 candidate is not None
                 and promotion_evaluation["eligible"]
             ),
-            "can_rollback": bool(rollback_targets),
+            "can_reject": candidate is not None,
+            "can_rollback": (
+                bool(rollback_targets)
+                and candidate is None
+                and candidate_job is None
+            ),
         },
     }
 
@@ -605,10 +706,19 @@ def start_candidate_training(payload: Optional[Dict[str, Any]] = None):
         _set_lifecycle_job(job_id, provider=TRAINING_PROVIDER, phase="preparing")
         progress = lambda **changes: _set_lifecycle_job(job_id, **changes)
         if selected_submission_ids is None:
-            return provider(job_id, progress)
-        return provider(
-            job_id, progress, selected_submission_ids=selected_submission_ids
-        )
+            result = provider(job_id, progress)
+        else:
+            result = provider(
+                job_id, progress, selected_submission_ids=selected_submission_ids
+            )
+        if (
+            TRAINING_PROVIDER == "kaggle"
+            and result.get("model_version")
+            and result.get("comparison_id")
+        ):
+            progress(phase="evaluating_promotion_policy")
+            return _finalize_candidate_comparison(result["model_version"], result)
+        return result
 
     # Reserve the externally visible ID as the dataset directory name.
     def wrapped_start():

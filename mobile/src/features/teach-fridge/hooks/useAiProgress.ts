@@ -16,7 +16,10 @@ export function useAiProgress(active: boolean, lifecycleCompletionCount: number)
     setError("");
     try {
       const progress = await getAIProgress();
-      if (request.current === requestId) setStats(progress);
+      if (request.current === requestId) {
+        setStats(progress);
+        setShowModelDetails(false);
+      }
     } catch (caught) {
       if (request.current === requestId) {
         setStats(null);
