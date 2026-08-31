@@ -6,29 +6,41 @@
 
 Fridge 9000 is a smart refrigerator platform that combines **computer vision, inventory management, OCR, freshness analysis, multi-user households, and human-in-the-loop machine learning**.
 
-The app can scan a refrigerator, detect products, review and correct AI predictions, maintain inventory and expiration dates, process receipts, analyze food freshness, and use approved corrections to train and evaluate improved object-detection models.
+The system can scan refrigerator contents, detect products, review and correct predictions, manage inventory and expiration dates, process receipts, analyze food freshness, and use reviewed corrections to train improved object-detection candidates.
 
-Fridge 9000 is **mobile-first** with Android/iOS as the primary experience, while Expo Web provides the same core actions through browser-friendly equivalents such as webcam capture and file upload.
+Beyond inference, Fridge 9000 manages the ML lifecycle around those models: **reviewed training data, versioned datasets, candidate training, evaluation, class-aware promotion policy, automatic rejection, provenance, quarantine, promotion, and rollback**.
 
-## Highlights
-
-* **YOLO product detection** with labels, confidence scores and bounding boxes
-* **Inventory tracking** with quantities, batches, expiration dates and open-product state
-* **Receipt OCR** for images and PDFs
-* **Freshness classification** using a dedicated image-classification pipeline
-* **SAM2 segmentation** for representative product masks and outlines
-* **Users and households** with role-based access and household isolation
-* **Teach Fridge**, a moderated human-in-the-loop annotation and retraining workflow
-* **Versioned model lifecycle** with training, comparison, promotion, rejection and rollback
-* **Local or Kaggle training** with shared training and provenance semantics
-* **Mobile and web support** while preserving native app behavior
-* **Automated validation** across backend, ML, API, end-to-end, mobile and web-facing application logic
+The application is mobile-first using Expo and React Native, with shared support for Android, iOS, and Expo Web.
 
 ---
 
-## How It Works
+## Highlights
 
-A normal refrigerator scan follows this flow:
+- YOLO product detection with labels, confidence scores, and bounding boxes
+- Inventory batches, quantities, expiration dates, and open-product state
+- Receipt OCR for images and PDFs
+- Separate freshness-classification pipeline
+- SAM2 segmentation
+- Authenticated users and multi-user households
+- Owner, Manager, and Member household roles
+- Teach Fridge human-in-the-loop correction workflow
+- Moderated annotation contributions
+- Annotation provenance and lifecycle tracking
+- Versioned datasets, training runs, and model artifacts
+- Local and Kaggle model training
+- Candidate-vs-active model evaluation
+- Shared-class and added-class performance analysis
+- Class-aware backend promotion policy
+- Automatic rejection of candidates that fail valid quality checks
+- Explicit model promotion, manual rejection, and rollback
+- Shared mobile/web frontend
+- Automated backend, ML, and frontend testing
+
+---
+
+# How It Works
+
+A refrigerator scan follows this basic flow:
 
 ```text
 Camera / Image
@@ -40,9 +52,34 @@ Human Review
 Inventory Update
 ```
 
-Users can confirm detections, relabel products, adjust bounding boxes, remove false positives, or add products that the detector missed.
+Users can:
 
-Inventory is stored using product batches rather than maintaining a second aggregate quantity as a separate source of truth. This allows multiple units of the same product to keep their own expiration dates and open/closed state while the UI derives the total quantity from the underlying batches.
+```text
+Confirm detections
+Relabel products
+Adjust bounding boxes
+Remove false positives
+Add missed products
+```
+
+Corrections are stored separately from the original detector output and can later enter the Teach Fridge training workflow.
+
+---
+
+# Core Application
+
+## Inventory
+
+Inventory is represented using **product batches**.
+
+A product can therefore have multiple units with different:
+
+- expiration dates
+- quantities
+- open/closed states
+- inventory histories
+
+The UI derives aggregate product quantities from the underlying batches instead of maintaining a separate competing source of truth.
 
 ---
 
@@ -50,27 +87,71 @@ Inventory is stored using product batches rather than maintaining a second aggre
 
 Fridge 9000 supports authenticated users organized into households.
 
-Household roles include:
+Household roles are:
 
-* **Owner**
-* **Manager**
-* **Member**
+- **Owner**
+- **Manager**
+- **Member**
 
-Users can create or join households, switch between households, and manage membership according to their role.
+Users can create or join households, switch between them, and manage membership according to their permissions.
 
-Household-scoped data such as scans, inventory, annotations and freshness results stays isolated to the selected household.
+Household-specific data such as scans, inventory, annotations, and freshness results remains scoped to the selected household.
 
-System-admin functionality is kept separate from normal household permissions for operations such as annotation moderation and model governance.
+System-admin permissions are kept separate for operations such as:
 
-Authentication uses JWT access and refresh sessions with platform-aware storage. Google sign-in is also supported when OAuth client IDs are configured.
+- annotation moderation
+- model training
+- model promotion and rejection
+- quarantine
+- rollback
+
+Authentication uses JWT access and refresh sessions. Google sign-in is also supported when configured.
 
 ---
 
-## Teach Fridge
+## Receipt OCR
 
-Teach Fridge turns normal user feedback into reviewed training data instead of automatically trusting every correction.
+Fridge 9000 can process receipt images and PDFs using Tesseract OCR.
 
-Supported annotation actions are:
+Extracted products can be reviewed before inventory updates are applied.
+
+---
+
+## Freshness Analysis
+
+Product detection and freshness classification are separate responsibilities:
+
+```text
+YOLO
+→ What product is this?
+
+Freshness Classifier
+→ What condition is it in?
+```
+
+This allows both models to evolve independently.
+
+---
+
+## SAM2 Segmentation
+
+YOLO detections can be passed to SAM2 to produce representative product masks.
+
+```text
+YOLO
+→ locate and classify product
+
+SAM2
+→ refine product shape
+```
+
+---
+
+# Teach Fridge
+
+Teach Fridge turns human corrections into reviewed ML training data.
+
+Supported annotation actions include:
 
 ```text
 CONFIRM
@@ -80,49 +161,76 @@ ADD
 REMOVE
 ```
 
-The workflow is:
+The complete learning flow is:
 
 ```text
-Scan / Manual Image
-        ↓
-Human Correction
-        ↓
+User Correction
+      ↓
+Pending Submission
+      ↓
 Moderation
-        ↓
-Approved Submission
-        ↓
+      ↓
+Approved Contribution
+      ↓
 Training Selection
-        ↓
+      ↓
 Versioned Dataset
-        ↓
+      ↓
 Candidate Training
-        ↓
-Model Comparison
-        ↓
-Promote or Reject
+      ↓
+Model Evaluation
+      ↓
+Promotion Policy
+      ↓
+Promotion / Automatic Rejection / Manual Resolution
 ```
 
-A label correction and bounding-box correction for the same detected object are treated as **one logical correction** in the UI.
-
-The raw `RELABEL` and `ADJUST_BOX` actions remain separate for provenance and training, while Fridge 9000 reconstructs the effective final label and final bounding box when displaying the corrected object.
-
-Contribution history includes:
-
-* Correction status
-* Submitter identity
-* Product information
-* Training usage
-* Moderation state
-
-Contributions that have already been used for training remain available as read-only history, but are hidden from the normal contribution view unless the **Used** filter is selected.
-
-Admin contribution views also support grouping and sorting by submitting user.
+A relabel and bounding-box adjustment on the same detected object can be presented as one logical contribution while the underlying annotation actions remain separately preserved for provenance and training.
 
 ---
 
-## Annotation Lifecycle
+# Contributions and Moderation
 
-Approved annotation submissions move through an explicit training lifecycle:
+The Contributions area contains:
+
+```text
+Contributions
+
+▸ Contribution History
+
+▸ Review Queue
+```
+
+## Contribution History
+
+Contribution History provides:
+
+- search and filtering
+- sorting and grouping
+- contribution status
+- training lifecycle status
+- image inspection
+- model provenance
+- historical training usage
+
+Historical model usage remains preserved even when a model is later rejected or archived.
+
+## Review Queue
+
+Authorized system administrators can review pending submissions and:
+
+```text
+Approve
+Reject
+```
+
+After moderation, the interface reloads authoritative backend state so resolved submissions do not remain displayed as pending.
+
+---
+
+# Annotation Lifecycle
+
+Approved contributions move through four training states:
 
 ```text
 eligible
@@ -133,294 +241,549 @@ quarantined
 
 ### Eligible
 
-Approved data available for future candidate training.
+Approved and available for future candidate training.
 
 ### Experimental
 
-Data currently used by an unresolved candidate model.
+Currently associated with an unresolved candidate.
 
 ### Trusted
 
-Data represented by the currently active model's recorded training provenance.
+Part of the **currently active model's recorded training provenance**.
 
 ### Quarantined
 
-Data excluded from normal training selection.
-
-Rejected candidate data is moved to Quarantine automatically. Eligible data can also be moved there manually.
-
-Quarantined submissions can later be restored to the training pool.
-
-Quarantine also supports lightweight archiving. Archived items remain quarantined and preserve their annotations and provenance, but disappear from the default active Quarantine workload.
+Excluded from normal training selection, commonly after the candidate that used the contribution is rejected.
 
 ---
 
-## Model Lifecycle
+## Current State vs Historical Usage
 
-Fridge 9000 does not replace the active detector as soon as training finishes.
-
-Each candidate is trained and evaluated independently before it can serve predictions.
+Fridge 9000 distinguishes between:
 
 ```text
-Fixed YOLO Foundation
+Current lifecycle provenance
+```
+
+and:
+
+```text
+Historical training usage
+```
+
+For example:
+
+```text
+Model 7 used Annotation A
+Model 7 promoted
+
+Model 8 later used Annotation A
+Model 8 rejected
+
+Model 7 active
+```
+
+The current presentation remains:
+
+```text
+Annotation A
+TRUSTED
+Used in Model 7
+```
+
+Model 8's usage remains in historical records because it genuinely used the annotation, but it does not incorrectly become the reason the contribution is currently trusted.
+
+---
+
+# Candidate Training
+
+Training and deployment are deliberately separate.
+
+```text
+Train ≠ Deploy
+Evaluate ≠ Deploy
+Pass policy ≠ Deploy
+
+Only Promote or Rollback changes production.
+```
+
+Candidate training combines:
+
+```text
+Pretrained YOLO Foundation
         +
 Permanent Base Dataset
         +
-Trusted Corrections
-        +
-New Approved Corrections
+Reviewed Fridge Data
+        ↓
+Versioned Dataset
         ↓
 Candidate Model
-        ↓
-Compare with Active Model
-        ↓
-Promotion Evaluation
-      ↙                 ↘
-   Reject              Promote
-     ↓                    ↓
-Quarantine          Previous Active
-new data               Archived
 ```
 
-The active detector continues serving predictions while another model is trained and evaluated.
+The permanent base dataset preserves the detector's established training foundation, while trusted and selected reviewed Fridge data allow the detector to learn from application feedback.
 
-The system records:
+Training data is versioned so a model can be traced back to the exact dataset and reviewed contributions used to create it.
 
-* Dataset versions
-* Training runs
-* Starting weights
-* Model versions
-* Model artifacts
-* Evaluation metrics
-* Class-aware comparisons
-* Training provenance
-* Promotion history
-* Activation history
-* Rollback history
-
-Promotion is always explicit.
-
-A candidate must preserve the product classes already supported by the active model and satisfy the configured comparison policy before it becomes eligible for promotion.
+The current production detector remains active throughout candidate training and evaluation.
 
 ---
 
-## Training Strategy
+# Model Evaluation
 
-Fridge 9000 separates the model used as the **training foundation** from the model currently serving predictions.
+After training, a candidate is compared with the current active model.
 
-Candidates begin from a configurable pretrained YOLO model rather than inheriting the currently active Fridge model's weights.
+Fridge 9000 records metrics including:
+
+- precision
+- recall
+- mAP50
+- mAP50-95
+- per-class metrics
+- shared-class performance
+- added-class performance
+- class preservation
+
+Both models are evaluated on the **same evaluation split** so their results remain directly comparable.
+
+Fridge 9000 separates **shared classes** from **newly added classes**.
+
+This matters because strong performance on a newly learned product should not hide regressions on products already supported by production.
+
+```text
+                 Candidate
+                    │
+          ┌─────────┴─────────┐
+          │                   │
+   Existing Products     Added Products
+          │                   │
+          ▼                   ▼
+ Compare with Active     Evaluate New-Class
+ on Shared Classes          Quality
+```
+
+The resulting comparison is persisted and then evaluated by the backend promotion policy.
+
+---
+
+# Promotion Policy
+
+Model comparison does **not** directly deploy a candidate.
+
+The backend applies a **class-aware promotion policy** to the persisted comparison.
+
+The policy differs depending on whether the candidate preserves the existing class set or introduces new products.
+
+The backend is authoritative for the final decision.
+
+---
+
+## Same-Class Candidates
+
+If the active and candidate models support the same product classes, the candidate must outperform the active model.
+
+The primary comparison metric is:
+
+```text
+mAP50-95
+```
+
+If mAP50-95 is effectively tied, `mAP50` is used as the tie-breaker.
 
 Conceptually:
 
 ```text
-Pretrained YOLO Foundation
-          +
-Permanent Base Dataset
-          +
-Trusted Fridge Corrections
-          +
-New Approved Corrections
-          ↓
-Candidate Model
+Candidate better
+      ↓
+Eligible for Promotion
+
+Candidate does not outperform Active
+      ↓
+Automatically Rejected
 ```
 
-Accumulated Fridge knowledge therefore lives explicitly in reviewed training data and provenance rather than depending entirely on a chain of fine-tuned weights.
-
-This also keeps local and remote training behavior consistent.
+This prevents a newly trained model from replacing production when it provides no measurable detection improvement.
 
 ---
 
-## Model Comparison and Promotion
+## Candidates With New Product Classes
 
-Candidates are compared against the current active detector.
+When a candidate introduces new products, existing-product performance and new-product performance are evaluated separately.
 
-Evaluation includes:
+The default policy requires:
 
-* Precision
-* Recall
-* mAP50
-* mAP50-95
-* Shared-class performance
-* Added-class performance
-* Per-class metrics
-* Class preservation
+| Requirement | Default |
+| --- | ---: |
+| Maximum shared-class mAP50-95 regression | **2 percentage points** |
+| Minimum aggregate mAP50-95 across added classes | **50%** |
+| Minimum mAP50-95 for every added class | **30%** |
+| Established active-model classes may be removed | **No** |
 
-The comparison separates established products from newly introduced products so strong performance on a new class cannot hide a serious regression on existing classes.
+These thresholds are configurable through backend environment settings.
 
-The backend remains authoritative for promotion eligibility.
+The candidate must therefore:
 
-Passing the comparison policy does **not** automatically activate a candidate. Promotion remains an explicit action.
+1. preserve every established active-model class
+2. provide comparable metrics for the existing classes
+3. keep shared-class mAP50-95 regression within the configured tolerance
+4. meet the aggregate quality threshold for newly added classes
+5. meet the minimum quality threshold for **every** newly added class
 
----
-
-## Rejection, Quarantine and Rollback
-
-If a candidate is rejected, the new experimental data used by that candidate is moved to Quarantine.
-
-It can later be:
+For example:
 
 ```text
-Return to training
-→ eligible
+Active supports:
+Apple
+Banana
+Milk
+
+Candidate supports:
+Apple
+Banana
+Milk
+Potato
 ```
 
-or archived while remaining quarantined.
-
-Previously active production models can also be restored through **rollback**.
-
-Rollback reactivates an existing model and its recorded provenance rather than retraining it.
-
-This lets Fridge 9000 return to an earlier production model while preserving later annotation and training history.
-
----
-
-## Freshness Analysis
-
-Fridge 9000 uses a separate image-classification pipeline for supported food freshness and rot detection.
+Fridge 9000 checks:
 
 ```text
-YOLO
-→ What product is this?
+Apple / Banana / Milk
+        ↓
+Did existing performance remain acceptable?
 
-Freshness Classifier
-→ What condition is this product in?
+Potato
+        ↓
+Did the new class meet the required quality?
 ```
 
-Keeping the two responsibilities separate allows the detector and freshness model to evolve independently.
+A strong Potato score therefore cannot compensate for unacceptable regression on Apple, Banana, or Milk.
+
+Likewise, if several products are added together, one excellent new class cannot hide another newly added class that falls below the per-class minimum.
 
 ---
 
-## Receipt OCR
+# Automatic Model Rejection
 
-Receipt images and PDFs can be processed with **Tesseract OCR**.
+A candidate that fails a **valid quality comparison** can be rejected automatically.
 
-Extracted products can be reviewed before inventory changes are applied.
+Automatic rejection is triggered by policy failures such as:
 
----
+- same-class candidate failing to outperform the active model
+- removal of established active-model classes
+- excessive shared-class mAP50-95 regression
+- insufficient aggregate quality across added classes
+- one or more added classes falling below the required per-class quality
 
-## SAM2 Segmentation
-
-YOLO detections can be passed to **SAM2** to generate representative product masks and outlines.
-
-YOLO identifies the product region, while SAM2 refines its shape.
-
----
-
-## Mobile and Web
-
-Fridge 9000 is designed as an app first.
-
-On Android/iOS, the project keeps native Expo/React Native behavior for:
-
-* Camera capture
-* Gallery selection
-* Secure storage
-* Navigation
-* Native file handling
-
-Expo Web provides equivalent capabilities using browser-specific implementations where necessary:
+The flow is:
 
 ```text
-Native Camera        → Browser Webcam
-Native Gallery       → File Upload
-Native URI Upload    → Blob / File Upload
-SecureStore          → Web-Compatible Session Storage
-Native Confirmation  → Browser-Compatible Confirmation
+Valid Comparison
+      ↓
+Promotion Policy
+      ↓
+Quality Requirement Failed
+      ↓
+Candidate Automatically Rejected
+      ↓
+Candidate-Specific Experimental Data Quarantined
 ```
 
-Browser webcam access is requested only after user interaction.
+The active production model is never replaced by the rejected candidate.
 
-If camera permission is unavailable or denied, image-based features still offer file upload so the workflow remains usable.
-
-The platform-specific parts are kept behind shared abstractions so scanning, freshness analysis, annotations and other domain logic remain shared.
+Automatic rejection therefore protects production without requiring an administrator to manually inspect every clearly failing candidate.
 
 ---
 
-## Architecture
+# Invalid Comparisons Are Not Automatic Rejections
+
+Infrastructure or evaluation problems are not treated as proof that a model is poor.
+
+Examples include:
+
+- missing comparison data
+- stale comparisons
+- malformed metrics
+- incomplete class coverage
+- otherwise invalid comparison artifacts
+
+In these situations:
+
+```text
+Candidate
+      ↓
+Remains Unresolved
+```
+
+The comparison can be retried.
+
+This distinction is intentional:
+
+```text
+Valid comparison + quality failure
+        ↓
+Automatic rejection
+
+Invalid / untrustworthy comparison
+        ↓
+No automatic rejection
+```
+
+A candidate is automatically rejected only when trustworthy evaluation evidence demonstrates that it failed the quality policy.
+
+---
+
+# Candidate Outcomes
+
+After evaluation and promotion-policy processing, a candidate can reach one of three main states.
+
+## Eligible for Promotion
+
+```text
+Candidate
+      ↓
+Passes Policy
+      ↓
+Eligible for Promotion
+```
+
+The active model remains unchanged.
+
+Passing the policy only means the candidate **may** be promoted.
+
+Deployment still requires an explicit promotion action.
+
+---
+
+## Automatically Rejected
+
+```text
+Candidate
+      ↓
+Valid Quality Failure
+      ↓
+Automatically Rejected
+```
+
+The active model remains unchanged.
+
+Candidate-specific experimental contributions are quarantined.
+
+---
+
+## Unresolved
+
+```text
+Candidate
+      ↓
+Comparison Missing / Invalid
+      ↓
+Remains Unresolved
+```
+
+The comparison can be retried or the candidate can be resolved manually.
+
+---
+
+# Promotion, Manual Rejection, and Rollback
+
+Deployment actions occur only after the candidate lifecycle has established the candidate's state.
+
+## Promotion
+
+An eligible candidate can be explicitly promoted:
+
+```text
+Candidate
+      ↓
+Active
+
+Previous Active
+      ↓
+Archived
+```
+
+Promotion is the action that changes the production detector.
+
+---
+
+## Manual Rejection
+
+An administrator can explicitly reject an unresolved or unwanted candidate instead of promoting it.
+
+```text
+Candidate
+      ↓
+Manual Rejection
+      ↓
+Rejected
+```
+
+Experimental training contributions associated with the candidate are quarantined as appropriate.
+
+Manual rejection is separate from **automatic rejection caused by a valid policy failure**.
+
+---
+
+## Rollback
+
+Rollback restores a previously active production model without retraining it.
+
+```text
+Current Model
+      ↓
+Rollback
+      ↓
+Previous Production Model
+```
+
+After promotion or rollback, annotation training states are reconciled against the newly active model's exact training provenance.
+
+For example:
+
+```text
+Annotation A used only by Model 8
+Model 8 active
+A = trusted
+
+Rollback to Model 7
+Model 7 did not use A
+
+A = eligible
+```
+
+Historical usage remains preserved.
+
+Rollback and new training are blocked while unresolved candidate work or an active lifecycle operation would make model state ambiguous.
+
+---
+
+# Training Providers
+
+Fridge 9000 supports both local and Kaggle training.
+
+Local:
+
+```env
+TRAINING_PROVIDER=local
+```
+
+Kaggle:
+
+```env
+TRAINING_PROVIDER=kaggle
+```
+
+Both follow the same dataset, evaluation, and lifecycle concepts.
+
+With Kaggle:
+
+```text
+Build Versioned Dataset
+        ↓
+Upload Training Inputs
+        ↓
+Train Candidate
+        ↓
+Evaluate Active + Candidate
+on the same evaluation split
+        ↓
+Persist Comparison
+        ↓
+Backend Promotion Policy
+        ↓
+Eligible / Automatically Rejected / Unresolved
+```
+
+Kaggle performs training and evaluation, but it does not decide which model becomes production.
+
+Deployment remains controlled by Fridge 9000.
+
+---
+
+# Mobile and Web
+
+Fridge 9000 uses Expo and React Native.
+
+Native platforms use native functionality for:
+
+- camera capture
+- gallery selection
+- secure storage
+- navigation
+- file handling
+
+Expo Web provides browser-compatible alternatives such as:
+
+```text
+Camera       → Webcam
+Gallery      → File Upload
+Native URI   → Blob / File
+```
+
+Domain logic remains shared across platforms.
+
+---
+
+# Architecture
 
 ```text
 Fridge9000/
 ├── backend/
-│   ├── api/          # FastAPI routes
-│   ├── core/         # Configuration, auth and security
-│   ├── db/           # Database access
-│   ├── services/     # Domain/application services
+│   ├── api/
+│   ├── core/
+│   ├── db/
+│   ├── services/
 │   └── tests/
-│       ├── unit/
-│       ├── integration/
-│       ├── api/
-│       ├── ml/
-│       ├── e2e/
-│       └── fixtures/
 │
 ├── mobile/
-│   ├── app/          # Expo Router screens
+│   ├── app/
+│   ├── __tests__/
 │   └── src/
 │       ├── components/
 │       ├── features/
 │       └── services/
 │
-├── db/               # PostgreSQL initialization
-├── kaggle_trainer/   # Remote YOLO training worker
-├── scripts/          # Development/data utilities
+├── db/
+├── kaggle_trainer/
+├── scripts/
+├── assets/
 └── docker-compose.yml
 ```
 
-The backend is organized around thin API routes and domain services rather than one large runtime module.
+The backend uses FastAPI routes backed by focused application and domain services.
 
-The mobile code follows the same direction, with feature-specific components, hooks and API modules.
-
----
-
-## Tech Stack
-
-| Area             | Technology                                            |
-| ---------------- | ----------------------------------------------------- |
-| Mobile / Web     | Expo, React Native, React, Expo Router, TypeScript    |
-| Backend          | FastAPI, Python                                       |
-| Database         | PostgreSQL                                            |
-| Object Detection | Ultralytics YOLO                                      |
-| Segmentation     | SAM2                                                  |
-| Freshness        | PyTorch                                               |
-| OCR              | Tesseract                                             |
-| Authentication   | JWT, Argon2, Google OAuth                             |
-| Training         | Local or Kaggle                                       |
-| Testing          | pytest, Jest, jest-expo, React Native Testing Library |
-| Infrastructure   | Docker Compose                                        |
+Teach Fridge functionality is similarly separated in the frontend into components and hooks for corrections, contributions, moderation, training, AI progress, quarantine, and rollback.
 
 ---
 
-## AI-Assisted Development
+# Tech Stack
 
-Generative AI tools, including **ChatGPT and Codex**, were used during the development of Fridge 9000 as engineering assistants.
-
-They were used for tasks such as:
-
-* Code review and identifying potential issues
-* Exploring implementation and refactoring approaches
-* Generating and expanding automated tests
-* Debugging assistance
-* Reviewing architecture and project structure
-* Improving technical documentation
-
-AI-generated suggestions were not treated as authoritative or integrated automatically. Changes were reviewed, adapted where necessary, and validated against the project's requirements and automated test suite before being accepted.
-
-The project's architecture, feature requirements, system behavior, machine-learning lifecycle, integration decisions and final implementation remained under the responsibility of the development team.
-
-Development-time generative AI is separate from the AI/ML systems implemented by Fridge 9000 itself, including **YOLO object detection, SAM2 segmentation, freshness classification, and the Teach Fridge human-in-the-loop training workflow**.
+| Area | Technology |
+| --- | --- |
+| Mobile / Web | Expo, React Native, React, Expo Router, TypeScript |
+| Backend | FastAPI, Python |
+| Database | PostgreSQL |
+| Detection | Ultralytics YOLO |
+| Segmentation | SAM2 |
+| Freshness | PyTorch |
+| OCR | Tesseract |
+| Authentication | JWT, Argon2, Google OAuth |
+| Training | Local / Kaggle |
+| Testing | pytest, Jest, React Native Testing Library |
+| Infrastructure | Docker Compose |
 
 ---
 
-## Running Locally
+# Running Locally
 
-### Requirements
+## Requirements
 
-* Docker Desktop
-* Node.js and npm
-* Expo-compatible Android/iOS device, emulator, or modern browser
-* PowerShell on Windows for the provided launcher
+- Docker Desktop
+- Node.js and npm
+- Expo-compatible device, emulator, or modern browser
+- PowerShell on Windows for the provided launcher
 
-### Setup
+## Setup
 
 ```bash
 git clone https://github.com/netanel770/Fridge9000.git
@@ -431,22 +794,11 @@ npm install
 cd ..
 ```
 
-Configuration can be copied from `.env.example` into `.env` when needed.
+Copy `.env.example` to `.env` where configuration is required.
 
-This includes settings for:
+Do not commit real credentials or production secrets.
 
-* JWT authentication
-* Google OAuth
-* Training provider
-* Kaggle
-* Promotion thresholds
-* API configuration
-
-Never commit real credentials or production secrets.
-
-### Start Fridge 9000
-
-On Windows:
+## Start
 
 ```bat
 run-fridge.bat
@@ -458,14 +810,7 @@ or:
 .\start-fridge.ps1
 ```
 
-The launcher:
-
-1. Detects a usable LAN address
-2. Configures the Expo API URL
-3. Builds and starts PostgreSQL and FastAPI with Docker Compose
-4. Starts Expo
-
-From Expo you can launch Android/iOS normally or press `w` to open the web client.
+The launcher starts the PostgreSQL/FastAPI Docker environment and Expo frontend.
 
 Tunnel mode:
 
@@ -473,7 +818,7 @@ Tunnel mode:
 .\start-fridge.ps1 -Tunnel
 ```
 
-Custom backend URL:
+Custom API URL:
 
 ```powershell
 .\start-fridge.ps1 -ApiUrl https://your-api.example.com
@@ -481,172 +826,80 @@ Custom backend URL:
 
 ---
 
-## Training Providers
+# Testing
 
-Fridge 9000 supports:
-
-```env
-TRAINING_PROVIDER=local
-```
-
-and:
-
-```env
-TRAINING_PROVIDER=kaggle
-```
-
-Both follow the same dataset-building and model-lifecycle semantics.
-
-See `.env.example` for the available training and Kaggle configuration.
-
----
-
-## Testing
-
-Fridge 9000 includes automated testing across the backend, machine-learning lifecycle, API workflows, Kaggle training worker, and shared mobile/web frontend.
-
-The current validation suite contains **319 automated tests**:
-
-* **229 backend tests**
-* **23 Kaggle worker tests**
-* **67 mobile/web frontend tests across 8 Jest suites**
-
-### Backend Testing
-
-The backend uses **pytest** with an isolated PostgreSQL test database.
-
-Tests are organized by purpose:
+The latest validated suites contain:
 
 ```text
-backend/tests/
-├── unit/
-├── integration/
-├── api/
-├── ml/
-├── e2e/
-└── fixtures/
+Backend             233 passed
+Kaggle worker        23 passed
+Frontend Jest        81 passed
+--------------------------------
+Total               337 tests
 ```
 
-Coverage includes:
+Additional validation:
 
-* Authentication and JWT behavior
-* Refresh-session security
-* User and household permissions
-* Cross-household data isolation
-* Inventory and batch management
-* Scanning and annotations
-* Annotation moderation
-* Receipt processing
-* Freshness analysis
-* Model training and lifecycle behavior
-* Dataset and training-provider behavior
-* Class-aware model comparison
-* Model-promotion policy and edge cases
-* End-to-end workflows across the HTTP API and PostgreSQL database
+```text
+TypeScript           passed
+Lint                 0 errors
+Expo Doctor          18/18
+Git diff check       passed
+```
 
-Expensive ML boundaries are replaced with deterministic test doubles where appropriate so the normal suite does not require full model training or external services.
+The current lint configuration also reports 7 pre-existing warnings.
 
-Backend tests can be run with:
+Backend:
 
 ```bash
 pytest
 ```
 
-### Mobile and Web Frontend Testing
-
-The Expo frontend uses **Jest**, **jest-expo**, and **React Native Testing Library**.
-
-Because Fridge 9000 shares application logic across Android, iOS and Expo Web, the frontend suite validates behavior used across both the native and browser experiences.
-
-The frontend tests cover:
-
-* API request and error handling
-* Access-token authentication
-* Refresh-token recovery
-* Automatic request retry after authentication refresh
-* Concurrent `401` handling with single-flight token refresh
-* Authentication session restoration
-* Sign-in, registration, Google authentication and logout state
-* Household loading, selection and switching
-* `X-Fridge-ID` household propagation
-* Authentication and household navigation gates
-* Teach Fridge annotation and contribution logic
-* Model lifecycle presentation logic
-* Bounding-box and image-coordinate transformations
-* Authenticated image loading
-* Product-label behavior
-
-Frontend tests can be run with:
-
-```bash
-cd mobile
-npm test
-```
-
-For deterministic non-watch validation:
-
-```bash
-npm run test:ci
-```
-
-Additional frontend validation includes:
-
-```bash
-npx tsc --noEmit
-npm run lint
-npx expo-doctor
-```
-
-### Kaggle Worker Testing
-
-The remote training worker has its own automated test suite:
+Kaggle worker:
 
 ```bash
 pytest kaggle_trainer/test_train.py -v
 ```
 
-The worker tests validate training behavior without requiring live Kaggle execution during normal project validation.
+Frontend:
 
-### Full Validation
+```bash
+cd mobile
+npm run test:ci
+npx tsc --noEmit
+npm run lint
+npx expo-doctor
+```
 
-A complete Windows validation runner is included:
+Full Windows validation:
 
 ```bat
 fridge-test.bat
 ```
 
-It performs the project's backend, ML, frontend and repository checks using an isolated test environment.
+Testing covers areas including:
 
-The validation pipeline includes:
-
-1. Starting the isolated PostgreSQL test database
-2. Running the complete backend pytest suite
-3. Running the Kaggle worker tests
-4. Running TypeScript validation
-5. Running the frontend Jest suite
-6. Running Expo lint
-7. Running Expo Doctor
-8. Running Git diff validation
-9. Cleaning up the isolated test database
-
-The current full validation passes with:
-
-```text
-Backend             229 passed
-Kaggle worker        23 passed
-Frontend Jest        67 passed
-TypeScript           passed
-Expo lint            passed
-Expo Doctor          18/18
-Git diff check       passed
-Full validation      passed
-```
-
-The test database is removed after validation, including when the validation runner exits after a failed stage.
+- authentication and sessions
+- household permissions and isolation
+- inventory and batches
+- scans and annotations
+- moderation
+- freshness
+- receipts
+- training datasets
+- candidate lifecycle
+- model comparison
+- class-aware promotion policy
+- automatic and manual rejection
+- quarantine
+- rollback
+- annotation-state reconciliation
+- contribution provenance
+- frontend lifecycle presentation
 
 ---
 
-## Data Backup
+# Development Data Backup
 
 Development data can be exported and imported using:
 
@@ -655,14 +908,66 @@ export-fridge-data.bat
 import-fridge-data.bat
 ```
 
-These scripts are useful for moving a local Fridge 9000 environment between development machines.
+These scripts are intended for moving local development data between environments.
 
 ---
 
-## Project Goal
+# AI-Assisted Development
 
-Fridge 9000 is not intended to be only an object-detection demo.
+Generative AI tools such as **ChatGPT and Codex** were used as development aids during parts of the project.
 
-The goal is to build a complete application where computer vision interacts with real application state, users can correct the AI, reviewed corrections can become training data, new models can be evaluated safely, and every model change remains traceable and reversible.
+They assisted with activities such as:
 
-The result is a refrigerator-management system where the ML component can improve over time without giving up moderation, provenance or control.
+- discussing implementation approaches
+- reviewing code
+- debugging specific issues
+- suggesting test cases
+- helping with refactoring and documentation
+
+They were used in the same role as other development tools: to support the engineering process rather than define the project.
+
+The project's requirements, architecture, feature design, ML workflow, integration decisions, implementation choices, testing, and final review remained the responsibility of the development team.
+
+Suggested or generated code was reviewed and validated before being incorporated into the project.
+
+This development assistance is separate from the machine-learning functionality implemented by Fridge 9000 itself, including YOLO detection, SAM2 segmentation, freshness classification, and the Teach Fridge training workflow.
+
+---
+
+# Project Goal
+
+Fridge 9000 is not intended to be only:
+
+```text
+Image
+  ↓
+Pretrained Model
+  ↓
+Prediction
+```
+
+The goal is to combine:
+
+```text
+Computer Vision
+      +
+Application State
+      +
+Users and Households
+      +
+Human Feedback
+      +
+Moderation
+      +
+Versioned Training Data
+      +
+Model Evaluation
+      +
+Deployment Governance
+```
+
+into one complete application.
+
+Users can correct the AI, reviewed corrections can become training data, candidates can be trained without replacing production, models can be evaluated against explicit quality requirements, poor candidates can be rejected automatically, successful candidates can be explicitly promoted, and earlier production models can be restored through rollback.
+
+The result is a refrigerator-management system whose ML component can improve over time while preserving **moderation, provenance, quality control, deployment safety, and rollback**.
