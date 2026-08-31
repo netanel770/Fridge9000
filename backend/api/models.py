@@ -41,12 +41,26 @@ router.add_api_route(
     methods=["POST"],
     dependencies=_admin_only,
 )
-router.add_api_route(
+
+
+@router.get(
     "/ai-progress",
-    model_lifecycle.get_ai_progress,
-    methods=["GET"],
     dependencies=_admin_only,
 )
+def get_ai_progress():
+    progress = model_lifecycle.get_ai_progress()
+
+    # The service's persisted-data checks alone are not enough to decide
+    # whether a new training run can start. While this API process is already
+    # tracking candidate training/comparison, keep the UI action disabled.
+    if model_lifecycle._active_candidate_job() is not None:
+        actions = progress.get("actions")
+        if isinstance(actions, dict):
+            actions["can_train"] = False
+
+    return progress
+
+
 router.add_api_route(
     "/model-lifecycle/train",
     model_lifecycle.start_candidate_training,
@@ -75,6 +89,14 @@ def get_rollback_target_comparison(version: str):
 )
 def request_rollback_target_comparison(version: str):
     return model_lifecycle.get_rollback_target_comparison(version)
+
+
+@router.get(
+    "/model-lifecycle/active",
+    dependencies=_admin_only,
+)
+def get_active_lifecycle_job():
+    return model_lifecycle._active_candidate_job()
 
 
 router.add_api_route(

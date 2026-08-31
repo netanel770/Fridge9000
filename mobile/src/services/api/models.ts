@@ -34,6 +34,10 @@ export function startCandidateComparison(version: string): Promise<LifecycleJob>
   );
 }
 
+export function getActiveLifecycleJob(): Promise<LifecycleJob | null> {
+  return requestJson<LifecycleJob | null>("/model-lifecycle/active");
+}
+
 export function getLifecycleJob(jobId: string): Promise<LifecycleJob> {
   return requestJson<LifecycleJob>(`/model-lifecycle/jobs/${encodeURIComponent(jobId)}`);
 }
