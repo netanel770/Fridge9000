@@ -2332,6 +2332,147 @@ def test_failed_candidate_auto_quarantines_only_selected_experimental_submission
     }
 
 
+def test_later_activation_hides_rejected_result_and_reconciles_active_provenance(
+    test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
+):
+    annotation_a = submission_factory("assisted", "approved", "Apple")
+    annotation_b = submission_factory("manual", "approved", "Milk")
+    unrelated = submission_factory("manual", "approved", "Bread")
+    promoted_ids = [
+        annotation_a["submission_id"],
+        annotation_b["submission_id"],
+    ]
+    first = _run_successful_training(
+        test_client, lifecycle_context, promoted_ids
+    )
+    first_version = first["result"]["model_version"]
+    first_comparison = _run_comparison(
+        test_client,
+        lifecycle_context,
+        first_version,
+        _metric_row(0.50),
+        _metric_row(0.60),
+    )
+    monkeypatch.setattr(
+        lifecycle_context.runtime,
+        "_load_registered_detector",
+        lambda record: (
+            SimpleNamespace(task="detect"),
+            str(Path(record["model_path"]).resolve()),
+        ),
+    )
+    assert test_client.post(
+        f"/models/{first_version}/promote",
+        json={"comparison_id": first_comparison["result"]["comparison_id"]},
+    ).status_code == 200
+
+    rejected_submission = submission_factory("manual", "approved", "Lemon")
+    rejected_id = rejected_submission["submission_id"]
+    rejected_run = _run_successful_training(
+        test_client, lifecycle_context, [rejected_id]
+    )
+    rejected_version = rejected_run["result"]["model_version"]
+    rejected_comparison = _run_comparison(
+        test_client,
+        lifecycle_context,
+        rejected_version,
+        _metric_row(0.70),
+        _metric_row(0.60),
+    )
+    assert rejected_comparison["result"]["auto_rejected"] is True
+
+    immediate = test_client.get("/ai-progress").json()
+    assert immediate["candidate"] is None
+    assert immediate["latest_candidate"]["version"] == rejected_version
+    assert immediate["candidate_state"] == "not_eligible"
+    assert immediate["comparison"]["id"] == rejected_comparison["result"]["comparison_id"]
+    assert immediate["actions"]["can_promote"] is False
+    assert immediate["actions"]["can_reject"] is False
+
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, status, training_state FROM annotation_submissions ORDER BY id;"
+        )
+        before_rollback = {
+            row[0]: (row[1], row[2]) for row in cursor.fetchall()
+        }
+    assert {before_rollback[value][1] for value in promoted_ids} == {"trusted"}
+    assert before_rollback[rejected_id] == ("approved", "quarantined")
+    assert before_rollback[unrelated["submission_id"]] == ("approved", "eligible")
+
+    rolled_back = test_client.post(
+        f"/models/{lifecycle_context.active_version}/rollback"
+    )
+    assert rolled_back.status_code == 200
+    after_rollback = test_client.get("/ai-progress").json()
+    assert after_rollback["active_model"]["version"] == lifecycle_context.active_version
+    assert after_rollback["candidate"] is None
+    assert after_rollback["latest_candidate"] is None
+    assert after_rollback["candidate_state"] == "none"
+    assert after_rollback["comparison"] is None
+    assert after_rollback["actions"]["can_promote"] is False
+    assert after_rollback["actions"]["can_reject"] is False
+
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, status, training_state FROM annotation_submissions ORDER BY id;"
+        )
+        after_states = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM training_run_submission_usage u
+            JOIN model_versions m ON m.id = u.model_version_id
+            WHERE m.version = %s AND u.submission_id = ANY(%s);
+            """,
+            (first_version, promoted_ids),
+        )
+        preserved_usage_count = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT status FROM model_versions WHERE version = %s;",
+            (rejected_version,),
+        )
+        rejected_status = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT COUNT(*) FROM model_comparisons WHERE candidate_model_id = (SELECT id FROM model_versions WHERE version = %s);",
+            (rejected_version,),
+        )
+        rejected_comparison_count = cursor.fetchone()[0]
+    assert {after_states[value][1] for value in promoted_ids} == {"eligible"}
+    assert after_states[rejected_id] == ("approved", "quarantined")
+    assert after_states[unrelated["submission_id"]] == ("approved", "eligible")
+    assert preserved_usage_count == 2
+    assert rejected_status == "rejected"
+    assert rejected_comparison_count == 1
+
+    later = _run_successful_training(
+        test_client, lifecycle_context, promoted_ids
+    )
+    later_version = later["result"]["model_version"]
+    later_comparison = _run_comparison(
+        test_client,
+        lifecycle_context,
+        later_version,
+        _metric_row(0.50),
+        _metric_row(0.60),
+    )
+    assert test_client.post(
+        f"/models/{later_version}/promote",
+        json={"comparison_id": later_comparison["result"]["comparison_id"]},
+    ).status_code == 200
+    after_later_promotion = test_client.get("/ai-progress").json()
+    assert after_later_promotion["active_model"]["version"] == later_version
+    assert after_later_promotion["candidate"] is None
+    assert after_later_promotion["latest_candidate"] is None
+    assert after_later_promotion["candidate_state"] == "none"
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT status FROM model_versions WHERE version = %s;",
+            (rejected_version,),
+        )
+        assert cursor.fetchone()[0] == "rejected"
+
+
 def test_quarantined_submissions_can_be_archived_unarchived_and_restored(
     test_client, db_connection, lifecycle_context, submission_factory, monkeypatch
 ):

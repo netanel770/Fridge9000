@@ -48,8 +48,8 @@ export function QuarantineSheet({ progress, training, quarantine }: { progress: 
         }) : <EmptyState icon="shield-checkmark-outline" title={quarantine.archivedCount && !quarantine.showArchived ? "No active quarantine items" : "Nothing quarantined"} message={quarantine.archivedCount && !quarantine.showArchived ? "Turn on Show archived to inspect archived submissions." : "Rejected candidate data will appear here."} />}
       </ScrollView>
       {quarantine.activeSubmissions.length ? <AppButton label={`Return ${training.selectedQuarantineSubmissions.size} to training`} icon="refresh-outline" loading={quarantine.mutation === -1} disabled={quarantine.mutation !== null || training.selectedQuarantineSubmissions.size === 0} onPress={quarantine.restoreSelected} /> : null}
-      <AppButton label="Continue to Train Model" icon="school-outline" variant="secondary" disabled={Boolean(progress.stats?.latest_candidate)} onPress={quarantine.returnToTrainingSelection} />
-      {progress.stats?.latest_candidate ? <Text style={styles.actionHint}>Training will unlock after the current candidate is resolved. Your quarantine selections can be returned to training now.</Text> : null}
+      <AppButton label="Continue to Train Model" icon="school-outline" variant="secondary" disabled={Boolean(progress.stats?.candidate)} onPress={quarantine.returnToTrainingSelection} />
+      {progress.stats?.candidate ? <Text style={styles.actionHint}>Training will unlock after the current candidate is resolved. Your quarantine selections can be returned to training now.</Text> : null}
     </View></View>
   </Modal>;
 }

@@ -8,7 +8,9 @@ def reconcile_annotation_training_states(cur):
                 SELECT 1
                 FROM training_run_submission_usage u
                 JOIN model_versions m ON m.id = u.model_version_id
-                WHERE u.submission_id = s.id AND m.status = 'active'
+                WHERE u.submission_id = s.id
+                  AND m.status = 'active'
+                  AND u.training_run_id = m.training_run_id
             ) THEN 'trusted'
             WHEN EXISTS (
                 SELECT 1
@@ -16,6 +18,7 @@ def reconcile_annotation_training_states(cur):
                 JOIN model_versions m ON m.id = u.model_version_id
                 WHERE u.submission_id = s.id
                   AND m.status = 'candidate'
+                  AND u.training_run_id = m.training_run_id
                   AND u.is_experimental
             ) THEN 'experimental'
             WHEN s.training_state = 'quarantined' THEN 'quarantined'
@@ -25,6 +28,7 @@ def reconcile_annotation_training_states(cur):
                 JOIN model_versions m ON m.id = u.model_version_id
                 WHERE u.submission_id = s.id
                   AND m.status = 'rejected'
+                  AND u.training_run_id = m.training_run_id
                   AND u.is_experimental
             ) THEN 'quarantined'
             ELSE 'eligible'

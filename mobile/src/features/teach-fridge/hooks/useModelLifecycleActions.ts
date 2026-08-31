@@ -46,11 +46,11 @@ export function useModelLifecycleActions({
   const [error, setError] = useState("");
 
   const confirmPromotion = useCallback(() => {
-    if (!progress?.latest_candidate || !progress.comparison) {
+    if (!progress?.candidate || !progress.comparison) {
       return;
     }
 
-    const candidateVersion = progress.latest_candidate.version;
+    const candidateVersion = progress.candidate.version;
     const comparisonId = progress.comparison.id;
 
     requestConfirmation({
@@ -94,11 +94,11 @@ export function useModelLifecycleActions({
   ]);
 
   const confirmCandidateRejection = useCallback(() => {
-    if (!progress?.latest_candidate) {
+    if (!progress?.candidate) {
       return;
     }
 
-    const version = progress.latest_candidate.version;
+    const version = progress.candidate.version;
 
     requestConfirmation({
       title: `Reject ${candidateModelName}?`,

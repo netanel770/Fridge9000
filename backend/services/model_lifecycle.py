@@ -421,6 +421,11 @@ def get_ai_progress():
             rollback_targets = _rollback_targets(cur)
 
             cur.execute(
+                "SELECT MAX(created_at) AS latest_activation_at FROM model_activation_history;"
+            )
+            latest_activation_at = cur.fetchone()["latest_activation_at"]
+
+            cur.execute(
                 """
                 SELECT version
                 FROM model_versions
@@ -486,6 +491,16 @@ def get_ai_progress():
                 """
             )
             training_history = cur.fetchall()
+
+    if (
+        candidate is None
+        and display_candidate is not None
+        and comparison is not None
+        and latest_activation_at is not None
+        and latest_activation_at > comparison["created_at"]
+    ):
+        display_candidate = None
+        comparison = None
 
     if (
         candidate is None

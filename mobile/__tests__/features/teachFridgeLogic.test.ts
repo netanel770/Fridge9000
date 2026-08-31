@@ -176,6 +176,25 @@ describe("model display and policy interpretation helpers", () => {
     })).toContain("-3.0 pp");
   });
 
+  test("renders a later rollback as active with no current candidate result", () => {
+    const progress = {
+      active_model: { id: 1, version: "fridge9000-production-initial", status: "active", created_at: createdAt },
+      candidate: null,
+      latest_candidate: null,
+      candidate_state: "none",
+      comparison: null,
+      actions: { can_train: true, can_compare: false, can_promote: false, can_reject: false, can_rollback: true },
+    } as unknown as AIProgressResponse;
+    expect(readableModelName(progress.active_model, {})).toBe("Initial Model");
+    expect(candidateLifecycleControls(progress)).toMatchObject({
+      showComparisonDetails: false,
+      showPromote: false,
+      showReject: false,
+      showTrain: true,
+      showRollback: true,
+    });
+  });
+
   test("finds class metrics case-insensitively and groups corrected submissions once per label", () => {
     const metrics = { available: true, classes: ["Lemon"], unavailable_classes: [], per_class: {
       Lemon: { precision: 0.8, recall: 0.7, map50: 0.75, map50_95: 0.6 },
