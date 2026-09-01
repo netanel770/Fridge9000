@@ -53,6 +53,14 @@ type UnitOption = {
   remainingPercent: number | null;
 };
 
+function normalizePercentage(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  const numericValue = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numericValue)) return null;
+  return Math.max(0, Math.min(100, numericValue));
+}
+
 function buildUnitOptions(batches: InventoryBatchItem[]): UnitOption[] {
   const totals = new Map<string, number>();
   const counters = new Map<string, number>();
@@ -70,7 +78,9 @@ function buildUnitOptions(batches: InventoryBatchItem[]): UnitOption[] {
       batch,
       unitNumber,
       unitsWithSameExpiry: totals.get(date) || batch.quantity,
-      remainingPercent: index === 0 ? batch.open_unit_remaining_percent ?? null : null,
+      remainingPercent: index === 0
+        ? normalizePercentage(batch.open_unit_remaining_percent)
+        : null,
     };
   }));
 }
@@ -82,34 +92,47 @@ function RemainingSlider({
   value: number;
   onChangeComplete: (value: number) => void;
 }) {
-  const [sliderValue, setSliderValue] = useState(value);
+  const [sliderValue, setSliderValue] = useState(() => normalizePercentage(value) ?? 100);
   const trackRef = useRef<View>(null);
-  const trackX = useRef(0);
-  const trackWidth = useRef(1);
+  const trackX = useRef<number | null>(null);
+  const trackWidth = useRef<number | null>(null);
 
   useEffect(() => {
-    setSliderValue(value);
+    setSliderValue(normalizePercentage(value) ?? 100);
   }, [value]);
 
   const valueFromPagePosition = useCallback((pageX: number) => {
-    const raw = Math.max(0, Math.min(100, ((pageX - trackX.current) / trackWidth.current) * 100));
-    return Math.round(raw / 5) * 5;
+    const measuredX = trackX.current;
+    const measuredWidth = trackWidth.current;
+    if (
+      !Number.isFinite(pageX)
+      || measuredX === null
+      || !Number.isFinite(measuredX)
+      || measuredWidth === null
+      || !Number.isFinite(measuredWidth)
+      || measuredWidth <= 0
+    ) return null;
+    const raw = ((pageX - measuredX) / measuredWidth) * 100;
+    return normalizePercentage(Math.round(raw / 5) * 5);
   }, []);
 
   function measureTrack(callback?: () => void) {
     trackRef.current?.measureInWindow((x, _y, measuredWidth) => {
+      if (!Number.isFinite(x) || !Number.isFinite(measuredWidth) || measuredWidth <= 0) return;
       trackX.current = x;
-      trackWidth.current = Math.max(1, measuredWidth);
+      trackWidth.current = measuredWidth;
       callback?.();
     });
   }
 
   function previewPosition(pageX: number) {
-    setSliderValue(valueFromPagePosition(pageX));
+    const nextValue = valueFromPagePosition(pageX);
+    if (nextValue !== null) setSliderValue(nextValue);
   }
 
   function finishPosition(pageX: number) {
     const nextValue = valueFromPagePosition(pageX);
+    if (nextValue === null) return;
     setSliderValue(nextValue);
     onChangeComplete(nextValue);
   }
@@ -183,6 +206,7 @@ export default function AdjustOpenProductScreen() {
   const imageUri = `${API_BASE_URL}/items/${itemId}/representative-image?v=${imageVersion}`;
   const image = useAuthenticatedImage(imageUri);
   const imageAvailable = image.status !== "ERROR";
+  const hasUsableImage = image.status === "LOADED" && Boolean(image.resolvedUri);
 
   function selectUnit(option: UnitOption) {
     setSelectedUnitKey(option.key);
@@ -191,15 +215,20 @@ export default function AdjustOpenProductScreen() {
 
   async function persistRemaining(percent: number) {
     if (!selectedBatch) return;
+    const validPercent = normalizePercentage(percent);
+    if (validPercent === null) {
+      Alert.alert("Invalid amount", "Choose a valid remaining amount before saving.");
+      return;
+    }
     setSaving(true);
     try {
-      const result = await updateInventoryBatchRemaining(selectedBatch.id, percent);
+      const result = await updateInventoryBatchRemaining(selectedBatch.id, validPercent);
       setSaving(false);
       await showMessage(
-        percent === 0 ? "Product finished" : "Amount saved",
-        percent === 0
+        validPercent === 0 ? "Product finished" : "Amount saved",
+        validPercent === 0
           ? `One ${itemName} unit was removed from inventory.`
-          : `${itemName} was updated to ${percent}% remaining.`,
+          : `${itemName} was updated to ${validPercent}% remaining.`,
       );
       await loadBatches(result.batch.id).catch((e: any) =>
         Alert.alert("Refresh failed", e.message || "Could not refresh the product."));
@@ -210,7 +239,8 @@ export default function AdjustOpenProductScreen() {
   }
 
   function chooseLevel(percent: number) {
-    setRemainingPercent(percent);
+    const validPercent = normalizePercentage(percent);
+    if (validPercent !== null) setRemainingPercent(validPercent);
   }
 
   async function saveDraft() {
@@ -223,8 +253,10 @@ export default function AdjustOpenProductScreen() {
   }
 
   function updateFromImageTap(y: number) {
+    if (!Number.isFinite(y)) return;
     const raw = Math.max(0, Math.min(100, 100 - (y / 280) * 100));
-    setRemainingPercent(Math.round(raw / 5) * 5);
+    const nextPercent = normalizePercentage(Math.round(raw / 5) * 5);
+    if (nextPercent !== null) setRemainingPercent(nextPercent);
   }
 
   async function addProductImage() {
@@ -337,14 +369,19 @@ export default function AdjustOpenProductScreen() {
                   </Pressable>
                 </View>
               )}
-              <View
+              {hasUsableImage && <View
                 style={[
                   styles.fillLine,
-                  { bottom: `${remainingPercent}%` },
+                  {
+                    top: `${100 - remainingPercent}%`,
+                    transform: [{
+                      translateY: remainingPercent === 0 ? (highContrastOutline ? -6 : -4) : 0,
+                    }],
+                  },
                   highContrastOutline && styles.fillLineHighContrast,
                 ]}
-              />
-              {image.status === "LOADED" && (
+              />}
+              {hasUsableImage && (
                 <Pressable
                   style={styles.imageTapLayer}
                   onPress={(event) => updateFromImageTap(event.nativeEvent.locationY)}
