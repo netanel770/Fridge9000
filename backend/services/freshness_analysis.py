@@ -15,7 +15,12 @@ try:
         FRESHNESS_MODEL_PATH,
         FRESHNESS_UPLOAD_DIR,
     )
-    from ..freshness import classification_probabilities, parse_freshness_class
+    from ..freshness import (
+        classification_probabilities,
+        is_supported_freshness_class,
+        parse_freshness_class,
+        supported_product_identities,
+    )
     from ..db.connection import get_conn
 except ImportError:
     from core.config import (
@@ -23,7 +28,12 @@ except ImportError:
         FRESHNESS_MODEL_PATH,
         FRESHNESS_UPLOAD_DIR,
     )
-    from freshness import classification_probabilities, parse_freshness_class
+    from freshness import (
+        classification_probabilities,
+        is_supported_freshness_class,
+        parse_freshness_class,
+        supported_product_identities,
+    )
     from db.connection import get_conn
 
 
@@ -58,6 +68,44 @@ def get_freshness_model():
     return _FRESHNESS_MODEL
 
 
+def get_supported_product_identities() -> set[str]:
+    return supported_product_identities(get_freshness_model().names)
+
+
+def classify_freshness_image(image: np.ndarray):
+    if not isinstance(image, np.ndarray) or image.size == 0:
+        raise HTTPException(status_code=422, detail="Freshness image crop is empty.")
+    try:
+        freshness_model = get_freshness_model()
+        with _FRESHNESS_MODEL_LOCK:
+            results = freshness_model.predict(image, verbose=False)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        LOGGER.exception("Freshness inference failed")
+        raise HTTPException(status_code=500, detail="Freshness analysis failed.") from exc
+
+    if not results or results[0].probs is None:
+        LOGGER.error("Freshness classifier returned no probabilities")
+        raise HTTPException(status_code=500, detail="Freshness classifier returned no result.")
+
+    result = results[0]
+    class_id = int(result.probs.top1)
+    confidence = float(result.probs.top1conf.item())
+    label = str(freshness_model.names.get(class_id, class_id))
+    classification = parse_freshness_class(label)
+    if classification is None or not is_supported_freshness_class(label):
+        LOGGER.error("Freshness classifier returned an unexpected class: %s", label)
+        raise HTTPException(status_code=422, detail="The model returned an unsupported freshness class.")
+    classification.update({"class_id": class_id, "confidence": confidence})
+    return {
+        "classification": classification,
+        "candidates": classification_probabilities(
+            freshness_model.names, result.probs.data, limit=3
+        ),
+    }
+
+
 async def analyze_freshness(
     file: UploadFile = File(...), household_id: int = 1, user_id: int | None = None
 ):
@@ -82,32 +130,8 @@ async def analyze_freshness(
     if not cv2.imwrite(input_path, image):
         raise HTTPException(status_code=500, detail="Could not save the uploaded image.")
 
-    try:
-        freshness_model = get_freshness_model()
-        with _FRESHNESS_MODEL_LOCK:
-            results = freshness_model.predict(
-                image,
-                verbose=False,
-            )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-    except Exception as exc:
-        LOGGER.exception("Freshness inference failed")
-        raise HTTPException(status_code=500, detail="Freshness analysis failed.") from exc
-
-    if not results or results[0].probs is None:
-        LOGGER.error("Freshness classifier returned no probabilities")
-        raise HTTPException(status_code=500, detail="Freshness classifier returned no result.")
-
-    result = results[0]
-    class_id = int(result.probs.top1)
-    confidence = float(result.probs.top1conf.item())
-    label = str(freshness_model.names.get(class_id, class_id))
-    classification = parse_freshness_class(label)
-    if classification is None:
-        LOGGER.error("Freshness classifier returned an unexpected class: %s", label)
-        raise HTTPException(status_code=422, detail="The model returned an unsupported freshness class.")
-    classification.update({"class_id": class_id, "confidence": confidence})
+    inference = classify_freshness_image(image)
+    classification = inference["classification"]
 
     with get_conn() as conn:
         with conn.cursor() as cursor:
@@ -124,9 +148,7 @@ async def analyze_freshness(
     return {
         "ok": True,
         "classification": classification,
-        "candidates": classification_probabilities(
-            freshness_model.names, result.probs.data, limit=3
-        ),
+        "candidates": inference["candidates"],
         "image_url": f"/uploads/freshness/{input_filename}",
         "message": (
             f"The image was classified as {classification['condition'].lower()} "

@@ -59,6 +59,7 @@ export type DetectionItem = {
   id: number;
   label: string;
   confidence: number;
+  freshness_supported?: boolean;
   x1?: number | null;
   y1?: number | null;
   x2?: number | null;
@@ -66,11 +67,18 @@ export type DetectionItem = {
   created_at?: string;
 };
 
+export type DetectionFreshnessResponse = {
+  ok: boolean;
+  detection_id: number;
+  classification: FreshnessClassification;
+};
+
 export type ReviewItem = {
   id: number;
   original_label: string;
   final_label: string;
   included: boolean;
+  freshness_supported?: boolean;
   confidence?: number;
   x1?: number | null;
   y1?: number | null;

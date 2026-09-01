@@ -1,3 +1,4 @@
+import math
 import os
 import re
 import uuid
@@ -14,12 +15,16 @@ try:
     from services.detection import apply_rules, infer
     from services.inventory import estimate_expiry_date, parse_expiry_date, sync_inventory_summary
     from services.media_images import normalize_uploaded_image
+    from services import freshness_analysis
+    from freshness import normalize_product_identity
 except ModuleNotFoundError:
     from backend.core.config import UPLOAD_DIR
     from backend.db.connection import get_conn
     from backend.services.detection import apply_rules, infer
     from backend.services.inventory import estimate_expiry_date, parse_expiry_date, sync_inventory_summary
     from backend.services.media_images import normalize_uploaded_image
+    from backend.services import freshness_analysis
+    from backend.freshness import normalize_product_identity
 
 _normalize_uploaded_image = normalize_uploaded_image
 
@@ -383,7 +388,96 @@ def get_scan_detections(
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, (scan_id, household_id, user_id))
-            return cur.fetchall()
+            detections = cur.fetchall()
+    try:
+        supported_identities = freshness_analysis.get_supported_product_identities()
+    except RuntimeError:
+        supported_identities = set()
+    for detection in detections:
+        detection["freshness_supported"] = (
+            normalize_product_identity(detection["label"])
+            in supported_identities
+        )
+    return detections
+
+
+def analyze_detection_freshness(
+    scan_id: int,
+    detection_id: int,
+    household_id: int = 1,
+    user_id: int | None = None,
+):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT image_ref FROM scans
+                WHERE id = %s AND household_id = %s
+                  AND (created_by_user_id = %s OR
+                       (household_id = 1 AND created_by_user_id IS NULL));
+                """,
+                (scan_id, household_id, user_id),
+            )
+            scan = cur.fetchone()
+            if not scan:
+                raise HTTPException(status_code=404, detail="Scan not found")
+            cur.execute(
+                """
+                SELECT id, label, x1, y1, x2, y2
+                FROM scan_detections
+                WHERE id = %s AND scan_id = %s;
+                """,
+                (detection_id, scan_id),
+            )
+            detection = cur.fetchone()
+    if not detection:
+        raise HTTPException(status_code=404, detail="Detection not found")
+
+    try:
+        supported_identities = freshness_analysis.get_supported_product_identities()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    detector_identity = normalize_product_identity(detection["label"])
+    if detector_identity not in supported_identities:
+        raise HTTPException(
+            status_code=422,
+            detail="This detected product does not support freshness checking.",
+        )
+
+    image_path = os.path.abspath(scan["image_ref"] or "")
+    if not os.path.isfile(image_path):
+        raise HTTPException(status_code=404, detail="Scan image file not found")
+    image = cv2.imread(image_path)
+    if image is None:
+        raise HTTPException(status_code=422, detail="Stored scan image could not be decoded")
+    image_height, image_width = image.shape[:2]
+    box_values = (detection["x1"], detection["y1"], detection["x2"], detection["y2"])
+    if any(value is None or not math.isfinite(float(value)) for value in box_values):
+        raise HTTPException(status_code=422, detail="Detection bounding box is invalid")
+    x1, y1, x2, y2 = (float(value) for value in box_values)
+    if x1 >= x2 or y1 >= y2:
+        raise HTTPException(status_code=422, detail="Detection bounding box is invalid")
+    padding = max(2, int(max(x2 - x1, y2 - y1) * 0.05))
+    crop_x1 = max(0, int(math.floor(x1)) - padding)
+    crop_y1 = max(0, int(math.floor(y1)) - padding)
+    crop_x2 = min(image_width, int(math.ceil(x2)) + padding)
+    crop_y2 = min(image_height, int(math.ceil(y2)) + padding)
+    if crop_x1 >= crop_x2 or crop_y1 >= crop_y2:
+        raise HTTPException(status_code=422, detail="Detection bounding box is outside the scan image")
+    crop = image[crop_y1:crop_y2, crop_x1:crop_x2].copy()
+    inference = freshness_analysis.classify_freshness_image(crop)
+    classification = inference["classification"]
+    classifier_identity = normalize_product_identity(classification["item"])
+    if classifier_identity != detector_identity:
+        raise HTTPException(
+            status_code=422,
+            detail="Freshness result does not match the detected product.",
+        )
+    return {
+        "ok": True,
+        "detection_id": detection_id,
+        "classification": classification,
+    }
 
 def latest_scan(household_id: int = 1, user_id: int | None = None):
     sql = """

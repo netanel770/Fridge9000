@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 from PIL import Image
 
 
@@ -47,6 +48,17 @@ FAKE_DETECTIONS = [
 def scan_api(test_client, monkeypatch):
     scans = importlib.import_module("services.scans")
     inference_calls = []
+
+    class FreshnessModel:
+        names = {
+            0: "Fresh Apples", 1: "Rotten Apples",
+            2: "Fresh Bananas", 3: "Rotten Bananas",
+            4: "Fresh Oranges", 5: "Rotten Oranges",
+        }
+
+    monkeypatch.setattr(
+        scans.freshness_analysis, "get_freshness_model", lambda: FreshnessModel()
+    )
 
     def fake_infer(payload):
         image_path = Path(payload["image_ref"])
@@ -200,6 +212,172 @@ def test_upload_persists_scan_detections_and_retrievable_image(
     with Image.open(BytesIO(image_response.content)) as served:
         assert served.size == (64, 48)
         assert served.getexif().get(274) is None
+
+
+def test_scan_detections_report_backend_freshness_eligibility(scan_api):
+    client, _, _ = scan_api
+    scan_id = _upload_scan(client)["scan_id"]
+    detections = _detections_by_label(client, scan_id)
+    assert detections["Apple"]["freshness_supported"] is True
+    assert detections["Milk"]["freshness_supported"] is False
+
+
+@pytest.mark.parametrize(
+    ("predicted_class", "condition", "is_rotten"),
+    [("Fresh Apples", "Fresh", False), ("Rotten Apples", "Rotten", True)],
+)
+def test_detection_freshness_is_crop_based_and_read_only(
+    scan_api, db_connection, monkeypatch, predicted_class, condition, is_rotten
+):
+    client, scans, _ = scan_api
+    scan_id = _upload_scan(client)["scan_id"]
+    apple = _detections_by_label(client, scan_id)["Apple"]
+    seen_crops = []
+
+    def classify(crop):
+        seen_crops.append(crop.copy())
+        return {"classification": {
+            "predicted_class": predicted_class, "item": "Apples",
+            "condition": condition, "is_rotten": is_rotten,
+            "class_id": 0 if not is_rotten else 1, "confidence": 0.94,
+        }, "candidates": []}
+
+    monkeypatch.setattr(scans.freshness_analysis, "classify_freshness_image", classify)
+    tables = (
+        "inventory", "inventory_batches", "events", "detection_reviews",
+        "annotation_submissions", "annotations", "freshness_analyses",
+    )
+    with db_connection.cursor() as cursor:
+        before = {}
+        for table in tables:
+            cursor.execute(f"SELECT COUNT(*) FROM {table};")
+            before[table] = cursor.fetchone()[0]
+
+    response = client.post(f"/scans/{scan_id}/detections/{apple['id']}/freshness")
+
+    assert response.status_code == 200
+    assert response.json()["classification"] == {
+        "predicted_class": predicted_class, "item": "Apples",
+        "condition": condition, "is_rotten": is_rotten,
+        "class_id": 0 if not is_rotten else 1, "confidence": 0.94,
+    }
+    assert response.json()["detection_id"] == apple["id"]
+    assert seen_crops[0].shape[:2] == (28, 24)
+    with db_connection.cursor() as cursor:
+        for table in tables:
+            cursor.execute(f"SELECT COUNT(*) FROM {table};")
+            assert cursor.fetchone()[0] == before[table]
+
+
+def test_detection_freshness_rejects_unsupported_invalid_and_mismatched_results(
+    scan_api, db_connection, monkeypatch
+):
+    client, scans, _ = scan_api
+    scan_id = _upload_scan(client)["scan_id"]
+    detections = _detections_by_label(client, scan_id)
+    unsupported = client.post(
+        f"/scans/{scan_id}/detections/{detections['Milk']['id']}/freshness"
+    )
+    missing = client.post(f"/scans/{scan_id}/detections/999999/freshness")
+    monkeypatch.setattr(
+        scans.freshness_analysis, "classify_freshness_image",
+        lambda _crop: {"classification": {
+            "predicted_class": "Fresh Bananas", "item": "Bananas",
+            "condition": "Fresh", "is_rotten": False,
+            "class_id": 2, "confidence": 0.9,
+        }, "candidates": []},
+    )
+    mismatch = client.post(
+        f"/scans/{scan_id}/detections/{detections['Apple']['id']}/freshness"
+    )
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE scan_detections SET x2 = x1 WHERE id = %s;",
+            (detections["Apple"]["id"],),
+        )
+    db_connection.commit()
+    invalid_box = client.post(
+        f"/scans/{scan_id}/detections/{detections['Apple']['id']}/freshness"
+    )
+    assert unsupported.status_code == 422
+    assert missing.status_code == 404
+    assert mismatch.status_code == 422
+    assert "does not match" in mismatch.json()["detail"]
+    assert invalid_box.status_code == 422
+    assert "bounding box" in invalid_box.json()["detail"]
+
+
+def test_detection_freshness_clamps_crop_and_hides_other_users_scan(
+    scan_api, db_connection, monkeypatch
+):
+    client, scans, _ = scan_api
+    scan_id = _upload_scan(client)["scan_id"]
+    apple = _detections_by_label(client, scan_id)["Apple"]
+    crops = []
+    monkeypatch.setattr(
+        scans.freshness_analysis, "classify_freshness_image",
+        lambda crop: crops.append(crop.copy()) or {"classification": {
+            "predicted_class": "Fresh Apples", "item": "Apples",
+            "condition": "Fresh", "is_rotten": False,
+            "class_id": 0, "confidence": 0.9,
+        }, "candidates": []},
+    )
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE scan_detections SET x1 = -20, y1 = -20, x2 = 80, y2 = 80 WHERE id = %s;",
+            (apple["id"],),
+        )
+    db_connection.commit()
+    clamped = client.post(f"/scans/{scan_id}/detections/{apple['id']}/freshness")
+    assert clamped.status_code == 200
+    assert crops[0].shape[:2] == (48, 64)
+
+    other_user = client.post(
+        "/auth/register/password",
+        json={"email": "freshness-other@example.com", "password": "other password"},
+    ).json()["user"]
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE scans SET created_by_user_id = %s WHERE id = %s;",
+            (other_user["id"], scan_id),
+        )
+    db_connection.commit()
+    unauthorized = client.post(f"/scans/{scan_id}/detections/{apple['id']}/freshness")
+    assert unauthorized.status_code == 404
+
+
+def test_detection_freshness_reports_missing_image_and_classifier_failure(
+    scan_api, db_connection, monkeypatch
+):
+    client, scans, _ = scan_api
+    missing_image_scan = _upload_scan(client, "missing-freshness-image.png")
+    missing_detections = _detections_by_label(client, missing_image_scan["scan_id"])
+    with db_connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT image_ref FROM scans WHERE id = %s;",
+            (missing_image_scan["scan_id"],),
+        )
+        Path(cursor.fetchone()[0]).unlink()
+    missing_image = client.post(
+        f"/scans/{missing_image_scan['scan_id']}/detections/"
+        f"{missing_detections['Apple']['id']}/freshness"
+    )
+    assert missing_image.status_code == 404
+
+    failed_scan = _upload_scan(client, "failed-freshness.png")
+    failed_apple = _detections_by_label(client, failed_scan["scan_id"])["Apple"]
+    monkeypatch.setattr(
+        scans.freshness_analysis,
+        "classify_freshness_image",
+        lambda _crop: (_ for _ in ()).throw(
+            HTTPException(status_code=500, detail="Freshness analysis failed.")
+        ),
+    )
+    failed = client.post(
+        f"/scans/{failed_scan['scan_id']}/detections/{failed_apple['id']}/freshness"
+    )
+    assert failed.status_code == 500
+    assert failed.json()["detail"] == "Freshness analysis failed."
 
 
 def test_zero_detection_scan_remains_retrievable_and_accepts_add_annotation(

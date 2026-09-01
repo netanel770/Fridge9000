@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -12,15 +12,18 @@ import {
   Image,
   KeyboardAvoidingView,
   Platform,
+  BackHandler,
 } from "react-native";
 
-import { router, useLocalSearchParams } from "expo-router";
+import { Stack, router, useLocalSearchParams } from "expo-router";
+import { usePreventRemove } from "@react-navigation/native";
 
 import {
   getScanDetections,
   getAllInventory,
   getInventoryBatches,
   submitReview,
+  checkDetectionFreshness,
 } from "../src/services/api";
 import { ProductLabelInput } from "../src/components/ProductLabelInput";
 import { useAuthenticatedImage } from "../src/components/useAuthenticatedImage";
@@ -28,7 +31,7 @@ import { useAuth } from "../src/features/auth/AuthContext";
 
 import { API_BASE_URL } from "../src/services/config";
 
-import type { DetectionItem, InventoryBatchItem, ReviewItem } from "../src/types/api";
+import type { DetectionItem, FreshnessClassification, InventoryBatchItem, ReviewItem } from "../src/types/api";
 
 function normalizeItemName(value: string) {
   return value.trim().toLowerCase();
@@ -43,7 +46,7 @@ function BoxedDetectionImage({ scanId, detectionId }: { scanId: number; detectio
       </Pressable>
     ) : null;
   }
-  return <Image source={{ uri: image.resolvedUri }} style={styles.detectedImage} resizeMode="contain" onLoad={image.onLoad} onError={image.onError} />;
+  return <Image testID={`boxed-detection-image-${detectionId}`} source={{ uri: image.resolvedUri }} style={styles.detectedImage} resizeMode="contain" onLoad={image.onLoad} onError={image.onError} />;
 }
 
 function getBatchExpiryDate(batch: InventoryBatchItem) {
@@ -52,6 +55,22 @@ function getBatchExpiryDate(batch: InventoryBatchItem) {
 
 const UNKNOWN_EXPIRY_KEY = "__unknown_expiry__";
 type RemovalExpiryOption = { key: string; date: string | null; label: string; quantity: number };
+type FreshnessState =
+  | { status: "success"; classification: FreshnessClassification }
+  | { status: "error"; message: string };
+
+function isValidFreshnessClassification(value: unknown): value is FreshnessClassification {
+  if (!value || typeof value !== "object") return false;
+  const classification = value as Partial<FreshnessClassification>;
+  return (
+    typeof classification.predicted_class === "string" &&
+    classification.predicted_class.trim().length > 0 &&
+    typeof classification.confidence === "number" &&
+    Number.isFinite(classification.confidence) &&
+    classification.confidence >= 0 &&
+    classification.confidence <= 1
+  );
+}
 
 function selectedRemovalKey(item: ReviewItem) {
   return item.expiry_source === "inventory_unknown" ? UNKNOWN_EXPIRY_KEY : item.expiry_date || "";
@@ -94,6 +113,26 @@ export default function ReviewScreen() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [activeFreshnessDetectionId, setActiveFreshnessDetectionId] = useState<number | null>(null);
+  const [freshnessByDetectionId, setFreshnessByDetectionId] = useState<Record<number, FreshnessState>>({});
+  const freshnessRequestInFlight = useRef(false);
+  const mounted = useRef(true);
+  const freshnessLocked = activeFreshnessDetectionId !== null;
+
+  usePreventRemove(freshnessLocked, () => {});
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!freshnessLocked) return;
+    const subscription = BackHandler.addEventListener("hardwareBackPress", () => true);
+    return () => subscription.remove();
+  }, [freshnessLocked]);
 
   async function loadData() {
     setLoading(true);
@@ -164,6 +203,7 @@ export default function ReviewScreen() {
           expiry_estimate_date: mode === "Removed" ? null : suggestedExpiry,
           expiry_source: mode === "Removed" ? (removalOption ? (removalOption.date ? "inventory" : "inventory_unknown") : null) : "estimated",
           quantity: isReceiptReview ? d.quantity || 1 : undefined,
+          freshness_supported: d.freshness_supported === true,
         };
       });
 
@@ -267,6 +307,7 @@ export default function ReviewScreen() {
     field: keyof ReviewItem,
     value: string | boolean | number
   ) {
+    if (freshnessRequestInFlight.current) return;
     setItems((prev) => {
       const updated = [...prev];
 
@@ -279,7 +320,42 @@ export default function ReviewScreen() {
     });
   }
 
+  async function handleFreshnessCheck(detectionId: number) {
+    if (!scanId || freshnessRequestInFlight.current) return;
+    freshnessRequestInFlight.current = true;
+    setActiveFreshnessDetectionId(detectionId);
+    setFreshnessByDetectionId((previous) => {
+      const next = { ...previous };
+      delete next[detectionId];
+      return next;
+    });
+    try {
+      const response = await checkDetectionFreshness(scanId, detectionId);
+      if (!isValidFreshnessClassification(response?.classification)) {
+        throw new Error("The freshness service returned an invalid result.");
+      }
+      if (!mounted.current) return;
+      setFreshnessByDetectionId((previous) => ({
+        ...previous,
+        [detectionId]: { status: "success", classification: response.classification },
+      }));
+    } catch (caught) {
+      if (!mounted.current) return;
+      setFreshnessByDetectionId((previous) => ({
+        ...previous,
+        [detectionId]: {
+          status: "error",
+          message: caught instanceof Error ? caught.message : "Freshness check failed.",
+        },
+      }));
+    } finally {
+      freshnessRequestInFlight.current = false;
+      if (mounted.current) setActiveFreshnessDetectionId(null);
+    }
+  }
+
   async function handleSubmit() {
+    if (freshnessRequestInFlight.current) return;
     if (!scanId) {
       Alert.alert("Missing scan", "No valid scan found.");
       return;
@@ -332,9 +408,14 @@ export default function ReviewScreen() {
   return (
     <KeyboardAvoidingView
       style={styles.container}
+      pointerEvents={freshnessLocked ? "none" : "auto"}
       behavior={Platform.OS === "ios" ? "padding" : "height"}
       keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 0}
     >
+      <Stack.Screen options={{
+        gestureEnabled: !freshnessLocked,
+        headerBackVisible: !freshnessLocked,
+      }} />
       <FlatList
         data={items}
         keyExtractor={(_, index) => String(index)}
@@ -347,7 +428,10 @@ export default function ReviewScreen() {
             <Text style={styles.reviewSubtitle}>Confirm each product and quantity before submitting.</Text>
           </View>
         ) : null}
-        renderItem={({ item, index }) => (
+        renderItem={({ item, index }) => {
+          const freshnessState = freshnessByDetectionId[item.id];
+          const freshnessLoading = activeFreshnessDetectionId === item.id;
+          return (
           <View style={styles.card}>
             {scanId && item.id && item.x1 != null && (
               <View style={styles.imageBox}>
@@ -365,6 +449,36 @@ export default function ReviewScreen() {
               </>
             )}
 
+            {!isReceiptReview && item.freshness_supported === true ? (
+              <View style={styles.freshnessArea}>
+                {freshnessLoading ? (
+                  <ActivityIndicator accessibilityLabel={`Checking freshness for ${item.original_label}`} color="#2563eb" />
+                ) : freshnessState?.status === "success" ? (
+                  <View style={styles.freshnessPill}>
+                    <Text style={styles.freshnessPillText}>
+                      {freshnessState.classification.predicted_class} · {Math.round(freshnessState.classification.confidence * 100)}%
+                    </Text>
+                  </View>
+                ) : (
+                  <View>
+                    {freshnessState?.status === "error" ? (
+                      <Text style={styles.freshnessError}>{freshnessState.message}</Text>
+                    ) : null}
+                    <Pressable
+                      accessibilityRole="button"
+                      style={[styles.freshnessButton, freshnessLocked && styles.disabledButton]}
+                      onPress={() => handleFreshnessCheck(item.id)}
+                      disabled={freshnessLocked}
+                    >
+                      <Text style={styles.freshnessButtonText}>
+                        {freshnessState?.status === "error" ? "Retry Freshness" : "Check Freshness"}
+                      </Text>
+                    </Pressable>
+                  </View>
+                )}
+              </View>
+            ) : null}
+
             {isReceiptReview && (
               <>
                 <Text style={styles.label}>Quantity</Text>
@@ -372,6 +486,7 @@ export default function ReviewScreen() {
                   <Pressable
                     style={styles.quantityButton}
                     onPress={() => updateItem(index, "quantity", Math.max(1, (item.quantity || 1) - 1))}
+                    disabled={freshnessLocked}
                   >
                     <Text style={styles.quantityButtonText}>−</Text>
                   </Pressable>
@@ -381,10 +496,12 @@ export default function ReviewScreen() {
                     keyboardType="number-pad"
                     selectTextOnFocus
                     style={styles.quantityInput}
+                    editable={!freshnessLocked}
                   />
                   <Pressable
                     style={styles.quantityButton}
                     onPress={() => updateItem(index, "quantity", Math.min(999, (item.quantity || 1) + 1))}
+                    disabled={freshnessLocked}
                   >
                     <Text style={styles.quantityButtonText}>+</Text>
                   </Pressable>
@@ -397,7 +514,7 @@ export default function ReviewScreen() {
               value={item.final_label}
               onChangeText={(text) => updateItem(index, "final_label", text)}
               suggestions={labelSuggestions}
-              disabled={item.included}
+              disabled={item.included || freshnessLocked}
               accessibilityLabel={`Final product label for ${item.original_label}`}
             />
 
@@ -407,8 +524,11 @@ export default function ReviewScreen() {
             {mode === "Removed" ? (
               <View>
                 <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Select expiry for ${item.original_label}`}
                   style={styles.expirySelect}
                   onPress={() => setOpenExpiryPicker(openExpiryPicker === index ? null : index)}
+                  disabled={freshnessLocked}
                 >
                   <Text style={selectedRemovalKey(item) ? styles.expirySelectText : styles.placeholderText}>
                     {item.expiry_source === "inventory_unknown" ? "Unknown expiry" : item.expiry_date || "Select inventory batch"}
@@ -422,6 +542,7 @@ export default function ReviewScreen() {
                         key={option.key}
                         style={styles.expiryOption}
                         onPress={() => selectRemovalExpiry(index, option)}
+                        disabled={freshnessLocked}
                       >
                         <Text style={styles.expiryOptionDate}>{option.label}</Text>
                         <Text style={styles.expiryOptionQuantity}>Available: {option.quantity}</Text>
@@ -439,6 +560,7 @@ export default function ReviewScreen() {
                 placeholder="YYYY-MM-DD"
                 style={styles.input}
                 autoCapitalize="none"
+                editable={!freshnessLocked}
               />
             )}
 
@@ -448,8 +570,10 @@ export default function ReviewScreen() {
                 {!item.included && !isReceiptReview ? <Text style={styles.excludedHint}>Help the AI understand why this prediction was wrong.</Text> : null}
               </View>
               <Switch
+                accessibilityLabel={`Include ${item.original_label}`}
                 value={item.included}
                 onValueChange={(value) => updateItem(index, "included", value)}
+                disabled={freshnessLocked}
               />
             </View>
             {!item.included && !isReceiptReview && scanId && item.id ? (
@@ -457,12 +581,13 @@ export default function ReviewScreen() {
                 accessibilityRole="button"
                 style={styles.itemTeachButton}
                 onPress={() => router.push({ pathname: (user?.is_system_admin ? "/teach-fridge" : "/teach-user") as never, params: { scanId: String(scanId), detectionId: String(item.id) } })}
+                disabled={freshnessLocked}
               >
                 <Text style={styles.itemTeachButtonText}>Teach AI about this product</Text>
               </Pressable>
             ) : null}
           </View>
-        )}
+        );}}
         ListEmptyComponent={(
           <View style={styles.teachEmptyCard}>
             <View style={styles.teachEmptyIcon}><Text style={styles.teachEmptyEmoji}>✨</Text></View>
@@ -482,9 +607,12 @@ export default function ReviewScreen() {
       />
 
       {items.length > 0 ? <Pressable
-        style={[styles.submitButton, submitting && styles.disabledButton]}
+        accessibilityRole="button"
+        accessibilityLabel="Submit Review"
+        accessibilityState={{ disabled: submitting || freshnessLocked, busy: submitting }}
+        style={[styles.submitButton, (submitting || freshnessLocked) && styles.disabledButton]}
         onPress={handleSubmit}
-        disabled={submitting}
+        disabled={submitting || freshnessLocked}
       >
         {submitting ? (
           <ActivityIndicator color="#fff" />
@@ -536,6 +664,41 @@ const styles = StyleSheet.create({
     padding: 16,
     borderWidth: 1,
     borderColor: "#e5e7eb",
+  },
+  freshnessArea: {
+    minHeight: 44,
+    justifyContent: "center",
+    marginTop: 10,
+  },
+  freshnessButton: {
+    minHeight: 42,
+    borderRadius: 10,
+    backgroundColor: "#2563eb",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 14,
+  },
+  freshnessButtonText: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  freshnessPill: {
+    alignSelf: "flex-start",
+    borderRadius: 999,
+    backgroundColor: "#dcfce7",
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  freshnessPillText: {
+    color: "#166534",
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  freshnessError: {
+    color: "#b91c1c",
+    fontSize: 13,
+    marginBottom: 6,
   },
   imageBox: {
     width: "100%",

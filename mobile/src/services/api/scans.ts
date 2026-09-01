@@ -1,5 +1,6 @@
 import type {
   DetectionItem,
+  DetectionFreshnessResponse,
   LatestScan,
   RecentScan,
   ReviewItem,
@@ -23,6 +24,16 @@ export async function getLatestScan(): Promise<LatestScan | null> {
 
 export function getScanDetections(scanId: number): Promise<DetectionItem[]> {
   return requestJson<DetectionItem[]>(`/scans/${scanId}/detections`);
+}
+
+export function checkDetectionFreshness(
+  scanId: number,
+  detectionId: number,
+): Promise<DetectionFreshnessResponse> {
+  return requestJson<DetectionFreshnessResponse>(
+    `/scans/${scanId}/detections/${detectionId}/freshness`,
+    { method: "POST" },
+  );
 }
 
 export async function submitReview(

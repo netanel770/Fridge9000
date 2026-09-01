@@ -69,3 +69,10 @@ def boxed_detection(scan_id: int, detection_id: int, context: Household):
     return scans.get_detection_boxed_image(
         scan_id, detection_id, context.household_id, context.user_id
     )
+
+
+@router.post("/scans/{scan_id}/detections/{detection_id}/freshness")
+def detection_freshness(scan_id: int, detection_id: int, context: Household):
+    return scans.analyze_detection_freshness(
+        scan_id, detection_id, context.household_id, context.user_id
+    )
