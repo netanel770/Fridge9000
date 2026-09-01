@@ -45,6 +45,45 @@ def expanded_box(box, width: int, height: int, expansion: float):
     ]
 
 
+def _edge_touch_count(x: int, y: int, x2: int, y2: int, bounds, tolerance: int = 0):
+    bx1, by1, bx2, by2 = bounds
+    return sum((
+        x <= bx1 + tolerance,
+        y <= by1 + tolerance,
+        x2 >= bx2 - tolerance,
+        y2 >= by2 - tolerance,
+    ))
+
+
+def _enclosed_hole_area(mask: np.ndarray):
+    inverse = (mask == 0).astype(np.uint8)
+    count, _labels, stats, _ = cv2.connectedComponentsWithStats(inverse, connectivity=8)
+    if count <= 1:
+        return 0
+    height, width = mask.shape
+    hole_area = 0
+    for component_index in range(1, count):
+        x = int(stats[component_index, cv2.CC_STAT_LEFT])
+        y = int(stats[component_index, cv2.CC_STAT_TOP])
+        component_width = int(stats[component_index, cv2.CC_STAT_WIDTH])
+        component_height = int(stats[component_index, cv2.CC_STAT_HEIGHT])
+        touches_image_edge = (
+            x == 0 or y == 0
+            or x + component_width == width
+            or y + component_height == height
+        )
+        if not touches_image_edge:
+            hole_area += int(stats[component_index, cv2.CC_STAT_AREA])
+    return hole_area
+
+
+def _plausible_coverage_score(coverage: float):
+    coverage = max(0.0, min(1.0, coverage))
+    if coverage <= 0.5:
+        return 0.5 + coverage
+    return 0.35 + 0.65 * ((1.0 - coverage) / 0.5)
+
+
 def clean_and_score_mask(raw_mask: np.ndarray, prompt_box, detection_confidence: float):
     mask = (raw_mask > 0.5).astype(np.uint8)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
@@ -64,17 +103,44 @@ def clean_and_score_mask(raw_mask: np.ndarray, prompt_box, detection_confidence:
     height = int(stats[component_index, cv2.CC_STAT_HEIGHT])
     x2 = x + width
     y2 = y + height
-    px1, py1, px2, py2 = prompt_box
+    image_height, image_width = cleaned.shape
+    px1, py1, px2, py2 = [int(value) for value in prompt_box]
+    px1 = max(0, min(image_width - 1, px1))
+    py1 = max(0, min(image_height - 1, py1))
+    px2 = max(px1 + 1, min(image_width, px2))
+    py2 = max(py1 + 1, min(image_height, py2))
     tolerance = max(3, int(min(width, height) * 0.025))
-    touches_prompt = (
-        abs(x - px1) <= tolerance
-        or abs(y - py1) <= tolerance
-        or abs(x2 - px2) <= tolerance
-        or abs(y2 - py2) <= tolerance
+    prompt_edge_touches = _edge_touch_count(
+        x, y, x2, y2, (px1, py1, px2, py2), tolerance
     )
+    image_edge_touches = _edge_touch_count(
+        x, y, x2, y2, (0, 0, image_width, image_height)
+    )
+    touches_prompt = prompt_edge_touches > 0
     component_purity = largest_area / total_area
     prompt_area = max(1, (px2 - px1) * (py2 - py1))
-    coverage = min(1.0, largest_area / prompt_area)
+    area_inside_prompt = int(cleaned[py1:py2, px1:px2].sum())
+    prompt_coverage = min(1.0, area_inside_prompt / prompt_area)
+    image_coverage = largest_area / max(1, image_width * image_height)
+    hole_area = _enclosed_hole_area(cleaned)
+    hole_ratio = hole_area / max(1, largest_area + hole_area)
+
+    background_like = (
+        (image_coverage >= 0.92 and image_edge_touches >= 3)
+        or (
+            prompt_coverage >= 0.9
+            and prompt_edge_touches >= 3
+            and (image_coverage >= 0.88 or hole_ratio >= 0.01)
+        )
+        or (
+            prompt_coverage >= 0.78
+            and prompt_edge_touches >= 3
+            and hole_ratio >= 0.01
+        )
+    )
+    if background_like:
+        return None, 0.0, True
+
     solidity_contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     solidity = 0.0
     if solidity_contours:
@@ -85,10 +151,11 @@ def clean_and_score_mask(raw_mask: np.ndarray, prompt_box, detection_confidence:
             solidity = min(1.0, cv2.contourArea(contour) / hull_area)
     quality = (
         0.4 * max(0.0, min(1.0, detection_confidence))
-        + 0.25 * component_purity
-        + 0.2 * coverage
+        + 0.2 * component_purity
+        + 0.2 * _plausible_coverage_score(prompt_coverage)
         + 0.15 * solidity
-        - (0.12 if touches_prompt else 0.0)
+        + 0.05 * (1.0 - min(1.0, hole_ratio * 4.0))
+        - 0.04 * max(0, prompt_edge_touches - 1)
     )
     return cleaned, quality, touches_prompt
 
