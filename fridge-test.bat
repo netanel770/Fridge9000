@@ -112,11 +112,14 @@ echo ============================================================
 if "%FAILED%"=="0" (
     echo  ALL CHECKS PASSED
     echo ============================================================
-    popd >nul
-    exit /b 0
+    set "RESULT=0"
 ) else (
     echo  ONE OR MORE CHECKS FAILED
     echo ============================================================
-    popd >nul
-    exit /b 1
+    set "RESULT=1"
 )
+
+echo.
+pause
+popd >nul
+exit /b %RESULT%
