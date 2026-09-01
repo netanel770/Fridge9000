@@ -122,10 +122,22 @@ def lifecycle_context(
     monkeypatch.setattr(providers, "BACKEND_DIR", root)
     monkeypatch.setattr(providers, "TRAINING_STARTING_WEIGHTS_PATH", foundation_path)
     monkeypatch.setattr(providers, "TRAINING_STARTING_MODEL_VERSION", foundation_version)
+
+    def fake_prepare_local_combined_dataset(
+        correction_dir, dataset_version, active_model_path
+    ):
+        with db_connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT model_path FROM model_versions WHERE status = 'active' LIMIT 1;"
+            )
+            expected_active_path = Path(cursor.fetchone()[0]).resolve()
+        assert Path(active_model_path).resolve() == expected_active_path
+        return correction_dir
+
     monkeypatch.setattr(
         providers,
         "_prepare_local_combined_dataset",
-        lambda correction_dir, dataset_version: correction_dir,
+        fake_prepare_local_combined_dataset,
     )
     monkeypatch.setattr(trainer, "YOLO", FakeYolo)
 
@@ -1731,12 +1743,20 @@ def test_ai_progress_rollback_targets_and_comparison_are_pair_safe_and_reusable(
     with db_connection.cursor() as cursor:
         cursor.execute(
             """
-            INSERT INTO model_versions(version, model_path, status)
-            VALUES ('arbitrary-archive', %s, 'archived'),
-                   ('never-production-rejected', %s, 'rejected'),
-                   ('unresolved-candidate', %s, 'candidate');
+            WITH active AS (
+                SELECT created_at FROM model_versions WHERE version = %s
+            )
+            INSERT INTO model_versions(version, model_path, status, created_at)
+            SELECT values.version, values.model_path, values.status,
+                   active.created_at + values.age
+            FROM active
+            CROSS JOIN (VALUES
+                ('arbitrary-archive', %s, 'archived', INTERVAL '1 microsecond'),
+                ('never-production-rejected', %s, 'rejected', INTERVAL '2 microseconds'),
+                ('unresolved-candidate', %s, 'candidate', INTERVAL '3 microseconds')
+            ) AS values(version, model_path, status, age);
             """,
-            (str(unused_path), str(unused_path), str(unused_path)),
+            (active_version, str(unused_path), str(unused_path), str(unused_path)),
         )
     db_connection.commit()
 
