@@ -20,6 +20,7 @@ import {
 import { API_BASE_URL } from "../src/services/config";
 import type { InventoryBatchItem } from "../src/types/api";
 import { useAuthenticatedImage } from "../src/components/useAuthenticatedImage";
+import { useAuth } from "../src/features/auth/AuthContext";
 import { confirmAction, showMessage } from "../src/utils/confirm";
 
 const QUICK_LEVELS = [
@@ -164,6 +165,7 @@ function RemainingSlider({
 }
 
 export default function AdjustOpenProductScreen() {
+  const { user } = useAuth();
   const params = useLocalSearchParams<{ itemId?: string; itemName?: string }>();
   const itemId = Number(params.itemId);
   const itemName = params.itemName || "Product";
@@ -174,6 +176,7 @@ export default function AdjustOpenProductScreen() {
   const [saving, setSaving] = useState(false);
   const [imageVersion, setImageVersion] = useState(0);
   const [uploadingImage, setUploadingImage] = useState(false);
+  const uploadingImageRef = useRef(false);
   const [highContrastOutline, setHighContrastOutline] = useState(initialHighContrastPreference);
 
   async function loadBatches(preferredBatchId?: number | null) {
@@ -259,7 +262,17 @@ export default function AdjustOpenProductScreen() {
     if (nextPercent !== null) setRemainingPercent(nextPercent);
   }
 
-  async function addProductImage() {
+  async function addProductImage(replacingExisting: boolean) {
+    if (user?.is_system_admin !== true || uploadingImageRef.current) return;
+    if (replacingExisting) {
+      const confirmed = await confirmAction({
+        title: "Replace shared product outline?",
+        message: "This will replace the shared product outline for everyone across all households. Continue?",
+        confirmText: "Continue",
+        destructive: true,
+      });
+      if (!confirmed || uploadingImageRef.current) return;
+    }
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) {
       Alert.alert("Permission required", "Allow photo access to add a product image.");
@@ -272,14 +285,22 @@ export default function AdjustOpenProductScreen() {
     });
     if (result.canceled || !result.assets[0]?.uri) return;
 
+    uploadingImageRef.current = true;
     setUploadingImage(true);
     try {
-      await uploadProductRepresentativeImage(itemId, result.assets[0].uri);
+      const upload = await uploadProductRepresentativeImage(itemId, result.assets[0].uri);
       setImageVersion((version) => version + 1);
-      Alert.alert("Outline created", "The product outline is now available.");
+      const qualityScore = normalizePercentage(upload.quality_score * 100);
+      await showMessage(
+        replacingExisting ? "Segmentation improved" : "Outline created",
+        qualityScore === null
+          ? "New segmentation created."
+          : `New segmentation created. Quality score: ${Math.round(qualityScore)}%`,
+      );
     } catch (e: any) {
       Alert.alert("Image processing failed", e.message || "Could not create a product outline.");
     } finally {
+      uploadingImageRef.current = false;
       setUploadingImage(false);
     }
   }
@@ -358,15 +379,15 @@ export default function AdjustOpenProductScreen() {
                   <Pressable style={styles.addImageButton} onPress={image.retry}>
                     <Text style={styles.addImageText}>Retry image</Text>
                   </Pressable>
-                  <Pressable
+                  {user?.is_system_admin === true && <Pressable
                     style={[styles.addImageButton, uploadingImage && styles.disabled]}
-                    onPress={addProductImage}
+                    onPress={() => addProductImage(false)}
                     disabled={uploadingImage}
                   >
                     {uploadingImage
                       ? <ActivityIndicator color="#fff" />
                       : <Text style={styles.addImageText}>Add product image</Text>}
-                  </Pressable>
+                  </Pressable>}
                 </View>
               )}
               {hasUsableImage && <View
@@ -391,6 +412,15 @@ export default function AdjustOpenProductScreen() {
             <Text style={styles.visualCaption}>
               Filled height, diagonal stripes, and the level line show the amount remaining.
             </Text>
+            {user?.is_system_admin === true && hasUsableImage && <Pressable
+              style={[styles.addImageButton, styles.improveImageButton, uploadingImage && styles.disabled]}
+              onPress={() => addProductImage(true)}
+              disabled={uploadingImage}
+            >
+              {uploadingImage
+                ? <ActivityIndicator color="#fff" />
+                : <Text style={styles.addImageText}>Improve segmentation</Text>}
+            </Pressable>}
             <Pressable
               style={styles.contrastToggle}
               onPress={toggleHighContrastOutline}
@@ -476,6 +506,7 @@ const styles = StyleSheet.create({
   placeholderText: { color: "#6b7280", textAlign: "center", marginTop: 10 },
   addImageButton: { backgroundColor: "#2563eb", borderRadius: 10, paddingHorizontal: 14, paddingVertical: 10, marginTop: 14, minWidth: 160, alignItems: "center" },
   addImageText: { color: "#fff", fontWeight: "700" },
+  improveImageButton: { alignSelf: "center" },
   imageTapLayer: { ...StyleSheet.absoluteFillObject },
   quickLevels: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   levelButton: { backgroundColor: "#fff", borderWidth: 1, borderColor: "#bfdbfe", borderRadius: 999, paddingHorizontal: 12, paddingVertical: 9 },
