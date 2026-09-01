@@ -388,9 +388,12 @@ class TrainingProviderTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch.object(providers, "LOCAL_BASE_DATASET_PATH", base):
+            active_model = SimpleNamespace(names={0: "apple", 1: "banana", 2: "milk"})
+            with patch.object(providers, "LOCAL_BASE_DATASET_PATH", base), patch(
+                "ultralytics.YOLO", return_value=active_model
+            ):
                 combined = providers._prepare_local_combined_dataset(
-                    corrections, "corrections-v1"
+                    corrections, "corrections-v1", root / "active.pt"
                 )
 
             manifest = json.loads(

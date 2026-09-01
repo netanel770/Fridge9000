@@ -525,18 +525,23 @@ def _paired_samples(images_dir: Path, labels_dir: Path, class_names: list[str], 
     return [{"source": source, "image": image_map[key], "label_path": label_map[key], "image_sha256": sha256(image_map[key]), "objects": _parse_detection_label(label_map[key], class_names, clip_to_image=clip_to_image)} for key in sorted(image_map)]
 
 
-def build_combined_dataset(base_root: Path, corrections_root: Path, correction_info: dict[str, Any], output_root: Path, job: Job) -> dict[str, Any]:
+def _class_identity(name: str) -> str:
+    return " ".join(name.split()).casefold()
+
+
+def build_combined_dataset(base_root: Path, corrections_root: Path, correction_info: dict[str, Any], output_root: Path, job: Job, active_classes: list[str]) -> dict[str, Any]:
     base_classes = [line.strip() for line in (base_root / "classes.txt").read_text(encoding="utf-8-sig").splitlines() if line.strip()]
-    if not base_classes or len({name.casefold() for name in base_classes}) != len(base_classes):
+    if not base_classes or len({_class_identity(name) for name in base_classes}) != len(base_classes):
         raise WorkerError("Base classes.txt is empty or contains duplicate class names")
     correction_classes = correction_info["classes"]
-    classes = list(base_classes)
-    known = {name.casefold() for name in classes}
-    for name in sorted(correction_classes, key=str.casefold):
-        if name.casefold() not in known:
+    classes = normalized_class_names(active_classes, "active model")
+    known = {_class_identity(name) for name in classes}
+    for name in [*base_classes, *sorted(correction_classes, key=_class_identity)]:
+        identity = _class_identity(name)
+        if identity not in known:
             classes.append(name)
-            known.add(name.casefold())
-    class_ids = {name.casefold(): index for index, name in enumerate(classes)}
+            known.add(identity)
+    class_ids = {_class_identity(name): index for index, name in enumerate(classes)}
 
     base_samples = _paired_samples(base_root / "images", base_root / "labels", base_classes, "base", clip_to_image=True)
     correction_samples = []
@@ -599,7 +604,7 @@ def build_combined_dataset(base_root: Path, corrections_root: Path, correction_i
         label_path = output_root / "labels" / split / Path(filename).with_suffix(".txt").name
         lines = []
         for label, box in sample["objects"]:
-            lines.append(f"{class_ids[label.casefold()]} " + " ".join(f"{value:.8f}" for value in box))
+            lines.append(f"{class_ids[_class_identity(label)]} " + " ".join(f"{value:.8f}" for value in box))
         label_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
         counts[split]["images"] += 1
         counts[split]["annotations"] += len(lines)
@@ -669,9 +674,9 @@ def normalized_class_names(raw: Any, field: str) -> list[str]:
         if not isinstance(value, str) or not value.strip():
             raise WorkerError(f"{field} contains an empty or non-string class name")
         name = value.strip()
-        if name.casefold() in identities:
+        if _class_identity(name) in identities:
             raise WorkerError(f"{field} contains duplicate normalized class name {name!r}")
-        identities.add(name.casefold())
+        identities.add(_class_identity(name))
         names.append(name)
     if not names:
         raise WorkerError(f"{field} contains no classes")
@@ -681,12 +686,23 @@ def normalized_class_names(raw: Any, field: str) -> list[str]:
 def require_class_preservation(required_classes: Any, available_classes: Any, context: str) -> None:
     required = normalized_class_names(required_classes, "active model")
     available = normalized_class_names(available_classes, context)
-    available_identities = {name.casefold() for name in available}
-    missing = [name for name in required if name.casefold() not in available_identities]
+    available_identities = {_class_identity(name) for name in available}
+    missing = [name for name in required if _class_identity(name) not in available_identities]
     if missing:
         raise WorkerError(
             f"{context} is missing active detector classes: {', '.join(missing)}"
         )
+
+
+def load_active_model_classes(model_path: Path) -> list[str]:
+    try:
+        from ultralytics import YOLO
+        model = YOLO(str(model_path))
+    except Exception as exc:
+        raise WorkerError(f"Could not load active detector class metadata: {exc}") from exc
+    if model.task != "detect":
+        raise WorkerError(f"active_model.pt must be YOLO object-detection weights, got task={model.task!r}")
+    return normalized_class_names(model.names, "active model")
 
 
 def metrics_from_result(result: Any, names: list[str]) -> dict[str, Any]:
@@ -840,7 +856,11 @@ def run_worker(input_root: Path, working_root: Path, validate_only: bool = False
         stage = "base_dataset_validation"
         base_root = find_base_dataset(input_root)
         stage = "combined_dataset_build"
-        dataset = build_combined_dataset(base_root, dataset_root, corrections, working_root / "combined_dataset", job)
+        active_classes = load_active_model_classes(active_copy)
+        dataset = build_combined_dataset(
+            base_root, dataset_root, corrections, working_root / "combined_dataset", job,
+            active_classes,
+        )
         run_manifest = {
             "status": "validated" if validate_only else "running", "created_at": utc_now(), "job": asdict(job),
             "inputs": {
@@ -892,7 +912,9 @@ def run_worker(input_root: Path, working_root: Path, validate_only: bool = False
         active_model = YOLO(str(active_copy))
         if active_model.task != "detect":
             raise WorkerError(f"active_model.pt must be YOLO object-detection weights, got task={active_model.task!r}")
-        active_classes = normalized_class_names(active_model.names, "active model")
+        runtime_active_classes = normalized_class_names(active_model.names, "active model")
+        if runtime_active_classes != active_classes:
+            raise WorkerError("Active detector class metadata changed between dataset construction and training")
         require_class_preservation(
             active_classes, dataset["classes"], "Combined training dataset"
         )

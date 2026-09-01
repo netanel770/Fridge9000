@@ -296,7 +296,7 @@ def _load_kaggle_dataset_builder():
 
 
 def _prepare_local_combined_dataset(
-    correction_dir: Path, dataset_version: str
+    correction_dir: Path, dataset_version: str, active_model_path: Path
 ) -> Path:
     base_root = LOCAL_BASE_DATASET_PATH.resolve()
     required = (base_root / "classes.txt", base_root / "images", base_root / "labels")
@@ -318,13 +318,17 @@ def _prepare_local_combined_dataset(
         val_fraction=0.15,
         test_fraction=0.15,
     )
+    from ultralytics import YOLO
+    active_names = YOLO(str(active_model_path)).names
+    active_classes = list(active_names.values()) if isinstance(active_names, dict) else list(active_names)
     correction_dir.rename(correction_archive)
     try:
         corrections = builder.validate_dataset(
             correction_archive, job, require_evaluation=False
         )
         builder.build_combined_dataset(
-            base_root, correction_archive, corrections, correction_dir, job
+            base_root, correction_archive, corrections, correction_dir, job,
+            active_classes,
         )
     except BaseException as exc:
         if correction_dir.exists():
@@ -347,7 +351,7 @@ def local_training(
     foundation = _training_foundation(active)
     progress(phase="combining_local_dataset", dataset_version=export_summary["dataset_version"])
     dataset_dir = _prepare_local_combined_dataset(
-        dataset_dir, export_summary["dataset_version"]
+        dataset_dir, export_summary["dataset_version"], active["resolved_path"]
     )
     progress(phase="training_local", dataset_version=export_summary["dataset_version"])
     args = SimpleNamespace(

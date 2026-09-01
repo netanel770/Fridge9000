@@ -6,10 +6,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from train import Job, WorkerError, _nvidia_smi_diagnostic, _parse_detection_label, align_model_names_for_evaluation, candidate_is_better, class_aware_comparison, discover_inputs, ensure_training_dependencies, metric_differences, require_class_preservation, run_worker, safe_extract_zip
+from train import Job, WorkerError, _nvidia_smi_diagnostic, _parse_detection_label, align_model_names_for_evaluation, build_combined_dataset, candidate_is_better, class_aware_comparison, discover_inputs, ensure_training_dependencies, metric_differences, require_class_preservation, run_worker, safe_extract_zip
 
 
 class TrainerValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.active_classes = ["Apple"]
+        patcher = patch("train.load_active_model_classes", side_effect=lambda _path: self.active_classes)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def make_package(
         self,
         root: Path,
@@ -18,6 +24,7 @@ class TrainerValidationTests(unittest.TestCase):
         correction_class="Apple",
         base_classes=("Apple",),
     ):
+        self.active_classes = list(base_classes)
         source = root / "source"
         (source / "images" / "train").mkdir(parents=True)
         (source / "images" / "val").mkdir(parents=True)
@@ -105,6 +112,56 @@ class TrainerValidationTests(unittest.TestCase):
             self.assertEqual(combined_manifest["included_submission_ids"], [10, 11, 12])
             self.assertEqual(combined_manifest["trusted_submission_ids"], [10, 11])
             self.assertEqual(combined_manifest["experimental_submission_ids"], [12])
+
+    def test_active_order_is_canonical_and_all_source_labels_are_remapped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "base"
+            (base / "images").mkdir(parents=True)
+            (base / "labels").mkdir()
+            (base / "classes.txt").write_text("E\nD\nC\nB\nA\n", encoding="utf-8")
+            for index in range(30):
+                (base / "images" / f"base-{index}.jpg").write_bytes(f"base-{index}".encode())
+                (base / "labels" / f"base-{index}.txt").write_text(
+                    "0 0.5 0.5 0.4 0.4\n", encoding="utf-8"
+                )
+
+            corrections = root / "corrections"
+            for split in ("train", "val", "test"):
+                (corrections / "images" / split).mkdir(parents=True)
+                (corrections / "labels" / split).mkdir(parents=True)
+                (corrections / "images" / split / f"{split}.jpg").write_bytes(split.encode())
+                (corrections / "labels" / split / f"{split}.txt").write_text(
+                    "0 0.4 0.5 0.2 0.2\n1 0.6 0.5 0.2 0.2\n", encoding="utf-8"
+                )
+
+            job = SimpleNamespace(
+                dataset_version="stable-ids-v1", base_dataset_slug="owner/base",
+                train_fraction=0.70, val_fraction=0.15, test_fraction=0.15,
+            )
+            result = build_combined_dataset(
+                base,
+                corrections,
+                {
+                    "classes": ["apple", "LEMON", " a "],
+                    "manifest": {"content_sha256": "corrections"},
+                },
+                root / "combined",
+                job,
+                ["A", "B", "C", "D", "E", "Lemon"],
+            )
+
+            self.assertEqual(result["classes"], ["A", "B", "C", "D", "E", "Lemon", "apple"])
+            self.assertEqual(result["classes"].index("Lemon"), 5)
+            self.assertEqual(result["classes"].index("apple"), 6)
+            manifest = result["manifest"]
+            for sample in manifest["samples"]:
+                rows = (root / "combined" / sample["label"]).read_text(encoding="utf-8").splitlines()
+                class_ids = [int(row.split()[0]) for row in rows]
+                if sample["source"] == "base":
+                    self.assertEqual(class_ids, [4])
+                else:
+                    self.assertEqual(class_ids, [6, 5])
 
     def test_class_preservation_is_semantic_and_order_independent(self):
         require_class_preservation(
