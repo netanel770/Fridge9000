@@ -855,6 +855,8 @@ def run_worker(input_root: Path, working_root: Path, validate_only: bool = False
         corrections = validate_dataset(dataset_root, job, require_evaluation=False)
         stage = "base_dataset_validation"
         base_root = find_base_dataset(input_root)
+        stage = "dependency_installation"
+        ensure_training_dependencies(require_cuda=job.require_cuda)
         stage = "combined_dataset_build"
         active_classes = load_active_model_classes(active_copy)
         dataset = build_combined_dataset(
@@ -891,8 +893,6 @@ def run_worker(input_root: Path, working_root: Path, validate_only: bool = False
             write_json(working_root / "validation_report.json", report)
             return report
 
-        stage = "dependency_installation"
-        ensure_training_dependencies(require_cuda=job.require_cuda)
         stage = "runtime_validation"
         import torch
         import ultralytics

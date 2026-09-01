@@ -12,9 +12,19 @@ from train import Job, WorkerError, _nvidia_smi_diagnostic, _parse_detection_lab
 class TrainerValidationTests(unittest.TestCase):
     def setUp(self):
         self.active_classes = ["Apple"]
-        patcher = patch("train.load_active_model_classes", side_effect=lambda _path: self.active_classes)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.setup_events = []
+        dependency_patcher = patch(
+            "train.ensure_training_dependencies",
+            side_effect=lambda **_kwargs: self.setup_events.append("dependencies"),
+        )
+        model_patcher = patch(
+            "train.load_active_model_classes",
+            side_effect=lambda _path: self.setup_events.append("model") or self.active_classes,
+        )
+        self.ensure_dependencies = dependency_patcher.start()
+        self.load_active_classes = model_patcher.start()
+        self.addCleanup(dependency_patcher.stop)
+        self.addCleanup(model_patcher.stop)
 
     def make_package(
         self,
@@ -85,6 +95,16 @@ class TrainerValidationTests(unittest.TestCase):
             second_assignment = {sample["source_image_sha256"]: sample["split"] for sample in second["dataset"]["manifest"]["samples"]}
             self.assertEqual(first_assignment, second_assignment)
             self.assertNotEqual(Path(result["candidate_output"]).name, "active_model.pt")
+
+    def test_dependencies_are_initialized_once_before_active_model_inspection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_root = self.make_package(root)
+            run_worker(input_root, root / "working", validate_only=True)
+
+        self.assertEqual(self.setup_events, ["dependencies", "model"])
+        self.ensure_dependencies.assert_called_once_with(require_cuda=True)
+        self.load_active_classes.assert_called_once()
 
     def test_combined_dataset_preserves_base_vocabulary_and_adds_lemon(self):
         with tempfile.TemporaryDirectory() as directory:
