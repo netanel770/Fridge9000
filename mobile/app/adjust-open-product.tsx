@@ -174,9 +174,14 @@ export default function AdjustOpenProductScreen() {
   const [remainingPercent, setRemainingPercent] = useState(100);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [imageVersion, setImageVersion] = useState(0);
+  const [imageRevision, setImageRevision] = useState<string | null>(null);
   const [uploadingImage, setUploadingImage] = useState(false);
   const uploadingImageRef = useRef(false);
+  const [pendingUploadSuccess, setPendingUploadSuccess] = useState<{
+    revision: string;
+    title: string;
+    message: string;
+  } | null>(null);
   const [highContrastOutline, setHighContrastOutline] = useState(initialHighContrastPreference);
 
   async function loadBatches(preferredBatchId?: number | null) {
@@ -206,10 +211,32 @@ export default function AdjustOpenProductScreen() {
   const unitOptions = buildUnitOptions(batches);
   const selectedUnit = unitOptions.find((option) => option.key === selectedUnitKey) || null;
   const selectedBatch = selectedUnit?.batch || null;
-  const imageUri = `${API_BASE_URL}/items/${itemId}/representative-image?v=${imageVersion}`;
+  const imageUri = `${API_BASE_URL}/items/${itemId}/representative-image${
+    imageRevision ? `?revision=${encodeURIComponent(imageRevision)}` : ""
+  }`;
   const image = useAuthenticatedImage(imageUri);
   const imageAvailable = image.status !== "ERROR";
   const hasUsableImage = image.status === "LOADED" && Boolean(image.resolvedUri);
+
+  useEffect(() => {
+    if (!pendingUploadSuccess || pendingUploadSuccess.revision !== imageRevision) return;
+    if (image.status === "ERROR") {
+      setPendingUploadSuccess(null);
+      uploadingImageRef.current = false;
+      setUploadingImage(false);
+      Alert.alert(
+        "Outline refresh failed",
+        "The new outline was saved, but could not be loaded. Retry the image to display it.",
+      );
+      return;
+    }
+    if (image.loadedSourceUri !== imageUri || image.status !== "LOADED") return;
+    const { title, message } = pendingUploadSuccess;
+    setPendingUploadSuccess(null);
+    uploadingImageRef.current = false;
+    setUploadingImage(false);
+    void showMessage(title, message);
+  }, [image.loadedSourceUri, image.status, imageRevision, imageUri, pendingUploadSuccess]);
 
   function selectUnit(option: UnitOption) {
     setSelectedUnitKey(option.key);
@@ -287,21 +314,26 @@ export default function AdjustOpenProductScreen() {
 
     uploadingImageRef.current = true;
     setUploadingImage(true);
+    let waitingForImageRefresh = false;
     try {
       const upload = await uploadProductRepresentativeImage(itemId, result.assets[0].uri);
-      setImageVersion((version) => version + 1);
       const qualityScore = normalizePercentage(upload.quality_score * 100);
-      await showMessage(
-        replacingExisting ? "Segmentation improved" : "Outline created",
-        qualityScore === null
+      waitingForImageRefresh = true;
+      setPendingUploadSuccess({
+        revision: upload.outline_revision,
+        title: replacingExisting ? "Segmentation improved" : "Outline created",
+        message: qualityScore === null
           ? "New segmentation created."
           : `New segmentation created. Quality score: ${Math.round(qualityScore)}%`,
-      );
+      });
+      setImageRevision(upload.outline_revision);
     } catch (e: any) {
       Alert.alert("Image processing failed", e.message || "Could not create a product outline.");
     } finally {
-      uploadingImageRef.current = false;
-      setUploadingImage(false);
+      if (!waitingForImageRefresh) {
+        uploadingImageRef.current = false;
+        setUploadingImage(false);
+      }
     }
   }
 

@@ -38,6 +38,7 @@ jest.mock("../../src/components/useAuthenticatedImage", () => ({
     return {
       resolvedUri: mockImageStatus === "LOADED" ? "blob:outline" : null,
       status: mockImageStatus,
+      loadedSourceUri: mockImageStatus === "LOADED" ? uri : null,
       retry: jest.fn(),
       onLoad: jest.fn(),
       onError: jest.fn(),
@@ -84,7 +85,7 @@ describe("AdjustOpenProductScreen representative image administration", () => {
     } as never);
     mockedConfirm.mockResolvedValue(true);
     mockedShowMessage.mockResolvedValue();
-    mockedUpload.mockResolvedValue({ ok: true, quality_score: 0.82 });
+    mockedUpload.mockResolvedValue({ ok: true, quality_score: 0.82, outline_revision: "revision-1" });
     jest.spyOn(Alert, "alert").mockImplementation(jest.fn());
   });
 
@@ -115,7 +116,9 @@ describe("AdjustOpenProductScreen representative image administration", () => {
     await fireEvent.press(view.getByText("Improve segmentation"));
 
     await waitFor(() => expect(mockedUpload).toHaveBeenCalledWith(7, "file:///replacement.jpg"));
-    await waitFor(() => expect(mockAuthenticatedImageUris.some((uri) => uri.endsWith("?v=1"))).toBe(true));
+    await waitFor(() => expect(mockAuthenticatedImageUris.some(
+      (uri) => uri.endsWith("?revision=revision-1"),
+    )).toBe(true));
     expect(mockedConfirm).toHaveBeenCalledWith(expect.objectContaining({
       message: expect.stringContaining("shared product outline for everyone"),
     }));
@@ -132,13 +135,17 @@ describe("AdjustOpenProductScreen representative image administration", () => {
     await fireEvent.press(view.getByText("Improve segmentation"));
 
     await waitFor(() => expect(Alert.alert).toHaveBeenCalledWith("Image processing failed", "SAM failed"));
-    expect(mockAuthenticatedImageUris.some((uri) => uri.endsWith("?v=1"))).toBe(false);
+    expect(mockAuthenticatedImageUris.some((uri) => uri.includes("?revision="))).toBe(false);
     expect(view.getByText("Improve segmentation")).toBeTruthy();
   });
 
   test("blocks duplicate submissions while segmentation is processing", async () => {
     mockIsSystemAdmin = true;
-    let finishUpload!: (value: { ok: boolean; quality_score: number }) => void;
+    let finishUpload!: (value: {
+      ok: boolean;
+      quality_score: number;
+      outline_revision: string;
+    }) => void;
     mockedUpload.mockImplementation(() => new Promise((resolve) => { finishUpload = resolve; }));
     const view = await renderScreen();
     const improveButton = view.getByText("Improve segmentation");
@@ -150,9 +157,48 @@ describe("AdjustOpenProductScreen representative image administration", () => {
       expect(mockedUpload).toHaveBeenCalledTimes(1);
       const duplicate = fireEvent.press(improveButton);
       expect(mockedUpload).toHaveBeenCalledTimes(1);
-      finishUpload({ ok: true, quality_score: 0.75 });
+      finishUpload({ ok: true, quality_score: 0.75, outline_revision: "revision-2" });
       await Promise.all([submission, duplicate]);
     });
     await waitFor(() => expect(mockedShowMessage).toHaveBeenCalled());
+  });
+
+  test("uses each server revision across consecutive replacements", async () => {
+    mockIsSystemAdmin = true;
+    mockedUpload
+      .mockResolvedValueOnce({ ok: true, quality_score: 0.8, outline_revision: "server-first" })
+      .mockResolvedValueOnce({ ok: true, quality_score: 0.9, outline_revision: "server-second" });
+    const view = await renderScreen();
+
+    await fireEvent.press(view.getByText("Improve segmentation"));
+    await waitFor(() => expect(mockAuthenticatedImageUris.some(
+      (uri) => uri.endsWith("?revision=server-first"),
+    )).toBe(true));
+    await waitFor(() => expect(mockedShowMessage).toHaveBeenCalledTimes(1));
+
+    await fireEvent.press(view.getByText("Improve segmentation"));
+    await waitFor(() => expect(mockAuthenticatedImageUris.some(
+      (uri) => uri.endsWith("?revision=server-second"),
+    )).toBe(true));
+    await waitFor(() => expect(mockedShowMessage).toHaveBeenCalledTimes(2));
+    expect(mockAuthenticatedImageUris.at(-1)).toContain("revision=server-second");
+  });
+
+  test("does not reuse a resetting counter URL after a screen remount", async () => {
+    mockIsSystemAdmin = true;
+    const firstView = await renderScreen();
+    await fireEvent.press(firstView.getByText("Improve segmentation"));
+    await waitFor(() => expect(mockAuthenticatedImageUris.some(
+      (uri) => uri.endsWith("?revision=revision-1"),
+    )).toBe(true));
+    await firstView.unmount();
+    mockAuthenticatedImageUris.length = 0;
+
+    await renderScreen();
+
+    expect(mockAuthenticatedImageUris.at(-1)).toBe(
+      "http://api.test/items/7/representative-image",
+    );
+    expect(mockAuthenticatedImageUris.at(-1)).not.toContain("?v=");
   });
 });

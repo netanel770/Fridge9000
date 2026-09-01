@@ -160,6 +160,104 @@ def clean_and_score_mask(raw_mask: np.ndarray, prompt_box, detection_confidence:
     return cleaned, quality, touches_prompt
 
 
+def _prompted_mask_candidate(raw_mask, image_shape, positive_point, negative_points):
+    image_height, image_width = image_shape
+    if raw_mask.shape != (image_height, image_width):
+        raw_mask = cv2.resize(
+            raw_mask,
+            (image_width, image_height),
+            interpolation=cv2.INTER_NEAREST,
+        )
+    mask = (raw_mask > 0.5).astype(np.uint8)
+    positive_x, positive_y = positive_point
+    if mask[positive_y, positive_x] == 0:
+        return None, 0.0
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    component_index = int(labels[positive_y, positive_x])
+    if component_index <= 0 or count <= component_index:
+        return None, 0.0
+    for negative_x, negative_y in negative_points:
+        if labels[negative_y, negative_x] == component_index:
+            return None, 0.0
+    prompted_component = (labels == component_index).astype(np.uint8)
+    component_area = int(stats[component_index, cv2.CC_STAT_AREA])
+    hole_area = _enclosed_hole_area(prompted_component)
+    if hole_area >= 64 and hole_area / max(1, component_area + hole_area) >= 0.005:
+        return None, 0.0
+    cleaned, quality, _ = clean_and_score_mask(
+        prompted_component,
+        [0, 0, image_width, image_height],
+        1.0,
+    )
+    return cleaned, quality
+
+
+def _manual_prompt_points(image_width: int, image_height: int):
+    positive_point = [image_width // 2, image_height // 2]
+    margin_x = min(image_width - 1, max(1, int(image_width * 0.06)))
+    margin_y = min(image_height - 1, max(1, int(image_height * 0.06)))
+    negative_points = [
+        [margin_x, margin_y],
+        [image_width - margin_x - 1, margin_y],
+        [margin_x, image_height - margin_y - 1],
+        [image_width - margin_x - 1, image_height - margin_y - 1],
+    ]
+    return positive_point, negative_points
+
+
+def _manual_masks_from_results(results):
+    if not results or results[0].masks is None:
+        return []
+    return results[0].masks.data.cpu().numpy()
+
+
+def segment_manual_product_outline(image_path: str):
+    image = cv2.imread(image_path)
+    if image is None:
+        raise RuntimeError("Source image could not be read")
+    image_height, image_width = image.shape[:2]
+    positive_point, negative_points = _manual_prompt_points(image_width, image_height)
+    all_points = [positive_point, *negative_points]
+    best_mask = None
+    best_quality = 0.0
+
+    prompt_attempts = (
+        {"points": all_points, "labels": [1, 0, 0, 0, 0]},
+        {"points": [positive_point], "labels": [1]},
+        {
+            "bboxes": [
+                int(image_width * 0.08),
+                int(image_height * 0.08),
+                int(image_width * 0.92),
+                int(image_height * 0.92),
+            ],
+        },
+    )
+    for prompts in prompt_attempts:
+        with _SAM_LOCK:
+            results = get_segmentation_model()(
+                image_path,
+                verbose=False,
+                **prompts,
+            )
+        for raw_mask in _manual_masks_from_results(results):
+            cleaned, quality = _prompted_mask_candidate(
+                raw_mask,
+                (image_height, image_width),
+                positive_point,
+                negative_points,
+            )
+            if cleaned is not None and quality > best_quality:
+                best_mask = cleaned
+                best_quality = quality
+        if best_mask is not None and best_quality >= 0.58:
+            return image, best_mask, best_quality
+
+    if best_mask is None or best_quality < 0.35:
+        raise RuntimeError("No reliable product mask was produced")
+    return image, best_mask, best_quality
+
+
 def segment_product_outline(image_path: str, initial_box, detection_confidence: float = 1.0):
     image = cv2.imread(image_path)
     if image is None:
@@ -198,7 +296,7 @@ def segment_product_outline(image_path: str, initial_box, detection_confidence: 
     return image, best_mask, best_quality
 
 
-def save_stylized_outline(item_id: int, mask: np.ndarray):
+def save_stylized_outline(item_id: int, mask: np.ndarray, revision: str | None = None):
     points = cv2.findNonZero(mask)
     if points is None:
         raise RuntimeError("Product mask is empty")
@@ -225,7 +323,8 @@ def save_stylized_outline(item_id: int, mask: np.ndarray):
     outline[stripe_pixels] = (255, 255, 255, 225)
     contours, _ = cv2.findContours(cropped_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(outline, contours, -1, (39, 31, 17, 255), max(3, int(max(width, height) * 0.014)))
-    output_path = os.path.join(OUTLINE_DIR, f"item_{item_id}.png")
+    revision = revision or uuid.uuid4().hex
+    output_path = os.path.join(OUTLINE_DIR, f"item_{item_id}_{revision}.png")
     if not cv2.imwrite(output_path, outline):
         raise RuntimeError("Could not save product outline")
     return output_path
@@ -234,6 +333,12 @@ def save_stylized_outline(item_id: int, mask: np.ndarray):
 def store_outline_record(item_id: int, path: str, quality: float, source_detection_id=None):
     with get_conn() as conn:
         with conn.cursor() as cur:
+            cur.execute("SELECT id FROM items WHERE id = %s FOR UPDATE;", (item_id,))
+            cur.execute(
+                "SELECT image_path FROM representative_outlines WHERE item_id = %s FOR UPDATE;",
+                (item_id,),
+            )
+            stored = cur.fetchone()
             cur.execute(
                 """
                 INSERT INTO representative_outlines(
@@ -250,6 +355,44 @@ def store_outline_record(item_id: int, path: str, quality: float, source_detecti
                 (item_id, path, quality, source_detection_id),
             )
             conn.commit()
+    return stored[0] if stored else None
+
+
+def _remove_superseded_outline(item_id: int, path: str | None):
+    if not path:
+        return
+    absolute_outline_dir = os.path.abspath(OUTLINE_DIR)
+    absolute_path = os.path.abspath(path)
+    try:
+        outside_outline_dir = (
+            os.path.commonpath((absolute_outline_dir, absolute_path)) != absolute_outline_dir
+        )
+    except ValueError:
+        return
+    if outside_outline_dir or not os.path.basename(absolute_path).startswith(f"item_{item_id}"):
+        return
+    try:
+        os.remove(absolute_path)
+    except OSError:
+        pass
+
+
+def save_and_store_outline(item_id, mask, quality, source_detection_id=None):
+    revision = uuid.uuid4().hex
+    output_path = save_stylized_outline(item_id, mask, revision)
+    try:
+        previous_path = store_outline_record(
+            item_id,
+            output_path,
+            quality,
+            source_detection_id,
+        )
+    except Exception:
+        _remove_superseded_outline(item_id, output_path)
+        raise
+    if previous_path != output_path:
+        _remove_superseded_outline(item_id, previous_path)
+    return output_path, revision
 
 
 def ensure_item_outline(item_id: int):
@@ -294,8 +437,7 @@ def ensure_item_outline(item_id: int):
             continue
     if best is None:
         raise RuntimeError("No suitable scan was available for a product outline")
-    output_path = save_stylized_outline(item_id, best[1])
-    store_outline_record(item_id, output_path, best[0], best[2])
+    output_path, _revision = save_and_store_outline(item_id, best[1], best[0], best[2])
     return output_path
 
 
@@ -413,12 +555,20 @@ def get_item_representative_image(item_id: int, generate: bool = True):
                 stored = cur.fetchone()
         if not stored or stored["style_version"] < 2 or not os.path.exists(stored["image_path"]):
             raise HTTPException(status_code=404, detail="No stored product outline")
-        return FileResponse(stored["image_path"], media_type="image/png")
+        return FileResponse(
+            stored["image_path"],
+            media_type="image/png",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
+        )
     try:
         outline_path = ensure_item_outline(item_id)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    return FileResponse(outline_path, media_type="image/png")
+    return FileResponse(
+        outline_path,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
+    )
 
 
 def start_outline_preparation():
@@ -488,17 +638,9 @@ async def upload_item_representative_image(item_id: int, file: UploadFile = File
     image = cv2.imread(source_path)
     if image is None:
         raise HTTPException(status_code=400, detail="The uploaded image could not be read")
-    height, width = image.shape[:2]
-    prompt_box = [
-        int(width * 0.03),
-        int(height * 0.03),
-        int(width * 0.97),
-        int(height * 0.97),
-    ]
     try:
-        _, mask, quality = segment_product_outline(source_path, prompt_box, 1.0)
-        outline_path = save_stylized_outline(item_id, mask)
-        store_outline_record(item_id, outline_path, quality, None)
+        _, mask, quality = segment_manual_product_outline(source_path)
+        _outline_path, revision = save_and_store_outline(item_id, mask, quality, None)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Could not isolate the product: {exc}")
-    return {"ok": True, "quality_score": quality}
+    return {"ok": True, "quality_score": quality, "outline_revision": revision}

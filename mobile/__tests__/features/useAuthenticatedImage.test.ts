@@ -44,6 +44,7 @@ describe("useAuthenticatedImage", () => {
     await waitFor(() => expect(result.current.resolvedUri).toBe("blob:protected"));
     await act(() => result.current.onLoad());
     expect(result.current.status).toBe("LOADED");
+    expect(result.current.loadedSourceUri).toBe("http://api.test/scans/1/image");
     await unmount();
     expect(release).toHaveBeenCalledTimes(1);
   });

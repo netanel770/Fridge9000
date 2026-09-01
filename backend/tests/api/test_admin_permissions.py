@@ -69,6 +69,7 @@ def _make_admin(db_connection, user_id, *, active=True):
             {"action": "quarantine"},
         ),
         ("post", "/outlines/prepare", None),
+        ("post", "/items/999999/representative-image", None),
         ("get", "/outlines/jobs/unknown", None),
     ],
 )

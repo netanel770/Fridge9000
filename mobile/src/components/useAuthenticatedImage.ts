@@ -9,6 +9,7 @@ export function useAuthenticatedImage(imageUri: string) {
   const [attempt, setAttempt] = useState(0);
   const [resolvedUri, setResolvedUri] = useState<string | null>(protectedImage ? null : imageUri);
   const [status, setStatus] = useState<AuthenticatedImageStatus>("LOADING");
+  const [loadedSourceUri, setLoadedSourceUri] = useState<string | null>(null);
   const statusRef = useRef(status);
   statusRef.current = status;
 
@@ -22,6 +23,7 @@ export function useAuthenticatedImage(imageUri: string) {
     let active = true;
     let loaded: LoadedProtectedImage | null = null;
     setStatus("LOADING");
+    setLoadedSourceUri(null);
     if (!protectedImage) {
       setResolvedUri(imageUri);
       return () => { active = false; };
@@ -49,10 +51,15 @@ export function useAuthenticatedImage(imageUri: string) {
   return {
     resolvedUri,
     status,
+    loadedSourceUri,
     retry,
-    onLoad: () => setStatus("LOADED"),
+    onLoad: () => {
+      setLoadedSourceUri(imageUri);
+      setStatus("LOADED");
+    },
     onError: () => {
       setResolvedUri(null);
+      setLoadedSourceUri(null);
       setStatus("ERROR");
     },
     protected: protectedImage,

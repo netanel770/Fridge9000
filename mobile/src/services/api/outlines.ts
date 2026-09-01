@@ -20,7 +20,7 @@ export async function uploadProductRepresentativeImage(
     "image/jpeg",
   );
 
-  return requestJson<{ ok: boolean; quality_score: number }>(
+  return requestJson<{ ok: boolean; quality_score: number; outline_revision: string }>(
     `/items/${itemId}/representative-image`,
     {
       method: "POST",

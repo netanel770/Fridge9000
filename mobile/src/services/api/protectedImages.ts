@@ -52,7 +52,7 @@ async function loadNativeImage(uri: string): Promise<LoadedProtectedImage> {
 }
 
 async function loadWebImage(uri: string): Promise<LoadedProtectedImage> {
-  const response = await requestApiResponse(apiPath(uri));
+  const response = await requestApiResponse(apiPath(uri), { cache: "no-store" });
   if (!response.ok) throw new ApiError(`Image request failed (${response.status})`, response.status);
   const objectUri = URL.createObjectURL(await response.blob());
   return {
